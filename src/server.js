@@ -2,6 +2,9 @@
 const http = require('http');
 const { discoverPort, verifyPort } = require('./discovery');
 const { mapModel, anthropicToOpenAI, openAIToAnthropic, mapFinishReason } = require('./anthropic');
+const { googleToOpenAI, openAIToGoogle, translateStreamToGoogle } = require('./google');
+const { responsesToOpenAI, openAIToResponse, translateStreamToResponses } = require('./responses');
+const { resolveMaxTokens } = require('./budget');
 
 const PROXY_PORT = parseInt(process.env.DUMATE2API_PORT || '9080', 10);
 const PROXY_HOST = process.env.DUMATE2API_HOST || '127.0.0.1';
@@ -36,12 +39,22 @@ async function ensureUpstream() {
 }
 
 // Forward request to DuMate upstream
+//
+// callback 只允许被调用一次：上游 socket 出错（含客户端主动 destroy）时
+// Node 会同时触发 error 与后续事件，重复调用会让响应被写两次、
+// 客户端永久挂在半开的流上（表现为「输出突然停止」）。
+const UPSTREAM_TIMEOUT_MS = parseInt(process.env.DUMATE_UPSTREAM_TIMEOUT_MS || '600000', 10);
+
 function forwardToUpstream(port, path, method, headers, body, callback) {
+  let settled = false;
+  const once = (arg) => { if (!settled) { settled = true; callback(arg); } };
+
   const options = {
     host: '127.0.0.1',
     port: port,
     path: `/api/qianfanproxy/v1${path}`,
     method: method,
+    timeout: UPSTREAM_TIMEOUT_MS,
     headers: {
       'Content-Type': 'application/json',
       'Authorization': 'Bearer nokey',
@@ -49,15 +62,24 @@ function forwardToUpstream(port, path, method, headers, body, callback) {
     }
   };
 
-  const req = http.request(options, callback);
+  const req = http.request(options, (upstreamRes) => {
+    // 上游响应中途断开时，把中断交给下游 handler 收尾（各 handler 都监听了
+    // 'error' 或 'end'）。这里不能吞掉，否则客户端会挂在半开的流上。
+    upstreamRes.on('error', () => {});
+    once(upstreamRes);
+  });
+
   req.on('error', (err) => {
-    callback({
+    once({
       fakeResponse: true,
       statusCode: 502,
       headers: { 'Content-Type': 'application/json' },
-      write: (data) => {},
+      write: () => {},
       end: () => {}
     });
+  });
+  req.on('timeout', () => {
+    req.destroy(new Error('upstream timeout after ' + UPSTREAM_TIMEOUT_MS + 'ms'));
   });
   if (body) req.write(body);
   req.end();
@@ -70,6 +92,18 @@ function readBody(req) {
     req.on('data', (c) => chunks.push(c));
     req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
   });
+}
+
+// 收全上游响应体后回调一次。end / aborted / error 三路都以同一入口收尾，
+// 避免上游中途断开时下游永远等不到回调（「输出停止」类故障的根因之一）。
+function collectAndFinish(upstreamRes, onComplete) {
+  let data = '';
+  let done = false;
+  const finish = () => { if (!done) { done = true; onComplete(data); } };
+  upstreamRes.on('data', (c) => data += c);
+  upstreamRes.on('end', finish);
+  upstreamRes.on('aborted', finish);
+  upstreamRes.on('error', finish);
 }
 
 function sendJSON(res, statusCode, data) {
@@ -110,14 +144,10 @@ async function handleOpenAIChat(req, res) {
   // Map model name
   reqBody.model = mapModel(reqBody.model);
 
-  // GLM bills reasoning tokens against the same max_tokens budget as the
-  // answer. A small client-side limit gets fully consumed by the chain of
-  // thought and the body returns empty. Raise the floor so there is room.
-  const MIN_BUDGET = parseInt(process.env.DUMATE_MIN_MAX_TOKENS || '4096', 10);
-  const requested = Number(reqBody.max_tokens);
-  if (!Number.isFinite(requested) || requested < MIN_BUDGET) {
-    reqBody.max_tokens = MIN_BUDGET;
-  }
+  // 预算统一由 budget.js 判定：glm 的 reasoning 与正文共用一个 max_tokens
+  // 预算，小预算会让正文被 reasoning 吃光（实测 max_tokens<=1024 时正文为空，
+  // finish_reason=length）。
+  reqBody.max_tokens = resolveMaxTokens(reqBody.max_tokens);
 
   const port = await ensureUpstream();
   const outBody = JSON.stringify(reqBody);
@@ -135,18 +165,28 @@ async function handleOpenAIChat(req, res) {
         'Connection': 'keep-alive',
         'Access-Control-Allow-Origin': '*',
       });
+      // 上游中途断开时必须主动收尾，否则客户端挂在半开的流上
+      // （表现为「输出写到一半就停住，一直不返回」）。
+      upstreamRes.on('aborted', () => res.end());
+      upstreamRes.on('error', () => res.end());
       upstreamRes.pipe(res);
     } else {
       // Pass-through non-streaming
       let data = '';
-      upstreamRes.on('data', (c) => data += c);
-      upstreamRes.on('end', () => {
+      let done = false;
+      const finish = () => {
+        if (done) return;
+        done = true;
         res.writeHead(upstreamRes.statusCode, {
           'Content-Type': 'application/json',
           'Access-Control-Allow-Origin': '*',
         });
         res.end(data);
-      });
+      };
+      upstreamRes.on('data', (c) => data += c);
+      upstreamRes.on('end', finish);
+      upstreamRes.on('aborted', finish);
+      upstreamRes.on('error', finish);
     }
   });
 }
@@ -183,6 +223,109 @@ async function handleAnthropicCountTokens(req, res) {
   return sendJSON(res, 200, { type: 'count_tokens_result', input_tokens: total });
 }
 
+// ==================== Google Generative Language (v1beta) Compatible Endpoints ====================
+
+async function handleGoogleModels(req, res) {
+  sendJSON(res, 200, {
+    models: [
+      { name: 'models/glm-5', displayName: 'GLM-5', supportedGenerationMethods: ['generateContent', 'streamGenerateContent'] },
+      { name: 'models/model-text', displayName: 'DuMate text', supportedGenerationMethods: ['generateContent', 'streamGenerateContent'] },
+      { name: 'models/claude-3-5-sonnet-20241022', displayName: 'Claude 3.5 Sonnet (proxy)', supportedGenerationMethods: ['generateContent', 'streamGenerateContent'] },
+      { name: 'models/gpt-4o', displayName: 'GPT-4o (proxy)', supportedGenerationMethods: ['generateContent', 'streamGenerateContent'] },
+    ],
+  });
+}
+
+async function handleGoogleGenerateContent(req, res, isStream) {
+  const bodyStr = await readBody(req);
+  let googleReq;
+  try {
+    googleReq = JSON.parse(bodyStr);
+  } catch (e) {
+    return sendJSON(res, 400, { error: { code: 400, message: 'Invalid JSON body', status: 'INVALID_ARGUMENT' } });
+  }
+
+  googleReq.stream = isStream;
+  const openaiReq = googleToOpenAI(googleReq);
+
+  const port = await ensureUpstream();
+  const outBody = JSON.stringify(openaiReq);
+  forwardToUpstream(port, '/chat/completions', 'POST', {}, outBody, (upstreamRes) => {
+    if (upstreamRes.fakeResponse) {
+      return sendJSON(res, 502, { error: { code: 502, message: 'DuMate upstream unavailable', status: 'UNAVAILABLE' } });
+    }
+
+    if (isStream) {
+      // Google streaming supports both ?alt=sse and bare streamGenerateContent.
+      translateStreamToGoogle(upstreamRes, res, googleReq.model);
+    } else {
+      let data = '';
+      let done = false;
+      const finish = () => {
+        if (done) return;
+        done = true;
+        try {
+          const openaiResp = JSON.parse(data);
+          res.writeHead(200, {
+            'Content-Type': 'application/json',
+            'Access-Control-Allow-Origin': '*',
+          });
+          res.end(JSON.stringify(openAIToGoogle(openaiResp, googleReq.model)));
+        } catch (e) {
+          sendJSON(res, 502, { error: { code: 502, message: 'Upstream parse error: ' + data.substring(0, 200), status: 'INTERNAL' } });
+        }
+      };
+      upstreamRes.on('data', (c) => data += c);
+      upstreamRes.on('end', finish);
+      upstreamRes.on('aborted', finish);
+      upstreamRes.on('error', finish);
+    }
+  });
+}
+
+// ==================== OpenAI Responses API (Codex CLI) ====================
+
+async function handleOpenAIResponses(req, res) {
+  const bodyStr = await readBody(req);
+  let reqBody;
+  try {
+    reqBody = JSON.parse(bodyStr);
+  } catch (e) {
+    return sendJSON(res, 400, { error: { message: 'Invalid JSON body', type: 'invalid_request_error' } });
+  }
+
+  const isStream = reqBody.stream !== false; // Codex 默认流式
+  const openaiReq = responsesToOpenAI(reqBody, isStream);
+
+  const port = await ensureUpstream();
+  const outBody = JSON.stringify(openaiReq);
+  forwardToUpstream(port, '/chat/completions', 'POST', {}, outBody, (upstreamRes) => {
+    if (upstreamRes.fakeResponse) {
+      return sendJSON(res, 502, { error: { message: 'DuMate upstream unavailable', type: 'api_error' } });
+    }
+    if (!upstreamRes.statusCode || upstreamRes.statusCode >= 400) {
+      return collectAndFinish(upstreamRes, (data) => {
+        sendJSON(res, upstreamRes.statusCode || 502, {
+          error: { message: 'Upstream error: ' + data.substring(0, 300), type: 'api_error' },
+        });
+      });
+    }
+
+    if (isStream) {
+      translateStreamToResponses(upstreamRes, res, reqBody.model);
+    } else {
+      collectAndFinish(upstreamRes, (data) => {
+        try {
+          const openaiResp = JSON.parse(data);
+          sendJSON(res, 200, openAIToResponse(openaiResp, reqBody.model));
+        } catch (e) {
+          sendJSON(res, 502, { error: { message: 'Upstream parse error: ' + data.substring(0, 200), type: 'api_error' } });
+        }
+      });
+    }
+  });
+}
+
 // ==================== Anthropic Compatible Endpoints ====================
 
 async function handleAnthropicMessages(req, res) {
@@ -212,9 +355,7 @@ async function handleAnthropicMessages(req, res) {
       translateStreamToAnthropic(upstreamRes, res, anthropicReq.model);
     } else {
       // Non-streaming: collect and translate
-      let data = '';
-      upstreamRes.on('data', (c) => data += c);
-      upstreamRes.on('end', () => {
+      collectAndFinish(upstreamRes, (data) => {
         try {
           const openaiResp = JSON.parse(data);
           const anthropicResp = openAIToAnthropic(openaiResp, anthropicReq.model);
@@ -410,6 +551,21 @@ const server = http.createServer(async (req, res) => {
     // Chat completions (OpenAI format, pass-through with model mapping)
     if (url === '/v1/chat/completions' && req.method === 'POST') {
       return handleOpenAIChat(req, res);
+    }
+
+    // Responses API (Codex CLI 0.155+ 只认 wire_api="responses")
+    if ((url === '/v1/responses' || url === '/responses') && req.method === 'POST') {
+      return handleOpenAIResponses(req, res);
+    }
+
+    // ==================== Google Generative Language compatible ====================
+    const googleModels = url.match(/^\/v1beta\/models$/);
+    const googleGenerate = url.match(/^\/v1beta\/models\/([^:/?]+):(generateContent|streamGenerateContent)$/);
+    if (googleModels && req.method === 'GET') {
+      return handleGoogleModels(req, res);
+    }
+    if (googleGenerate && req.method === 'POST') {
+      return handleGoogleGenerateContent(req, res, googleGenerate[2] === 'streamGenerateContent');
     }
 
     // ==================== Anthropic compatible ====================
