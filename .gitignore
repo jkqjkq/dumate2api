@@ -1,0 +1,24 @@
+﻿# --- runtime / generated ---
+log/
+desktop-main/*.db
+desktop-main/*.db-shm
+desktop-main/*.db-wal
+scheduler/executions.jsonl
+*.log
+*.err
+
+# --- historical debug artifacts ---
+test/_archive/
+
+# --- disabled / temp copies ---
+.plugins_disabled/
+.plugins_tmp/
+.skills_disabled/
+.skills_tmp/
+
+# --- deps ---
+node_modules/
+
+# --- OS ---
+Thumbs.db
+.DS_Store
