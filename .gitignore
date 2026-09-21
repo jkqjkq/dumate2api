@@ -1,4 +1,14 @@
-﻿# --- runtime / generated ---
+﻿# --- DuMate ecosystem runtime assets (56M / 22M, shipped by the client) ---
+skills/
+plugins/
+
+# --- admin runtime state ---
+data/
+
+# --- web build artifacts ---
+web/dist/
+
+# --- runtime / generated ---
 log/
 desktop-main/*.db
 desktop-main/*.db-shm
