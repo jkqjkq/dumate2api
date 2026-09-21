@@ -13,7 +13,7 @@
           <a-input-password v-model:value="form.password" size="large" placeholder="初始密码见启动日志" />
         </a-form-item>
         <a-alert v-if="error" :message="error" type="error" show-icon class="mb-4" />
-        <a-button type="primary" html-type="submit" size="large" block :loading="loading">
+        <a-button type="primary" html-type="submit" size="large" block :loading="loading" @click="onSubmit">
           登录
         </a-button>
       </a-form>
@@ -32,6 +32,9 @@ const loading = ref(false)
 const error = ref('')
 
 async function onSubmit() {
+  // 按钮 click 与表单 finish 两条路都会进这里，重复提交会白白消耗一次
+  // 失败计数（5 次就锁定）
+  if (loading.value) return
   loading.value = true
   error.value = ''
   try {
