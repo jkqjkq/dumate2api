@@ -32,6 +32,8 @@ export interface Account {
   state: 'active' | 'stale' | 'unknown'
   has_credentials: boolean
   active: boolean
+  points: { left: number; total: number; used: number } | null
+  points_note: string
 }
 
 export interface AccountsData {

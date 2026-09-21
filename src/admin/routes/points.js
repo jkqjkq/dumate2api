@@ -143,15 +143,38 @@ const routes = [
   {
     method: 'GET',
     path: '/accounts',
-    handler: ({ res }) => {
+    handler: async ({ res }) => {
       const accounts = listAccounts();
       if (accounts === null) return sendJSON(res, 502, { error: 'auth.json not readable' });
+
+      // 积分只能查到「当前登录的那个账号」：上游的 quota_overview 是按后端
+      // 进程内注入的登录态算的，实测传任意 Cookie 头都不影响返回值，
+      // 也没有 userId 参数。所以这里只给活跃账号挂积分，其余如实标为不可查，
+      // 不拿活跃账号的数字去填别人。
+      let activePoints = null;
+      let pointsError = null;
+      try {
+        const out = await fetchPoints();
+        if (out.ok) activePoints = { left: out.data.left, total: out.data.total, used: out.data.used };
+        else pointsError = out.error;
+      } catch (e) {
+        pointsError = e.message;
+      }
+
+      const withPoints = accounts.map((a) => ({
+        ...a,
+        points: a.active ? activePoints : null,
+        points_note: a.active
+          ? (activePoints ? '' : (pointsError || '积分查询失败'))
+          : '仅当前登录账号可查',
+      }));
+
       return sendJSON(res, 200, {
-        accounts,
-        total: accounts.length,
-        active: accounts.filter((a) => a.state === 'active').length,
-        stale: accounts.filter((a) => a.state === 'stale').length,
-        unknown: accounts.filter((a) => a.state === 'unknown').length,
+        accounts: withPoints,
+        total: withPoints.length,
+        active: withPoints.filter((a) => a.state === 'active').length,
+        stale: withPoints.filter((a) => a.state === 'stale').length,
+        unknown: withPoints.filter((a) => a.state === 'unknown').length,
       });
     },
   },

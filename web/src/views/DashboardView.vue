@@ -194,6 +194,15 @@
                 <a-tag :color="stateColor(record.state)">{{ stateText(record.state) }}</a-tag>
                 <a-tag v-if="record.active" color="blue">当前</a-tag>
               </template>
+              <template v-else-if="column.key === 'points'">
+                <template v-if="record.points">
+                  <span class="font-medium">{{ fmt(record.points.left) }}</span>
+                  <span class="text-slate-400 text-xs ml-1">/ {{ fmt(record.points.total) }}</span>
+                </template>
+                <a-tooltip v-else :title="record.points_note">
+                  <span class="text-slate-400 text-xs">{{ record.points_note }}</span>
+                </a-tooltip>
+              </template>
               <template v-else-if="column.key === 'last'">
                 {{ record.last_login ? dateText(record.last_login) : '—' }}
                 <span v-if="record.age_days !== null" class="text-slate-400 text-xs ml-1">
@@ -203,7 +212,8 @@
             </template>
           </a-table>
           <div class="text-xs text-slate-400 mt-2">
-            上游不提供登录态过期时间，此处按凭证存在性与最后登录时间推断
+            上游积分接口只按当前登录账号计算，切换账号后需重启后端才能查另一个账号的积分；
+            登录态过期时间上游未提供，按凭证存在性与最后登录时间推断
           </div>
         </a-card>
       </a-col>
@@ -317,6 +327,7 @@ const expiringColumns = [
 const accountColumns = [
   { title: '账号', key: 'name', dataIndex: 'name' },
   { title: '状态', key: 'state' },
+  { title: '积分', key: 'points' },
   { title: '最后登录', key: 'last' },
 ]
 
