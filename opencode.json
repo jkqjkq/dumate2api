@@ -1,0 +1,9 @@
+{
+  "skills": {
+    "paths": [
+      "<repo>\\skills",
+      "<repo>\\skills\\official",
+      "<repo>\\skills\\user"
+    ]
+  }
+}
