@@ -13,10 +13,26 @@ function mount(prefix, table) {
   }
 }
 
+// 把注册的路径模式锚定到整串：不锚定的话 `/models/map` 会匹配
+// `/models/map/reset`（子串命中），于是更具体的路由永远走不到，
+// 请求被前一条带着空 body 处理掉。`:name` 段允许带参数。
+function anchor(pattern) {
+  if (pattern.startsWith('^')) return pattern;
+  const escaped = pattern
+    .split('/')
+    .map((seg) => {
+      if (seg.startsWith(':')) return `([^/]+)`;
+      if (seg.startsWith('*')) return `(.*)`;
+      return seg.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    })
+    .join('/');
+  return `^${escaped}/?$`;
+}
+
 function find(method, pathname) {
   for (const r of routes) {
     if (r.method !== method) continue;
-    const m = pathname.match(r.pattern);
+    const m = pathname.match(anchor(r.pattern));
     if (m) return { route: r, params: m.slice(1).map(decodeURIComponent) };
   }
   return null;
