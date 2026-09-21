@@ -5,6 +5,7 @@ const { mapModel, anthropicToOpenAI, openAIToAnthropic, mapFinishReason } = requ
 const { googleToOpenAI, openAIToGoogle, translateStreamToGoogle } = require('./google');
 const { responsesToOpenAI, openAIToResponse, translateStreamToResponses } = require('./responses');
 const { resolveMaxTokens } = require('./budget');
+const reqlog = require('./reqlog');
 
 const PROXY_PORT = parseInt(process.env.DUMATE2API_PORT || '9080', 10);
 const PROXY_HOST = process.env.DUMATE2API_HOST || '127.0.0.1';
@@ -116,6 +117,29 @@ function sendJSON(res, statusCode, data) {
   res.end(body);
 }
 
+// 埋点辅助：把一次请求的结局写进 requests.jsonl。
+// 用 res 上的标记保证同一次请求只记一行——流式路径会同时挂 end/error/aborted
+// 三个收尾点，不挡一下就会记出重复条目。
+function logRequest(req, res, startedAt, info, status, usage, extra) {
+  if (res._logged) return;
+  res._logged = true;
+  const u = usage || { input: 0, output: 0, total: 0 };
+  reqlog.record({
+    ts: Date.now(),
+    ms: Date.now() - startedAt,
+    path: req._logPath || '',
+    model: info.model || '',
+    stream: !!info.stream,
+    messages: info.messages || 0,
+    status: status || 0,
+    input_tokens: u.input || 0,
+    output_tokens: u.output || 0,
+    total_tokens: u.total || 0,
+    ip: reqlog.clientIP(req),
+    ...(extra || {}),
+  });
+}
+
 // ==================== OpenAI Compatible Endpoints ====================
 
 async function handleOpenAIModels(req, res) {
@@ -133,6 +157,7 @@ async function handleOpenAIModels(req, res) {
 }
 
 async function handleOpenAIChat(req, res) {
+  const startedAt = Date.now();
   const bodyStr = await readBody(req);
   let reqBody;
   try {
@@ -140,6 +165,9 @@ async function handleOpenAIChat(req, res) {
   } catch (e) {
     return sendJSON(res, 400, { error: { message: 'Invalid JSON body', type: 'invalid_request_error' } });
   }
+
+  const info = reqlog.describeRequest(reqBody);
+  req._logPath = '/v1/chat/completions';
 
   // Map model name
   reqBody.model = mapModel(reqBody.model);
@@ -154,6 +182,7 @@ async function handleOpenAIChat(req, res) {
 
   const upstreamReq = forwardToUpstream(port, '/chat/completions', 'POST', {}, outBody, (upstreamRes) => {
     if (upstreamRes.fakeResponse) {
+      logRequest(req, res, startedAt, info, 502, null, { error: 'upstream_unavailable' });
       return sendJSON(res, 502, { error: { message: 'DuMate upstream unavailable', type: 'api_error' } });
     }
 
@@ -167,8 +196,18 @@ async function handleOpenAIChat(req, res) {
       });
       // 上游中途断开时必须主动收尾，否则客户端挂在半开的流上
       // （表现为「输出写到一半就停住，一直不返回」）。
-      upstreamRes.on('aborted', () => res.end());
-      upstreamRes.on('error', () => res.end());
+      // 同时顺路扫一遍 SSE 取真实 usage：流式响应没有单一 usage 字段。
+      let seen = '';
+      upstreamRes.on('data', (c) => { if (seen.length < 200000) seen += c.toString('utf8'); });
+      const finishStream = () => {
+        logRequest(req, res, startedAt, info, upstreamRes.statusCode, reqlog.usageFromSSE(seen));
+        res.end();
+      };
+      upstreamRes.on('aborted', finishStream);
+      upstreamRes.on('error', finishStream);
+      upstreamRes.on('end', () => {
+        logRequest(req, res, startedAt, info, upstreamRes.statusCode, reqlog.usageFromSSE(seen));
+      });
       upstreamRes.pipe(res);
     } else {
       // Pass-through non-streaming
@@ -177,6 +216,12 @@ async function handleOpenAIChat(req, res) {
       const finish = () => {
         if (done) return;
         done = true;
+        let usage = null;
+        try {
+          const j = JSON.parse(data);
+          usage = reqlog.pickUsage(j.usage);
+        } catch (e) { /* 非 JSON 就按 0 记 */ }
+        logRequest(req, res, startedAt, info, upstreamRes.statusCode, usage);
         res.writeHead(upstreamRes.statusCode, {
           'Content-Type': 'application/json',
           'Access-Control-Allow-Origin': '*',
@@ -329,6 +374,7 @@ async function handleOpenAIResponses(req, res) {
 // ==================== Anthropic Compatible Endpoints ====================
 
 async function handleAnthropicMessages(req, res) {
+  const startedAt = Date.now();
   const bodyStr = await readBody(req);
   let anthropicReq;
   try {
@@ -336,6 +382,9 @@ async function handleAnthropicMessages(req, res) {
   } catch (e) {
     return sendJSON(res, 400, { type: 'error', error: { type: 'invalid_request_error', message: 'Invalid JSON body' } });
   }
+
+  const info = reqlog.describeRequest(anthropicReq);
+  req._logPath = '/v1/messages';
 
   // Convert to OpenAI format
   const openaiReq = anthropicToOpenAI(anthropicReq);
@@ -347,18 +396,22 @@ async function handleAnthropicMessages(req, res) {
 
   forwardToUpstream(port, '/chat/completions', 'POST', {}, outBody, (upstreamRes) => {
     if (upstreamRes.fakeResponse) {
+      logRequest(req, res, startedAt, info, 502, null, { error: 'upstream_unavailable' });
       return sendJSON(res, 502, { type: 'error', error: { type: 'api_error', message: 'DuMate upstream unavailable' } });
     }
 
     if (anthropicReq.stream) {
       // Translate OpenAI SSE stream to Anthropic SSE events
-      translateStreamToAnthropic(upstreamRes, res, anthropicReq.model);
+      translateStreamToAnthropic(upstreamRes, res, anthropicReq.model, (usage, status) => {
+        logRequest(req, res, startedAt, info, status, usage);
+      });
     } else {
       // Non-streaming: collect and translate
       collectAndFinish(upstreamRes, (data) => {
         try {
           const openaiResp = JSON.parse(data);
           const anthropicResp = openAIToAnthropic(openaiResp, anthropicReq.model);
+          logRequest(req, res, startedAt, info, upstreamRes.statusCode, reqlog.pickUsage(openaiResp.usage));
           sendJSON(res, 200, anthropicResp);
         } catch (e) {
           sendJSON(res, 502, { type: 'error', error: { type: 'api_error', message: 'Upstream parse error: ' + data.substring(0, 200) } });
@@ -369,7 +422,13 @@ async function handleAnthropicMessages(req, res) {
 }
 
 // Translate OpenAI SSE stream to Anthropic SSE stream
-function translateStreamToAnthropic(upstreamRes, res, originalModel) {
+function translateStreamToAnthropic(upstreamRes, res, originalModel, onDone) {
+  let finished = false;
+  const finish = (status) => {
+    if (finished) return;
+    finished = true;
+    if (onDone) onDone({ input: inputTokens, output: outputTokens, total: inputTokens + outputTokens }, status);
+  };
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
     'Cache-Control': 'no-cache',
@@ -502,6 +561,7 @@ function translateStreamToAnthropic(upstreamRes, res, originalModel) {
       usage: { input_tokens: inputTokens, output_tokens: outputTokens }
     });
     sendEvent('message_stop', { type: 'message_stop' });
+    finish(200);
     res.end();
   });
 
@@ -512,6 +572,7 @@ function translateStreamToAnthropic(upstreamRes, res, originalModel) {
       usage: { input_tokens: inputTokens, output_tokens: outputTokens }
     });
     sendEvent('message_stop', { type: 'message_stop' });
+    finish(502);
     res.end();
   });
 }
