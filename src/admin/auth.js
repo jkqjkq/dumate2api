@@ -133,8 +133,9 @@ function saveUsers(data) {
 // 初始密码只在首次启动打印一次，日志被清掉或 data/ 被搬走后就再也拿不回来，
 // 而 bootstrap 看到已有用户不会再生成——管理员会被永久锁在自己门外。
 // 这个开关是唯一的本地补救路径，只在显式传入时执行。
-function resetAdminPassword() {
-  const pwd = crypto.randomBytes(9).toString('base64url');
+// 允许指定密码：随机串要靠手抄，11 位里错一个字符就白跑一轮。
+function resetAdminPassword(plain) {
+  const pwd = plain || crypto.randomBytes(9).toString('base64url');
   const data = users() || {};
   data.admin = {
     username: 'admin',

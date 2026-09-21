@@ -114,7 +114,14 @@ function start() {
   log('dumate2api admin starting...');
 
   if (process.argv.includes('--reset-admin')) {
-    const pwd = auth.resetAdminPassword();
+    // 支持 --password=xxx：默认随机串要手抄，输错一个字符就白跑一轮
+    const arg = process.argv.find((a) => a.startsWith('--password='));
+    const plain = arg ? arg.slice('--password='.length) : null;
+    if (plain !== null && plain.length < 6) {
+      log('  ✗ 密码至少 6 位，未做修改');
+      process.exit(1);
+    }
+    const pwd = auth.resetAdminPassword(plain);
     log('');
     log('  管理员密码已重设');
     log(`    用户名: admin`);
