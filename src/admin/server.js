@@ -14,6 +14,7 @@ const { routes: systemRoutes } = require('./routes/system');
 const { routes: pointsRoutes } = require('./routes/points');
 const { routes: statsRoutes } = require('./routes/stats');
 const { routes: modelsRoutes } = require('./routes/models');
+const { routes: keysRoutes } = require('./routes/keys');
 
 const PORT = parseInt(process.env.DUMATE_ADMIN_PORT || '9081', 10);
 const HOST = process.env.DUMATE_ADMIN_HOST || '127.0.0.1';
@@ -86,6 +87,7 @@ router.mount(PREFIX + '/system', systemRoutes);
 router.mount(PREFIX + '/points', pointsRoutes);
 router.mount(PREFIX + '/stats', statsRoutes);
 router.mount(PREFIX + '/models', modelsRoutes);
+router.mount(PREFIX + '/keys', keysRoutes);
 
 const server = http.createServer((req, res) => {
   // CORS preflight：开发期 Vite(5173) 直连本端口，生产期同源不需要，留着无害
