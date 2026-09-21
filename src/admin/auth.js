@@ -6,7 +6,11 @@ const { readJSON, writeJSON, appendJSONL } = require('./store');
 const USERS_FILE = 'admin-users.json';
 const SECRET_FILE = 'admin.secret';
 
-const ITERATIONS = 260000;
+// N 必须是 2 的幂（Node 的 scrypt 校验参数时会直接抛 RangeError），
+// 262144 = 2^18 是常用的强度档，等价于参考实现那个量级的迭代成本。
+const N_COST = 262144;
+const R_BLOCK = 8;
+const P_PARALLEL = 1;
 const KEYLEN = 32;
 const MAX_FAILS = 5;
 const LOCK_SECONDS = 600;
@@ -17,17 +21,26 @@ const COOKIE_NAME = 'dumate_admin';
 
 const secretPath = () => path.join(require('./store').DATA_DIR, SECRET_FILE);
 
+// 128 * N * r = 256MB，Node 默认 maxmem 只有 32MB，不显式抬高就会抛
+// "memory limit exceeded"。校验侧同样要带，否则读别人的 hash 时又撞上。
+const MAXMEM = 512 * 1024 * 1024;
+
+function _scrypt(pwd, salt, n) {
+  return crypto.scryptSync(pwd, salt, KEYLEN, { N: n, r: R_BLOCK, p: P_PARALLEL, maxmem: MAXMEM });
+}
+
 function makeHash(pwd) {
   const salt = crypto.randomBytes(16).toString('hex');
-  const dk = crypto.scryptSync(pwd, salt, KEYLEN, { N: ITERATIONS }).toString('hex');
-  return `scrypt$${ITERATIONS}$${salt}$${dk}`;
+  const dk = _scrypt(pwd, salt, N_COST).toString('hex');
+  return `scrypt$${N_COST}$${salt}$${dk}`;
 }
 
 function verifyPwd(pwd, stored) {
   const parts = String(stored || '').split('$');
   if (parts.length !== 4 || parts[0] !== 'scrypt') return false;
   const n = parseInt(parts[1], 10);
-  const expected = crypto.scryptSync(pwd, parts[2], KEYLEN, { N: n });
+  if (!Number.isInteger(n) || n <= 0) return false;
+  const expected = _scrypt(pwd, parts[2], n);
   const actual = Buffer.from(parts[3], 'hex');
   // 长度不等时 timingSafeEqual 会抛异常，先挡掉
   if (expected.length !== actual.length) return false;
@@ -201,7 +214,7 @@ module.exports = {
   COOKIE_NAME,
   MAX_FAILS,
   LOCK_SECONDS,
-  ITERATIONS,
+  N_COST,
   secretPath,
   makeHash,
   verifyPwd,
