@@ -1,4 +1,5 @@
 // dumate2api - Anthropic Messages API -> OpenAI Chat Completions translation layer
+const { resolveMaxTokens } = require('./budget');
 
 // Model name mapping: Anthropic/Claude model names -> DuMate model IDs
 const MODEL_MAP = {
@@ -71,12 +72,9 @@ function anthropicToOpenAI(anthropicReq) {
     }
   }
 
-  // Reasoning tokens are drawn from the same budget as the answer text.
-  // A small max_tokens (Claude Code sends e.g. 150) gets eaten entirely by
-  // the chain of thought, leaving an empty body. Give the body room.
-  const MIN_BUDGET = parseInt(process.env.DUMATE_MIN_MAX_TOKENS || '4096', 10);
-  const requested = Number(anthropicReq.max_tokens) || 4096;
-  const maxTokens = Math.max(requested, MIN_BUDGET);
+  // 预算统一由 budget.js 判定：客户端值只作参考，reasoning 与正文共用预算，
+  // 客户端给的小值会让 reasoning 吃光正文导致空回答 / 半句截断。
+  const maxTokens = resolveMaxTokens(anthropicReq.max_tokens);
 
   const openaiReq = {
     model: mapModel(anthropicReq.model),
