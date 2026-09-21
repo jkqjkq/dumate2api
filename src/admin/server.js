@@ -11,6 +11,7 @@ const auth = require('./auth');
 const { ensureDir } = require('./store');
 const { routes: authRoutes } = require('./routes/auth');
 const { routes: systemRoutes } = require('./routes/system');
+const { routes: pointsRoutes } = require('./routes/points');
 
 const PORT = parseInt(process.env.DUMATE_ADMIN_PORT || '9081', 10);
 const HOST = process.env.DUMATE_ADMIN_HOST || '127.0.0.1';
@@ -80,6 +81,7 @@ function sendJSON(res, status, data) {
 
 router.mount(PREFIX + '/auth', authRoutes.map((r) => ({ ...r, path: r.path.replace(/^\/auth/, '') })));
 router.mount(PREFIX + '/system', systemRoutes);
+router.mount(PREFIX + '/points', pointsRoutes);
 
 const server = http.createServer((req, res) => {
   // CORS preflight：开发期 Vite(5173) 直连本端口，生产期同源不需要，留着无害
