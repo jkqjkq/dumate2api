@@ -1,0 +1,400 @@
+# dumate2api
+
+> 架构与代码详解见 [ARCHITECTURE.md](ARCHITECTURE.md)。
+
+将百度搭子（DuMate）桌面客户端的模型能力转换为 **OpenAI 兼容 API** 和 **Anthropic 兼容 API**，供 Codex CLI、Claude Code、cc-switch 等客户端本地使用。
+
+## 原理
+
+DuMate 桌面客户端（Electron + Go 后端）内置了一个本地 OpenAI 兼容 API：
+
+```
+http://127.0.0.1:<动态端口>/api/qianfanproxy/v1/chat/completions
+```
+
+- 端口由 `dumate-main-server.exe` 启动时动态分配（通过 `--port=` 参数）
+- 认证使用 `Authorization: Bearer nokey`（走已登录的百度 BCE 会话）
+- 支持流式 SSE，响应包含 `reasoning_content`（思维链）
+
+本代理项目：
+1. **自动发现** DuMate main-server 端口（三级降级：命令行 `--port=` → 进程监听套接字 → 已知端口扫描）
+2. **透传** OpenAI 格式请求（含模型名映射）
+3. **翻译** Anthropic Messages API ↔ OpenAI Chat Completions（双向，含流式）
+
+```
+Codex CLI ──── OpenAI API ────┐
+                              ├──→ dumate2api (port 9080) ────→ DuMate main-server ────→ 百度千帆
+Claude Code ── Anthropic API ─┘
+```
+
+## 前置条件
+
+1. **DuMate 桌面客户端已安装，并且至少登录过一次**
+   - 下载：https://cloud.baidu.com/doc/Dumate/index.html
+   - 用百度账号登录一次即可，之后**不再需要启动客户端界面**
+   - 登录态（cookie）保存在 `%APPDATA%\qianfan-desktop-app\auth.json`
+   - 若安装目录不是默认位置，设置 `DUMATE_INSTALL_DIR`
+2. **Node.js >= 18**（无第三方依赖）
+
+## 使用
+
+### 启动
+
+```bash
+# 方式一：直接运行
+node src/server.js
+
+# 方式二：双击
+start.bat
+
+# 自定义端口
+DUMATE2API_PORT=9080 node src/server.js
+```
+### 停止
+
+```bash
+# 双击，或命令行
+stop.bat
+```
+
+依次停掉代理（9080）和它拉起的后端（8980），并校验端口已释放。
+**不会**动 DuMate 客户端和 cc-switch。重复执行无副作用。
+
+### 重启
+
+```bash
+restart.bat
+```
+
+改完配置或代理行为异常时用。
+
+### 环境变量
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `DUMATE2API_PORT` | `9080` | 代理监听端口 |
+| `DUMATE2API_HOST` | `127.0.0.1` | 代理监听地址 |
+| `DUMATE2API_KEY` | `nokey` | 代理 API Key（可选） |
+| `DUMATE_INSTALL_DIR` | `D:\Program Files\code program\baidudazi\DuMate` | DuMate 安装目录 |
+| `DUMATE_UPSTREAM_PORT` | `8980` | 自建后端监听端口 |
+| `DUMATE_AUTOSTART` | `auto` | `auto`=无实例时才拉起；`always`=总是自己拉起；`off`=只用已有实例 |
+| `DUMATE_UPSTREAM_LOG` | - | 设为 `1` 时把后端日志打到 stdout |
+| `DUMATE_MIN_MAX_TOKENS` | `32768` | 输出预算下限，防止思维链吃光正文（`0` 关闭该策略） |
+| `DUMATE_MAX_MAX_TOKENS` | `131072` | 输出预算上限 |
+
+## cc-switch 配置教程
+
+### 第 0 步：先把代理跑起来
+
+```bash
+cd <repo>
+npm start
+```
+
+看到这行才算就绪（后端会自动拉起，无需打开 DuMate 界面）：
+
+```
+✓ DuMate main-server verified on port 8980 (headless, no DuMate GUI needed)
+✓ dumate2api listening on http://127.0.0.1:9080
+```
+
+自检：`curl http://127.0.0.1:9080/health` 应返回 `"upstream_managed":true`。
+
+### 第 1 步：cc-switch 里添加 Claude 供应商
+
+打开 cc-switch → **Claude** 标签 → 添加供应商，按下面填：
+
+| 字段 | 值 |
+|------|-----|
+| 名称 | `DuMate 搭子 API (Claude)` |
+| API 格式 | `anthropic` |
+| Base URL | `http://127.0.0.1:9080`  ← **不要加 `/v1`** |
+| API Key | `nokey` |
+| 模型 | `model-text`（条目内可切 `model-artifact-validate`） |
+
+完整 env（点「高级/编辑 JSON」时可直接粘贴）：
+
+```json
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://127.0.0.1:9080",
+    "ANTHROPIC_AUTH_TOKEN": "nokey",
+    "ANTHROPIC_API_KEY": "nokey",
+    "ANTHROPIC_MODEL": "model-text",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "model-text",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "model-text",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "model-text",
+    "ANTHROPIC_DEFAULT_FABLE_MODEL": "model-text"
+  }
+}
+```
+
+> 必须把 haiku / sonnet / opus / fable 全部设为 `model-text`。
+> 否则 Claude Code 切换模型档位时会发来 `claude-haiku-4-5` 之类的名字，
+> 虽然会被兜底映射，但显式写死更稳。
+
+### 第 2 步：cc-switch 里添加 Codex 供应商
+
+打开 cc-switch → **Codex** 标签 → 添加供应商：
+
+| 字段 | 值 |
+|------|-----|
+| 名称 | `DuMate 搭子 API (Codex)` |
+| API 格式 | `openai_responses`（代理侧翻译成 chat/completions 后再转发上游） |
+| Base URL | `http://127.0.0.1:9080/v1`  ← **要加 `/v1`** |
+| API Key | `nokey` |
+| 模型 | `model-text` |
+
+`config.toml` 内容：
+
+```toml
+model_provider = "dumate"
+model = "model-text"
+model_reasoning_effort = "high"
+disable_response_storage = true
+
+[model_providers.dumate]
+name = "DuMate local proxy"
+base_url = "http://127.0.0.1:9080/v1"
+wire_api = "responses"
+requires_openai_auth = true
+```
+
+> **`wire_api = "responses"`。** Codex CLI 0.155+ 已移除 `chat`（配置加载阶段直接报
+> `wire_api = "chat" is no longer supported`）。代理自带 `/v1/responses` 适配层，
+> 把 Responses 协议翻译成上游的 `chat/completions`，所以这里填 `responses` 即可。
+
+### 为什么 URL 一个有 `/v1` 一个没有
+
+- Claude 协议：cc-switch 会把 `ANTHROPIC_BASE_URL` 拼上 `/v1/messages`；代理同时接受 `/v1/messages` 和裸 `/messages`
+- Codex 协议：Codex 要求 base_url 本身已含 `/v1`，它会再拼 `/chat/completions`
+
+### 第 3 步：验证
+
+```bash
+node test/verify-ccswitch.js
+```
+
+会依次实测 Codex 路径、Claude 路径、裸路径兼容性和模型名映射。
+四条都返回 200 且正文非空即为成功。
+
+也可以直接在客户端里问一句「用四个字回答：中国的首都是哪里？」，应回「首都北京」。
+
+### 常见坑
+
+| 现象 | 原因 | 解决 |
+|------|------|------|
+| 连接被拒绝 | 代理没起 | 先 `npm start` |
+| `404 Not found: /v1/responses` | 代理版本过旧，没有 Responses 适配层 | 更新到含 `src/responses.js` 的版本后重启 |
+| `wire_api = "chat" is no longer supported` | Codex ≥0.155 移除了 chat 协议 | 配置改成 `wire_api = "responses"` |
+| 返回内容为空 | max_tokens 太小，被思维链吃光 | 见下方说明 |
+| 报未登录 | 百度 cookie 过期 | 打开一次 DuMate 客户端重新登录 |
+
+**关于空返回**：GLM 的思维链和正文共用同一个 `max_tokens` 预算，而 reasoning 长度不可控
+（实测同一提示词 57 ~ 8492 tokens 都出现过）。预算给得不够时会出现两种症状：
+正文全空（`stop_reason=max_tokens`）或**说到一半停住**（reasoning 把预算吃光，
+正文被截断在句子中间，对客户端看起来就是「能快就停」）。
+
+代理统一把预算抬到 32768 以上（可用 `DUMATE_MIN_MAX_TOKENS` 调整），
+让 reasoning 无论怎么展开都还剩得下正文空间。
+
+## 思考强度与上下文：能调到多大
+
+### 先说结论（实测，不是照抄文档）
+
+| 你想调的东西 | 能不能调 | 实际情况 |
+|---|---|---|
+| 思考强度 | **调不了** | 上游忽略 `reasoning_effort`。实测 low/medium/high/xhigh 的 reasoning token 数为 31/31/19/31 —— 无差异 |
+| 关闭思维链 | **关不掉** | GLM 恒定输出 reasoning。系统提示只能压缩（42→29 字符），不能消除 |
+| 上下文窗口 | **192K**（硬上限） | DuMate 配置声明值；32K 级输入实测通过（52K 实际 token） |
+| 输出长度 | **128K**（硬上限） | 配置声明值；上游对任意 `max_tokens` 都不校验 |
+
+> 既然上游不认 `reasoning_effort`，下面配置里的 `xhigh` / `effort=max` 不会让模型真的「更用力想」。
+> 它们的实际作用是**让客户端给更大的输出预算**，这在共享预算模型下等价于让正文有更多空间。
+
+### 已配好的值
+
+**Codex**（`dumate-api-codex`）：
+
+```toml
+model = "model-text"
+model_reasoning_effort = "xhigh"
+model_context_window = 192000
+model_auto_compact_token_limit = 180000
+
+[model_providers.dumate]
+base_url = "http://127.0.0.1:9080/v1"
+wire_api = "responses"
+```
+
+**Claude**（`dumate-api-claude`）：
+
+```
+ANTHROPIC_MODEL = model-text
+CLAUDE_CODE_EFFORT_LEVEL = max
+ANTHROPIC_MAX_TOKENS = 8192
+```
+
+### 关键机制：思维链和正文抢同一个预算
+
+GLM 的 reasoning 与正文**共用** `max_tokens`。这是最容易踩的坑：
+
+| 客户端传的 max_tokens | 结果 |
+|---|---|
+| 150 | 推理吃掉全部 150 → 正文 `""`，`stop_reason=max_tokens` |
+| 1024 | 推理吃掉全部 1024 → 正文 `""` |
+| 4096 | 多数情况可用，但 reasoning 峰值可到 4000+ → 仍会被截断 |
+| 32768 | 实测稳定，正文完整返回 |
+
+代理统一把预算抬到 32768 以上（`DUMATE_MIN_MAX_TOKENS` 可调，`0` 关闭）。
+所以**输出预算越大，你能拿到的正文越长**——这是唯一真正有效的「调大」手段。
+
+### 两个模型的区别（实测对比）
+
+上游只暴露两个真实模型，不存在「更强档位」。传别的名字会 404：
+
+```
+model `model-ultra` does not exist. api not registered.
+```
+
+| | `model-text` | `model-artifact-validate` |
+|---|---|---|
+| 定位 | 通用主力（Qianfan GLM-5） | 产出校验/审阅 |
+| 数学推理 | 正确，1.2s | 正确，1.4s |
+| 代码能力 | 正确，推理 133 token | 正确，推理 301 token（更啰嗦） |
+| 格式遵循 | 精确，398ms | 精确，1022ms |
+| 速度 | **更快** | 慢 2-3 倍 |
+
+**两者答案质量一致**，差别只在 `model-artifact-validate` 推理链更长、更慢。
+
+### 怎么在两个模型间切换
+
+cc-switch 里**每个 app 只保留一个条目**，模型在同一条目内切换，不必建两个供应商。
+
+**Claude Code** —— 用 `/model` 命令，档位即模型：
+
+| 档位 | 实际模型 | 特点 |
+|---|---|---|
+| sonnet（默认） | `model-text` | 快，日常用 |
+| haiku | `model-text` | 同上 |
+| opus | `model-artifact-validate` | 推理链更长，慢 2-3 倍 |
+
+也就是：想要「更仔细」的输出就切 **opus**，想要速度就切 **sonnet**。
+
+**Codex CLI** —— 改 `model` 一行即可：
+
+```toml
+model = "model-text"                 # 快（默认）
+# model = "model-artifact-validate"  # 更仔细，但慢 2-3 倍
+```
+
+代理的 `/v1/models` 同时列出两个模型，所以 Codex 的 `/model` 选择器里也能直接挑。
+
+### 使用场景建议
+
+- **日常编码 / Codex CLI / Claude Code → 用 `model-text`**（默认）。更快，答案无差别。
+- **需要模型自我审查产出**（生成文档/代码后要它自己挑错）→ 试 `model-artifact-validate`，它的定位就是校验，但代价是慢 2-3 倍。
+- **长上下文**：192K 窗口适合整仓代码分析。但实测 128K 级单请求耗时超过 10 分钟未返回，
+  **建议把单次输入控制在 32K 以内**（约 5 万实际 token），靠 Codex 的自动压缩（180000 阈值）分段处理，别指望一次塞满。
+- **不要指望调「思考强度」**：这个模型没有该旋钮。想要更详尽的分析，
+  直接在提示词里要求「逐步分析」比调参数有效。
+
+## API 端点
+
+| 端点 | 协议 | 说明 |
+|------|------|------|
+| `GET /v1/models` | OpenAI | 模型列表 |
+| `POST /v1/chat/completions` | OpenAI | 聊天补全（透传 + 模型映射） |
+| `POST /v1/messages` | Anthropic | Messages API（完整翻译） |
+| `POST /v1/messages/count_tokens` | Anthropic | Token 计数（估算，Claude Code 会调用） |
+| `GET /health` | - | 健康检查 |
+
+> `count_tokens` 使用 `字节数/4` 的保守估算。DuMate 未暴露分词器，该接口仅用于让 Claude Code 的上下文预算计算不报错，非精确值。
+
+## 模型映射
+
+| 请求模型名 | 实际使用 |
+|-----------|---------|
+| `model-text` | `model-text`（直通） |
+| `model-artifact-validate` | `model-artifact-validate`（直通） |
+| `glm-5` | `model-text` |
+| `claude-3-5-sonnet-*` | `model-text` |
+| `gpt-4o` / `gpt-4` / `o1` / `o3` 等 | `model-text` |
+
+未收录的模型名一律回退为 `model-text`。
+
+## 注意事项
+
+1. **不需要启动 DuMate 界面**：代理会直接拉起其后端 `dumate-main-server.exe`（无 GUI）。
+   只有当登录态过期、需要重新登录时，才要打开一次 DuMate 客户端。
+2. **账号额度**：使用的是你百度搭子账号的模型额度（免费积分）
+3. **端口动态**：DuMate 每次启动端口可能变化，代理会自动重新发现（每 30s 或在发现失败时重试）
+4. **思维链**：上游返回 `reasoning_content`，Anthropic 端点会翻译为 `thinking` block
+5. **Token 用量**：流式 Anthropic 请求会带上 `stream_options.include_usage`，在结尾的 `message_delta` 中返回真实 `input_tokens` / `output_tokens`；上游若不支持则该值为 0
+
+## 快速测试
+
+```bash
+# 测试 OpenAI 格式
+curl http://127.0.0.1:9080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer nokey" \
+  -d '{"model":"model-text","messages":[{"role":"user","content":"hello"}]}'
+
+# 测试 Anthropic 格式
+curl http://127.0.0.1:9080/v1/messages \
+  -H "Content-Type: application/json" \
+  -H "x-api-key: nokey" \
+  -H "anthropic-version: 2023-06-01" \
+  -d '{"model":"claude-3-5-sonnet-20241022","max_tokens":100,"messages":[{"role":"user","content":"hello"}]}'
+```
+
+## 无 GUI 运行原理
+
+DuMate 的 Go 后端 `dumate-main-server.exe` 本来由 Electron 通过 IPC 注入登录态。
+单独启动会报 `loginMode is required`。逆向二进制后发现它可以从环境变量读取登录上下文：
+
+```
+DUMATE_LOGIN_MODE=standalone
+DUMATE_LOGIN_USER_ID=<bceUserId>
+DUMATE_LOGIN_USER_NAME=<displayName>
+DUMATE_LOGIN_BCE_ACCOUNT_ID=<bceAccountId>
+```
+
+`src/upstream-launcher.js` 会自动从 `%APPDATA%\qianfan-desktop-app\auth.json` 读出
+当前活跃账号（`activeProfileId`）并注入这些变量，然后 spawn 后端：
+
+```bash
+dumate-main-server.exe -c "<install>\resources\config\desktop-main\config.yml" -port 8980
+```
+
+真正的凭证（cookie）仍然来自磁盘上已保存的登录态，本项目不接触也不复制它们。
+**cookie 过期后必须打开一次 DuMate 客户端重新登录**，之后又可继续无 GUI 使用。
+
+## 离线自测
+
+无需安装 DuMate 也能验证代理逻辑 —— 用一个 mock 上游顶替 qianfanproxy：
+
+```bash
+# 终端 1：启动 mock 上游（监听 52890）
+npm run mock
+
+# 终端 2：启动代理
+npm start
+
+# 终端 3：跑冒烟测试（32 项断言）
+npm test
+```
+
+`test/smoke.js` 覆盖：模型列表、OpenAI 流式/非流式、Anthropic 流式/非流式、思维链转 `thinking`、
+token 用量、多轮对话、system/tool_use/tool_result 转换、`count_tokens`、错误路径与 404。
+
+`MOCK_PORT` 可改 mock 端口，`DUMATE2API_PORT` 可改代理端口。
+
+## 逆向分析要点
+
+- **应用类型**: Electron（`app.asar` 87MB）+ Go 后端（`dumate-main-server.exe` 61MB）
+- **关键配置**: `resources/config/opencode/opencode.json` 暴露了内部 API 结构
+- **端口发现**: `dumate-main-server.exe --port=<动态>` 命令行参数
+- **认证**: `Bearer nokey`（服务本身不做 key 校验，依赖 DuMate 登录态）
+- **模型**: `model-text`（Qianfan GLM-5，192K 上下文 / 128K 输出）
