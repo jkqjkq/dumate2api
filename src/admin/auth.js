@@ -62,12 +62,17 @@ function _sign(payload, key) {
 }
 
 function issueToken(username, role) {
+  // 必须带上用户当前的 session_version：重设密码/踢会话会把它加一，
+  // 写死 0 的话新签发的 token 立刻就被自己的校验判为过期，
+  // 表现为「登录接口返回成功，但下一个请求就 401」。
+  const data = users() || {};
+  const u = data[username];
   const obj = {
     u: username,
     r: role,
     iat: Date.now(),
     orig: Date.now(),
-    ver: 0,
+    ver: u ? (u.session_version || 0) : 0,
   };
   const payload = Buffer.from(JSON.stringify(obj)).toString('base64url');
   return `${payload}.${_sign(payload, secret())}`;
@@ -123,6 +128,23 @@ function bootstrapUsers() {
 
 function saveUsers(data) {
   return writeJSON(USERS_FILE, data);
+}
+
+// 初始密码只在首次启动打印一次，日志被清掉或 data/ 被搬走后就再也拿不回来，
+// 而 bootstrap 看到已有用户不会再生成——管理员会被永久锁在自己门外。
+// 这个开关是唯一的本地补救路径，只在显式传入时执行。
+function resetAdminPassword() {
+  const pwd = crypto.randomBytes(9).toString('base64url');
+  const data = users() || {};
+  data.admin = {
+    username: 'admin',
+    role: 'admin',
+    hash: makeHash(pwd),
+    created_at: (data.admin && data.admin.created_at) || Date.now(),
+    session_version: (data.admin && data.admin.session_version || 0) + 1,
+  };
+  saveUsers(data);
+  return pwd;
 }
 
 function revokeSessions(username) {
@@ -221,6 +243,7 @@ module.exports = {
   issueToken,
   parseToken,
   bootstrapUsers,
+  resetAdminPassword,
   users,
   saveUsers,
   revokeSessions,

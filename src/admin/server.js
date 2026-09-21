@@ -10,6 +10,7 @@ const router = require('./router');
 const auth = require('./auth');
 const { ensureDir } = require('./store');
 const { routes: authRoutes } = require('./routes/auth');
+const { routes: systemRoutes } = require('./routes/system');
 
 const PORT = parseInt(process.env.DUMATE_ADMIN_PORT || '9081', 10);
 const HOST = process.env.DUMATE_ADMIN_HOST || '127.0.0.1';
@@ -78,6 +79,7 @@ function sendJSON(res, status, data) {
 }
 
 router.mount(PREFIX + '/auth', authRoutes.map((r) => ({ ...r, path: r.path.replace(/^\/auth/, '') })));
+router.mount(PREFIX + '/system', systemRoutes);
 
 const server = http.createServer((req, res) => {
   // CORS preflight：开发期 Vite(5173) 直连本端口，生产期同源不需要，留着无害
@@ -109,17 +111,28 @@ const server = http.createServer((req, res) => {
 
 function start() {
   ensureDir();
-  const { created } = auth.bootstrapUsers();
-
   log('dumate2api admin starting...');
-  if (created) {
-    // 只在首次启动出现一次：写进文件等于在磁盘上留一份明文口令
+
+  if (process.argv.includes('--reset-admin')) {
+    const pwd = auth.resetAdminPassword();
     log('');
-    log('  初始管理员已创建');
+    log('  管理员密码已重设');
     log(`    用户名: admin`);
-    log(`    密码:   ${created}`);
-    log('  请登录后立即修改，此密码不会再显示。');
+    log(`    密码:   ${pwd}`);
+    log('  旧会话已全部失效。');
     log('');
+  } else {
+    const { created } = auth.bootstrapUsers();
+    if (created) {
+      // 只在首次启动出现一次：写进文件等于在磁盘上留一份明文口令。
+      // 丢了就用 `node src/admin/server.js --reset-admin` 重设。
+      log('');
+      log('  初始管理员已创建');
+      log(`    用户名: admin`);
+      log(`    密码:   ${created}`);
+      log('  请登录后立即修改，此密码不会再显示。');
+      log('');
+    }
   }
 
   server.listen(PORT, HOST, () => {
