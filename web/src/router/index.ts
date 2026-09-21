@@ -4,6 +4,7 @@ import { auth } from '@/stores/auth'
 const Login = () => import('@/views/LoginView.vue')
 const MainLayout = () => import('@/layouts/MainLayout.vue')
 const Dashboard = () => import('@/views/DashboardView.vue')
+const Models = () => import('@/views/ModelsView.vue')
 
 const router = createRouter({
   history: createWebHashHistory(),
@@ -12,7 +13,10 @@ const router = createRouter({
     {
       path: '/',
       component: MainLayout,
-      children: [{ path: '', component: Dashboard }],
+      children: [
+        { path: '', component: Dashboard, meta: { title: '仪表盘', key: 'dashboard' } },
+        { path: 'models', component: Models, meta: { title: '模型管理', key: 'models' } },
+      ],
     },
   ],
 })
