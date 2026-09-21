@@ -64,6 +64,84 @@
       </a-col>
     </a-row>
 
+    <a-row :gutter="[16, 16]" class="mt-4">
+      <a-col :span="6">
+        <a-card :bordered="false">
+          <a-statistic title="今日 Token" :value="todayTokensText" />
+          <div class="text-xs text-slate-500 mt-2">
+            <template v-if="stats">
+              输入 {{ fmt(stats.today.input_tokens) }} · 输出 {{ fmt(stats.today.output_tokens) }}
+            </template>
+            <span v-else>—</span>
+          </div>
+        </a-card>
+      </a-col>
+
+      <a-col :span="6">
+        <a-card :bordered="false">
+          <a-statistic title="今日请求" :value="stats ? stats.today.requests : '—'">
+            <template #suffix>
+              <span class="text-sm text-slate-400">次</span>
+            </template>
+          </a-statistic>
+          <div class="text-xs text-slate-500 mt-2">
+            <template v-if="stats">
+              <a-tag v-if="stats.today.failed" color="red">失败 {{ stats.today.failed }}</a-tag>
+              <span v-else>全部成功</span>
+            </template>
+            <span v-else>—</span>
+          </div>
+        </a-card>
+      </a-col>
+
+      <a-col :span="6">
+        <a-card :bordered="false">
+          <a-statistic title="平均耗时" :value="stats ? stats.today.avg_ms : '—'">
+            <template #suffix>
+              <span class="text-sm text-slate-400">ms</span>
+            </template>
+          </a-statistic>
+          <div class="text-xs text-slate-500 mt-2">
+            <template v-if="stats">近 {{ stats.days }} 天共 {{ fmt(stats.total.total_tokens) }} tokens</template>
+            <span v-else>—</span>
+          </div>
+        </a-card>
+      </a-col>
+
+      <a-col :span="6">
+        <a-card :bordered="false">
+          <a-statistic title="近 14 天请求" :value="stats ? stats.total.requests : '—'">
+            <template #suffix>
+              <span class="text-sm text-slate-400">次</span>
+            </template>
+          </a-statistic>
+          <div class="text-xs text-slate-500 mt-2">含所有协议路径</div>
+        </a-card>
+      </a-col>
+    </a-row>
+
+    <a-card title="每日用量" :bordered="false" class="mt-4">
+      <a-empty v-if="!daily.length" description="还没有请求记录" />
+      <div v-else class="flex items-end gap-1 h-32">
+        <div
+          v-for="d in daily"
+          :key="d.day"
+          class="flex-1 flex flex-col items-center justify-end h-full group"
+          :title="`${d.day}\n请求 ${d.requests} 次\n${fmt(d.total_tokens)} tokens${d.failed ? '\n失败 ' + d.failed : ''}`"
+        >
+          <div
+            class="w-full rounded-t transition-colors"
+            :class="d.failed ? 'bg-red-400' : 'bg-blue-500'"
+            :style="{ height: barHeight(d.total_tokens) }"
+          />
+        </div>
+      </div>
+      <div v-if="daily.length" class="flex justify-between text-xs text-slate-400 mt-2">
+        <span>{{ daily[0]?.day }}</span>
+        <span>{{ daily[daily.length - 1]?.day }}</span>
+      </div>
+    </a-card>
+
     <a-alert
       v-if="error"
       type="warning"
@@ -187,10 +265,13 @@ import { computed, onMounted, ref } from 'vue'
 import client from '@/api/client'
 import type { SystemStatus } from '@/api/system'
 import type { PointsData, AccountsData } from '@/api/points'
+import type { StatsSummary, DailyRow } from '@/api/stats'
 
 const status = ref<SystemStatus | null>(null)
 const points = ref<PointsData | null>(null)
 const accounts = ref<AccountsData | null>(null)
+const stats = ref<StatsSummary | null>(null)
+const daily = ref<DailyRow[]>([])
 const loading = ref(false)
 const error = ref('')
 
@@ -209,6 +290,24 @@ const fetchedAtText = computed(() => {
   if (!points.value) return '—'
   return new Date(points.value.fetched_at).toLocaleTimeString('zh-CN')
 })
+// 大数字用紧凑写法：仪表盘上 28.2M 比 28,200,000 好读
+const todayTokensText = computed(() => {
+  if (!stats.value) return '—'
+  return compact(stats.value.today.total_tokens)
+})
+
+function compact(n: number) {
+  if (n >= 1e9) return (n / 1e9).toFixed(2) + 'B'
+  if (n >= 1e6) return (n / 1e6).toFixed(2) + 'M'
+  if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K'
+  return String(n)
+}
+
+// 柱高按窗口内最大值归一，最小留 2% 让零值那天也有一条可见的底
+function barHeight(v: number) {
+  const max = Math.max(...daily.value.map((d) => d.total_tokens), 1)
+  return `${Math.max(2, (v / max) * 100)}%`
+}
 
 const expiringColumns = [
   { title: '类型', key: 'type', dataIndex: 'package_type' },
@@ -236,14 +335,18 @@ async function refresh(force = false) {
   loading.value = true
   error.value = ''
   try {
-    const [s, p, a] = await Promise.all([
+    const [s, p, a, st, dy] = await Promise.all([
       client.get('/system/status'),
       client.get('/points/points' + (force ? '?refresh=1' : '')),
       client.get('/points/accounts'),
+      client.get('/stats/summary'),
+      client.get('/stats/daily?days=14'),
     ])
     status.value = s.data
     points.value = p.data
     accounts.value = a.data
+    stats.value = st.data
+    daily.value = dy.data.rows
   } catch (e: any) {
     // 积分依赖上游，上游没起来时其余卡片仍应显示，所以只提示不中断
     error.value = e?.response?.data?.error || e?.message || '未知错误'
