@@ -7,10 +7,13 @@ const { responsesToOpenAI, openAIToResponse, translateStreamToResponses } = requ
 const { resolveMaxTokens } = require('./budget');
 const reqlog = require('./reqlog');
 const modelmap = require('./modelmap');
+const keysvc = require('./keys');
 
 const PROXY_PORT = parseInt(process.env.DUMATE2API_PORT || '9080', 10);
 const PROXY_HOST = process.env.DUMATE2API_HOST || '127.0.0.1';
 const API_KEY = process.env.DUMATE2API_KEY || 'nokey';
+// 默认关闭。开启后所有模型端点要求带已登记的 API key。
+const REQUIRE_KEY = process.env.DUMATE_REQUIRE_KEY === '1';
 
 let upstreamPort = null;
 let upstreamManaged = false;
@@ -137,6 +140,8 @@ function logRequest(req, res, startedAt, info, status, usage, extra) {
     output_tokens: u.output || 0,
     total_tokens: u.total || 0,
     ip: reqlog.clientIP(req),
+    // 鉴权关闭时没有 key，留空；开启时记名称便于按 key 统计
+    key: (req._apiKey && req._apiKey.name) || '',
     ...(extra || {}),
   });
 }
@@ -607,6 +612,31 @@ const server = http.createServer(async (req, res) => {
         upstream_managed: upstreamManaged,
         service: 'dumate2api',
       });
+    }
+
+    // ==================== API Key 鉴权（可选）====================
+    // 默认关闭：现有 cc-switch / Codex 直连不带 key，一旦默认开启会把
+    // 所有人挡在外面。只有显式设 DUMATE_REQUIRE_KEY=1 才校验。
+    // 鉴权在路由分发之前统一做，避免以后新增端点时漏挂。
+    if (REQUIRE_KEY && url !== '/health' && url !== '/ping') {
+      const token = keysvc.tokenFromHeaders(req.headers);
+      const key = keysvc.resolve(token);
+      const model = null;   // 模型白名单在解析出请求体后另行判定
+      const verdict = keysvc.validate(key, reqlog.clientIP(req), model);
+      if (!verdict.ok) {
+        const status = key ? 403 : 401;
+        req._logPath = url;
+        return sendJSON(res, status, {
+          error: {
+            message: verdict.reason === 'unknown_key'
+              ? 'Invalid or missing API key'
+              : `API key rejected: ${verdict.reason}`,
+            type: 'authentication_error',
+            code: verdict.reason,
+          },
+        });
+      }
+      req._apiKey = key;
     }
 
     // ==================== OpenAI compatible ====================
