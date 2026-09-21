@@ -6,6 +6,7 @@ const { googleToOpenAI, openAIToGoogle, translateStreamToGoogle } = require('./g
 const { responsesToOpenAI, openAIToResponse, translateStreamToResponses } = require('./responses');
 const { resolveMaxTokens } = require('./budget');
 const reqlog = require('./reqlog');
+const modelmap = require('./modelmap');
 
 const PROXY_PORT = parseInt(process.env.DUMATE2API_PORT || '9080', 10);
 const PROXY_HOST = process.env.DUMATE2API_HOST || '127.0.0.1';
@@ -143,16 +144,21 @@ function logRequest(req, res, startedAt, info, status, usage, extra) {
 // ==================== OpenAI Compatible Endpoints ====================
 
 async function handleOpenAIModels(req, res) {
-  // Return model list in OpenAI format
+  // 条目来自 modelmap（可经管理端编辑），不再硬编码：
+  // 之前这里的列表与 anthropic.js 的 MODEL_MAP 各写一份，会各自漂移。
+  const cfg = modelmap.load();
+  const created = Math.floor(Date.now() / 1000);
+  const upstream = new Set(cfg.upstream_models);
   sendJSON(res, 200, {
     object: 'list',
-    data: [
-      { id: 'model-text', object: 'model', created: Math.floor(Date.now()/1000), owned_by: 'dumate' },
-      { id: 'model-artifact-validate', object: 'model', created: Math.floor(Date.now()/1000), owned_by: 'dumate' },
-      { id: 'glm-5', object: 'model', created: Math.floor(Date.now()/1000), owned_by: 'dumate' },
-      { id: 'claude-3-5-sonnet-20241022', object: 'model', created: Math.floor(Date.now()/1000), owned_by: 'dumate-proxy' },
-      { id: 'gpt-4o', object: 'model', created: Math.floor(Date.now()/1000), owned_by: 'dumate-proxy' },
-    ]
+    data: cfg.exposed.map((id) => ({
+      id,
+      object: 'model',
+      created,
+      // 区分「上游直接认识」与「靠别名转换」——后者换名字也能用，
+      // 但前者才是上游真实模型，界面与客户端据此判断
+      owned_by: upstream.has(id) ? 'dumate' : 'dumate-proxy',
+    })),
   });
 }
 

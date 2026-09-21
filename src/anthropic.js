@@ -1,35 +1,13 @@
 // dumate2api - Anthropic Messages API -> OpenAI Chat Completions translation layer
 const { resolveMaxTokens } = require('./budget');
+const modelmap = require('./modelmap');
 
-// Model name mapping: Anthropic/Claude model names -> DuMate model IDs
-const MODEL_MAP = {
-  // Claude models -> DuMate
-  'claude-3-5-sonnet-20241022': 'model-text',
-  'claude-3-5-sonnet-latest': 'model-text',
-  'claude-3-5-haiku-20241022': 'model-text',
-  'claude-3-5-haiku-latest': 'model-text',
-  'claude-sonnet-4-20250514': 'model-text',
-  'claude-opus-4-20250514': 'model-text',
-  'claude-3-opus-20240229': 'model-text',
-  'claude-3-haiku-20240307': 'model-text',
-  // Direct DuMate model IDs pass through
-  'model-text': 'model-text',
-  'model-artifact-validate': 'model-artifact-validate',
-  // OpenAI models (for Codex compatibility)
-  'gpt-4o': 'model-text',
-  'gpt-4o-mini': 'model-text',
-  'gpt-4': 'model-text',
-  'gpt-4-turbo': 'model-text',
-  'o1': 'model-text',
-  'o1-mini': 'model-text',
-  'o3': 'model-text',
-  'o3-mini': 'model-text',
-  'gpt-5': 'model-text',
-};
+// 模型映射已抽到 modelmap.js（可经管理端编辑，落 data/model-map.json）。
+// 这里保留 MODEL_MAP 导出以兼容既有引用，值是默认表。
+const MODEL_MAP = modelmap.DEFAULT_ALIASES;
 
 function mapModel(name) {
-  if (!name) return 'model-text';
-  return MODEL_MAP[name] || 'model-text';
+  return modelmap.mapModel(name);
 }
 
 // Convert Anthropic Messages request to OpenAI Chat Completions request
