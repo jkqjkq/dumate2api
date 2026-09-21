@@ -114,7 +114,10 @@ function read(opts = {}) {
     .filter(Boolean);
   if (filter) rows = rows.filter(filter);
   const total = rows.length;
-  rows = rows.reverse().slice(offset, offset + limit);
+  rows = rows.reverse();
+  // limit <= 0 表示不限：统计接口要拿全量窗口自己聚合，
+  // 按 slice(offset, offset+limit) 处理会把它当成取 0 条。
+  rows = limit > 0 ? rows.slice(offset, offset + limit) : rows.slice(offset);
   return { rows, total };
 }
 
