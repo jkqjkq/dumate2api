@@ -130,6 +130,18 @@ async function runForAccount(account) {
     });
   }
 
+  // 没有可做任务时也记一条。否则「跑过了但没事可做」和「根本没跑」
+  // 在记录页看起来一样——而这两件事的含义完全不同。
+  if (!pending.length) {
+    appendLog({
+      ts: Date.now(), account_id: account.id, account: account.name,
+      title: skipped.length ? `无可自动任务（${skipped.length} 个需手动）` : '无可自动任务',
+      ok: true, via: 'noop', noop: true,
+      points_delta: 0, points_before: null, points_after: null,
+      error: '',
+    });
+  }
+
   // 完成后重取一次，让界面能看到最新状态
   const after = await web.api.tasks(account.cookie);
 

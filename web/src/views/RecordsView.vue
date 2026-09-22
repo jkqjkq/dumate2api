@@ -117,9 +117,6 @@
           <template v-else-if="column.key === 'detail'">
             <template v-if="record.type === 'checkin'">
               {{ checkinText(record.result) }}
-              <span v-if="record.total_times" class="text-xs text-slate-400 ml-1">
-                · 累计 {{ record.total_times }} 次
-              </span>
               <a-tag v-if="!record.ok" color="red" class="ml-1">失败</a-tag>
               <span v-if="record.error" class="text-xs text-red-500 ml-1">{{ record.error }}</span>
             </template>
