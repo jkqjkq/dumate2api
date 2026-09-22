@@ -38,9 +38,11 @@ function probeJSON(port, path, method = 'GET', body = null) {
 
 // 复用发现链路即可，不另造一套判定：三级降级各查一次，
 // 让界面能回答「端口是怎么找到的」，而不只是报一个数字。
-function discoveryTrail() {
-  const cli = discovery.discoverViaCommandLine();
-  const sockets = discovery.discoverViaListeningSockets();
+// 全部走异步版本——PowerShell 冷启动 5 秒以上，同步调用会把管理端
+// 整个事件循环卡住，期间所有页面都无响应。
+async function discoveryTrail() {
+  const cli = await discovery.discoverViaCommandLineAsync();
+  const sockets = await discovery.discoverViaListeningSocketsAsync();
   const trail = [];
   if (cli) trail.push({ method: 'command-line --port', port: cli, hit: false });
   for (const p of sockets) trail.push({ method: 'listening socket', port: p, hit: false });
@@ -53,24 +55,30 @@ const routes = [
     path: '/status',
     handler: async ({ req, res }) => {
       const proxy = await probeJSON(PROXY_PORT, '/health');
-      const { trail } = discoveryTrail();
 
       let upstreamPort = proxy.ok && proxy.data ? proxy.data.upstream_port : null;
       let upstreamManaged = proxy.ok && proxy.data ? proxy.data.upstream_managed : false;
       let source = proxy.ok ? 'gateway /health' : 'unavailable';
 
-      // 网关没起时自己走一遍发现，界面照样能显示上游在哪
-      if (!proxy.ok) {
+      // 网关起了就直接用它的答案，不再跑发现链路：那两次 PowerShell 探测
+      // 在本机实测合计要 20 秒以上，而结果对界面只是「端口是怎么找到的」
+      // 这句说明——为一个展示字段付 20 秒延迟不值得。
+      // 只有网关不可用时才真的需要自己去发现。
+      let trail = [];
+      if (proxy.ok) {
+        trail = [{ method: 'gateway /health', port: upstreamPort, hit: true }];
+      } else {
+        const found = await discoveryTrail();
+        trail = found.trail;
         const port = await discovery.discoverPort();
         if (port) {
           upstreamPort = port;
           source = 'admin direct discovery';
           upstreamManaged = port === discovery.MANAGED_PORT;
         }
-      }
-
-      for (const step of trail) {
-        if (step.port === upstreamPort) step.hit = true;
+        for (const step of trail) {
+          if (step.port === upstreamPort) step.hit = true;
+        }
       }
 
       const install = {

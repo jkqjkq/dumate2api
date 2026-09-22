@@ -5,39 +5,41 @@
 // 只会让两边状态不一致。
 const fs = require('fs');
 const path = require('path');
-const { execFileSync } = require('child_process');
+const { execFile } = require('child_process');
 const launcher = require('../../upstream-launcher');
 const discovery = require('../../discovery');
 const { sendJSON } = require('../router');
 
 const APPDATA_DIR = () => path.join(process.env.APPDATA || '', 'qianfan-desktop-app');
 
+// 异步执行 PowerShell。同步版（execFileSync）在本机实测冷启动要 5 秒以上，
+// 而它阻塞的是整个事件循环——一个「看一眼进程状态」的请求就能让管理端
+// 所有页面一起卡死，这是实测过的故障。
 function runPS(script, timeout = 12000) {
-  try {
-    return execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-Command', script],
-      { encoding: 'utf8', timeout, windowsHide: true });
-  } catch (e) {
-    return (e && e.stdout) ? String(e.stdout) : '';
-  }
+  return new Promise((resolve) => {
+    execFile('powershell', ['-NoProfile', '-NonInteractive', '-Command', script],
+      { encoding: 'utf8', timeout, windowsHide: true, maxBuffer: 4 * 1024 * 1024 },
+      (err, stdout) => resolve(err ? ((err.stdout) ? String(err.stdout) : '') : String(stdout || '')));
+  });
 }
 
 // 客户端版本只能从可执行文件元数据取：app.asar 是加密的，
 // 后端二进制没有版本资源，注册表在部分安装方式下也没有条目。
-function clientVersion() {
+async function clientVersion() {
   const exe = path.join(launcher.installRoot(), 'DuMate.exe');
   if (!fs.existsSync(exe)) return null;
-  const out = runPS(
+  const out = (await runPS(
     `(Get-Item '${exe.replace(/'/g, "''")}').VersionInfo | ` +
     `ForEach-Object { $_.FileVersion + '|' + $_.ProductVersion + '|' + $_.CompanyName }`,
-  ).trim();
+  )).trim();
   if (!out) return null;
   const [file, product, company] = out.split('|');
   return { file_version: file || '', product_version: product || '', company: company || '' };
 }
 
 // 正在运行的 DuMate 进程。命令行里带着 -port，可用于交叉验证发现结果。
-function runningProcesses() {
-  const out = runPS(
+async function runningProcesses() {
+  const out = await runPS(
     `Get-CimInstance Win32_Process | Where-Object { $_.Name -match 'dumate' } | ` +
     `ForEach-Object { $_.ProcessId.ToString() + '|' + $_.Name + '|' + ($_.CommandLine -replace "\\r?\\n", ' ') }`,
   );
@@ -49,7 +51,7 @@ function runningProcesses() {
       pid: parseInt(pid, 10) || 0,
       name: name || '',
       port: m ? parseInt(m[1], 10) : null,
-      managed_by_proxy: parseInt(pid, 10) === 0 ? false : null,
+      managed_by_proxy: null,
     };
   });
 }
@@ -144,9 +146,9 @@ const routes = [
           dir: launcher.installRoot(),
           checks: installCheck(),
         },
-        version: clientVersion(),
+        version: await clientVersion(),
         login: loginState(),
-        processes: runningProcesses(),
+        processes: await runningProcesses(),
         upstream: {
           port: upstreamPort,
           managed_port: discovery.MANAGED_PORT,

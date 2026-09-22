@@ -65,7 +65,14 @@ function listAccounts() {
   });
 }
 
-async function fetchPoints() {
+async function fetchPoints(opts = {}) {
+  // 缓存：积分接口一次往返约 200-800ms，而仪表盘会同时请求 /points 与
+  // /accounts，两边都要积分。不缓存就是同一份数据打上游两次。
+  const { force = false } = opts;
+  if (!force && cache.data && Date.now() - cache.at < CACHE_TTL_MS) {
+    return { ok: true, data: cache.data };
+  }
+
   const port = await discovery.discoverPort();
   if (!port) return { ok: false, error: 'upstream not found' };
 
@@ -148,7 +155,7 @@ async function fetchPoints() {
   }
   const dailyGrant = Object.values(byDay).sort((a, b) => (a.day < b.day ? -1 : 1));
 
-  return {
+  const result = {
     ok: true,
     data: {
       subscribed: !!r.isSubscribed,
@@ -169,6 +176,8 @@ async function fetchPoints() {
       fetched_at: Date.now(),
     },
   };
+  cache = { at: Date.now(), data: result.data };
+  return result;
 }
 
 const routes = [
