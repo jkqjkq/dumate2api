@@ -9,7 +9,10 @@ function register(method, pattern, handler, opts = {}) {
 
 function mount(prefix, table) {
   for (const r of table) {
-    register(r.method, prefix + r.path, r.handler, r);
+    // 规范化尾部斜杠：`path: '/'` 与前缀拼出 '/api/admin/x/'，锚定后正则
+    // 会要求双斜杠（'/api/admin/x//?$'），该路由永远匹配不上。
+    const combined = prefix + r.path;
+    register(r.method, combined.replace(/\/+$/, '') || '/', r.handler, r);
   }
 }
 

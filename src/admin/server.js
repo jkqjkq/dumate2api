@@ -15,6 +15,7 @@ const { routes: pointsRoutes } = require('./routes/points');
 const { routes: statsRoutes } = require('./routes/stats');
 const { routes: modelsRoutes } = require('./routes/models');
 const { routes: keysRoutes } = require('./routes/keys');
+const { routes: accountRoutes } = require('./routes/account');
 
 const PORT = parseInt(process.env.DUMATE_ADMIN_PORT || '9081', 10);
 const HOST = process.env.DUMATE_ADMIN_HOST || '127.0.0.1';
@@ -96,6 +97,7 @@ router.mount(PREFIX + '/points', pointsRoutes);
 router.mount(PREFIX + '/stats', statsRoutes);
 router.mount(PREFIX + '/models', modelsRoutes);
 router.mount(PREFIX + '/keys', keysRoutes);
+router.mount(PREFIX + '/account', accountRoutes);
 
 const server = http.createServer((req, res) => {
   // 整个回调包一层：静态分支与同步抛错都不在 router.handle 的 catch 之内，
