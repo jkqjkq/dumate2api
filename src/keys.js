@@ -177,9 +177,19 @@ function create(opts = {}) {
   const { keys } = load();
   const token = generateToken();
   const now = Date.now();
+  // 默认名不能按 keys.length 生成：删掉一个再建，长度回到原值就会与现存
+  // key 重名，而用量是按名字聚合的，两个 key 的统计会串在一起。
+  // 取「当前最大编号 +1」，与现存名字保证不撞。
+  let autoName = '';
+  if (!String(opts.name || '').trim()) {
+    const used = new Set(keys.map((k) => k.name));
+    let n = keys.length + 1;
+    while (used.has(`key-${n}`)) n++;
+    autoName = `key-${n}`;
+  }
   const key = {
     id: (keys.reduce((m, k) => Math.max(m, k.id || 0), 0) + 1),
-    name: String(opts.name || '').trim() || `key-${keys.length + 1}`,
+    name: String(opts.name || '').trim() || autoName,
     prefix: token.slice(0, 12),
     hash: hash(token),
     created_at: now,

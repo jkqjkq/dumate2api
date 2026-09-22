@@ -143,7 +143,9 @@ function logRequest(req, res, startedAt, info, status, usage, extra) {
     output_tokens: u.output || 0,
     total_tokens: u.total || 0,
     ip: reqlog.clientIP(req),
-    // 鉴权关闭时没有 key，留空；开启时记名称便于按 key 统计
+    // 记 id 而不是名字：名字可改，改名后按名字聚合的历史会全部对不上号。
+    // 名称另存一份，便于日志直接可读。
+    key_id: (req._apiKey && req._apiKey.id) || 0,
     key: (req._apiKey && req._apiKey.name) || '',
     ...(extra || {}),
   });
@@ -210,9 +212,15 @@ async function handleOpenAIChat(req, res) {
       });
       // 上游中途断开时必须主动收尾，否则客户端挂在半开的流上
       // （表现为「输出写到一半就停住，一直不返回」）。
-      // 同时顺路扫一遍 SSE 取真实 usage：流式响应没有单一 usage 字段。
+      // 顺路扫 SSE 取真实 usage：流式响应没有单一 usage 字段。
+      // usage 只在最后一两个块里，所以只保留尾部固定窗口——原实现一直累积
+      // 到 200KB 且从不截断，而流可以活 55 秒以上，并发流就是 N×200KB。
       let seen = '';
-      upstreamRes.on('data', (c) => { if (seen.length < 200000) seen += c.toString('utf8'); });
+      const TAIL = 32768;
+      upstreamRes.on('data', (c) => {
+        seen += c.toString('utf8');
+        if (seen.length > TAIL) seen = seen.slice(-TAIL);
+      });
       const finishStream = () => {
         logRequest(req, res, startedAt, info, upstreamRes.statusCode, reqlog.usageFromSSE(seen));
         res.end();

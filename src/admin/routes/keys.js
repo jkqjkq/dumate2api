@@ -5,12 +5,13 @@ const { sendJSON } = require('../router');
 
 // 每个 key 的用量从请求日志聚合，而不是在 key 记录里累加计数：
 // 累加会写坏（进程被杀就丢），日志是既成事实，重算总是对的。
+// 按 key_id 聚合而非名字——改名不该让历史用量凭空消失。
 function usageByKey(days = 30) {
   const since = Date.now() - days * 86400000;
-  const { rows } = reqlog.read({ limit: 0, filter: (r) => r.ts >= since && r.key });
+  const { rows } = reqlog.read({ limit: 0, filter: (r) => r.ts >= since && r.key_id });
   const map = {};
   for (const r of rows) {
-    const k = r.key;
+    const k = r.key_id;
     if (!map[k]) map[k] = { requests: 0, total_tokens: 0, failed: 0, last_at: 0 };
     map[k].requests++;
     map[k].total_tokens += r.total_tokens || 0;
@@ -46,7 +47,7 @@ const routes = [
       const usage = usageByKey(30);
       const list = keysvc.list().map((k) => ({
         ...k,
-        usage: usage[k.name] || { requests: 0, total_tokens: 0, failed: 0, last_at: 0 },
+        usage: usage[k.id] || { requests: 0, total_tokens: 0, failed: 0, last_at: 0 },
       }));
       return sendJSON(res, 200, {
         keys: list,
