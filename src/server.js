@@ -131,11 +131,19 @@ function logRequest(req, res, startedAt, info, status, usage, extra) {
   if (res._logged) return;
   res._logged = true;
   const u = usage || { input: 0, output: 0, total: 0 };
+  const h = req.headers || {};
   reqlog.record({
     ts: Date.now(),
     ms: Date.now() - startedAt,
+    // 首字延迟：从收到请求到上游吐出第一个字节。总耗时无法反映这一点——
+    // 一个 30 秒的请求可能 0.5 秒就出字、也可能 20 秒才出字，
+    // 后者才是用户感知到的「卡」。
+    first_token_ms: res._firstTokenAt ? res._firstTokenAt - startedAt : null,
     path: req._logPath || '',
     model: info.model || '',
+    // 映射后的模型：客户端发来的名字经 modelmap 转换后实际打给上游的值。
+    // 排查「为什么 glm-5 变成了 model-text」这类问题时要看它。
+    mapped_model: req._mappedModel || '',
     stream: !!info.stream,
     messages: info.messages || 0,
     status: status || 0,
@@ -143,12 +151,20 @@ function logRequest(req, res, startedAt, info, status, usage, extra) {
     output_tokens: u.output || 0,
     total_tokens: u.total || 0,
     ip: reqlog.clientIP(req),
+    // 客户端标识：区分 Codex / Claude Code / 其它调用方，排查兼容问题时最先看这个
+    ua: String(h['user-agent'] || '').slice(0, 200),
     // 记 id 而不是名字：名字可改，改名后按名字聚合的历史会全部对不上号。
     // 名称另存一份，便于日志直接可读。
     key_id: (req._apiKey && req._apiKey.id) || 0,
     key: (req._apiKey && req._apiKey.name) || '',
     ...(extra || {}),
   });
+}
+
+// 标记首字时刻。多次调用只记第一次——流式响应会持续吐字节，
+// 我们要的是「第一个」，不是最后一个。
+function markFirstToken(res) {
+  if (!res._firstTokenAt) res._firstTokenAt = Date.now();
 }
 
 // ==================== OpenAI Compatible Endpoints ====================
@@ -187,6 +203,7 @@ async function handleOpenAIChat(req, res) {
 
   // Map model name
   reqBody.model = mapModel(reqBody.model);
+  req._mappedModel = reqBody.model;
 
   // 预算统一由 budget.js 判定：glm 的 reasoning 与正文共用一个 max_tokens
   // 预算，小预算会让正文被 reasoning 吃光（实测 max_tokens<=1024 时正文为空，
@@ -218,6 +235,7 @@ async function handleOpenAIChat(req, res) {
       let seen = '';
       const TAIL = 32768;
       upstreamRes.on('data', (c) => {
+        markFirstToken(res);
         seen += c.toString('utf8');
         if (seen.length > TAIL) seen = seen.slice(-TAIL);
       });
@@ -319,6 +337,7 @@ async function handleGoogleGenerateContent(req, res, isStream, pathModel) {
   req._logPath = '/v1beta:generateContent';
 
   const openaiReq = googleToOpenAI(googleReq);
+  req._mappedModel = openaiReq.model;
 
   const port = await ensureUpstream();
   const outBody = JSON.stringify(openaiReq);
@@ -389,6 +408,7 @@ async function handleOpenAIResponses(req, res) {
   req._logPath = '/v1/responses';
 
   const openaiReq = responsesToOpenAI(reqBody, isStream);
+  req._mappedModel = openaiReq.model;
 
   const port = await ensureUpstream();
   const outBody = JSON.stringify(openaiReq);
@@ -442,6 +462,7 @@ async function handleAnthropicMessages(req, res) {
 
   // Convert to OpenAI format
   const openaiReq = anthropicToOpenAI(anthropicReq);
+  req._mappedModel = openaiReq.model;
   // Ask the upstream for a usage-bearing final chunk so we can report real
   // token counts instead of zeroes. Harmless if the upstream ignores it.
   if (anthropicReq.stream) openaiReq.stream_options = { include_usage: true };
