@@ -1,15 +1,19 @@
 {
   "name": "dumate2api",
   "version": "1.1.0",
-  "description": "DuMate (Baidu Qianfan desktop agent) to OpenAI/Anthropic compatible API proxy for Codex CLI and Claude Code",
+  "description": "DuMate (Baidu Qianfan desktop agent) to OpenAI/Anthropic compatible API proxy for Codex CLI and Claude Code. The gateway (src/server.js) has zero runtime dependencies; playwright-core is used only by the admin console's login helper.",
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
+    "admin": "node src/admin/server.js",
     "mock": "node test/mock-upstream.js",
     "test": "node test/smoke.js"
   },
   "engines": {
     "node": ">=18"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "dependencies": {
+    "playwright-core": "^1.63.0"
+  }
 }

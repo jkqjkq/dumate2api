@@ -2,6 +2,7 @@
 const crypto = require('crypto');
 const accounts = require('../../accounts');
 const web = require('../../dumate-web');
+const loginBrowser = require('../../login-browser');
 const { sendJSON } = require('../router');
 
 // 登录链接。百度 SSO 的登录页，登录后 cookie 落在 .baidu.com 域，
@@ -56,7 +57,49 @@ async function doCheckin(account) {
 
 const routes = [
   {
-    // 登录入口信息：前端据此展示「点击登录」链接
+    // 登录器：打开一个受控浏览器窗口，登录后自动抓 cookie。
+    // 这是「不依赖用户浏览器状态」的唯一自动路径——搭子没有登录票据接口，
+    // 而系统浏览器的 cookie 库在运行时被独占锁定。
+    method: 'POST',
+    path: '/login/start',
+    handler: async ({ res, body }) => {
+      const r = await loginBrowser.start({ name: (body && body.name) || '' });
+      if (!r.ok) return sendJSON(res, 400, r);
+      require('../../admin/auth').audit('admin', 'web_login_start', '', r.browser_path || '');
+      return sendJSON(res, 200, r);
+    },
+  },
+  {
+    // 轮询登录状态。成功时把 cookie 落库并清空暂存——同一份凭证不能入库两次。
+    method: 'GET',
+    path: '/login/poll',
+    handler: async ({ res, req }) => {
+      const s = loginBrowser.snapshot();
+      if (s.status === 'success' && s.has_cookie) {
+        const cookie = loginBrowser.takeCookie();
+        const wantName = (req.url.match(/[?&]name=([^&]*)/) || [])[1];
+        try {
+          const created = accounts.create({
+            cookie,
+            name: wantName ? decodeURIComponent(wantName) : '',
+          });
+          require('../../admin/auth').audit('admin', 'web_account_create', created.name, 'via browser');
+          return sendJSON(res, 200, { ...s, status: 'saved', has_cookie: false, account: created });
+        } catch (e) {
+          // 已存在同账号等：如实报错，但不把 cookie 丢掉——用户可改用粘贴方式
+          return sendJSON(res, 409, { ...s, status: 'failed', message: e.message });
+        }
+      }
+      return sendJSON(res, 200, s);
+    },
+  },
+  {
+    method: 'POST',
+    path: '/login/cancel',
+    handler: ({ res }) => sendJSON(res, 200, loginBrowser.cancel()),
+  },
+  {
+    // 手动粘贴入口（保留）：浏览器登录器不可用时（无 Edge/Chrome）的兜底
     method: 'GET',
     path: '/login-url',
     handler: ({ res }) => sendJSON(res, 200, {
@@ -68,6 +111,7 @@ const routes = [
         '全选复制所有 cookie，粘贴到下面的输入框',
       ],
       note: '百度登录态位于 baidu.com 域，网页无法直接读取浏览器 cookie，所以需要手动复制一次',
+      browser_available: !!loginBrowser.findBrowser(),
     }),
   },
   {
