@@ -17,6 +17,7 @@ const { routes: modelsRoutes } = require('./routes/models');
 const { routes: keysRoutes } = require('./routes/keys');
 const { routes: accountRoutes } = require('./routes/account');
 const { routes: webAccountsRoutes } = require('./routes/accounts');
+const autotask = require('./routes/autotask');
 
 const PORT = parseInt(process.env.DUMATE_ADMIN_PORT || '9081', 10);
 const HOST = process.env.DUMATE_ADMIN_HOST || '127.0.0.1';
@@ -100,6 +101,7 @@ router.mount(PREFIX + '/models', modelsRoutes);
 router.mount(PREFIX + '/keys', keysRoutes);
 router.mount(PREFIX + '/account', accountRoutes);
 router.mount(PREFIX + '/web-accounts', webAccountsRoutes);
+router.mount(PREFIX + '/auto-checkin', autotask.routes);
 
 const server = http.createServer((req, res) => {
   // 整个回调包一层：静态分支与同步抛错都不在 router.handle 的 catch 之内，
@@ -145,6 +147,8 @@ function handleRequest(req, res) {
 
 function start() {
   ensureDir();
+  // 定时器只在进程内，重启后按保存的配置重新排期
+  autotask.schedule();
   log('dumate2api admin starting...');
 
   if (process.argv.includes('--reset-admin')) {

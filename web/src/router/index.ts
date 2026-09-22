@@ -8,6 +8,7 @@ const Models = () => import('@/views/ModelsView.vue')
 const Keys = () => import('@/views/KeysView.vue')
 const Account = () => import('@/views/AccountView.vue')
 const Points = () => import('@/views/PointsView.vue')
+const WebAccounts = () => import('@/views/WebAccountsView.vue')
 
 const router = createRouter({
   history: createWebHashHistory(),
@@ -22,6 +23,7 @@ const router = createRouter({
         { path: 'keys', component: Keys, meta: { title: 'API Key', key: 'keys' } },
         { path: 'account', component: Account, meta: { title: '登录态', key: 'account' } },
         { path: 'points', component: Points, meta: { title: '积分明细', key: 'points' } },
+        { path: 'web-accounts', component: WebAccounts, meta: { title: '账号管理', key: 'web-accounts' } },
       ],
     },
   ],
