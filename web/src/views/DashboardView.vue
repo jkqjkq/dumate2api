@@ -32,12 +32,16 @@
         <a-card :bordered="false">
           <a-statistic
             title="积分余额"
-            :value="points ? points.left : '—'"
-            :precision="points ? 2 : 0"
+            :value="allPoints ? allPoints.totals.left : (points ? points.left : '—')"
+            :precision="2"
           />
           <div class="text-xs text-slate-500 mt-2">
-            <template v-if="points">
-              共 {{ fmt(points.total) }} · 已用 {{ fmt(points.used) }}
+            <template v-if="allPoints && allPoints.accounts.length">
+              {{ allPoints.totals.ok_accounts }} 个账号合计 ·
+              共 {{ fmt(allPoints.totals.total) }}
+            </template>
+            <template v-else-if="points">
+              本地后端账号：共 {{ fmt(points.total) }} · 已用 {{ fmt(points.used) }}
             </template>
             <span v-else>—</span>
           </div>
@@ -295,12 +299,13 @@
 import { computed, onMounted, ref } from 'vue'
 import client from '@/api/client'
 import type { SystemStatus } from '@/api/system'
-import type { PointsData, AccountsData } from '@/api/points'
+import type { PointsData, AccountsData, AllPointsData } from '@/api/points'
 import type { StatsSummary, DailyRow } from '@/api/stats'
 
 const status = ref<SystemStatus | null>(null)
 const points = ref<PointsData | null>(null)
 const accounts = ref<AccountsData | null>(null)
+const allPoints = ref<AllPointsData | null>(null)
 const stats = ref<StatsSummary | null>(null)
 const daily = ref<DailyRow[]>([])
 const loading = ref(false)
@@ -381,18 +386,20 @@ async function refresh(force = false) {
   loading.value = true
   error.value = ''
   try {
-    const [s, p, a, st, dy] = await Promise.all([
+    const [s, p, a, st, dy, ap] = await Promise.all([
       client.get('/system/status'),
       client.get('/points/points' + (force ? '?refresh=1' : '')),
       client.get('/points/accounts'),
       client.get('/stats/summary'),
       client.get('/stats/daily?days=14'),
+      client.get('/web-accounts/points-all'),
     ])
     status.value = s.data
     points.value = p.data
     accounts.value = a.data
     stats.value = st.data
     daily.value = dy.data.rows
+    allPoints.value = ap.data
   } catch (e: any) {
     // 积分依赖上游，上游没起来时其余卡片仍应显示，所以只提示不中断
     error.value = e?.response?.data?.error || e?.message || '未知错误'

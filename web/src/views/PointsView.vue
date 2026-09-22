@@ -10,6 +10,65 @@
 
     <a-alert v-if="error" type="warning" show-icon class="mb-4" :message="`积分获取失败：${error}`" />
 
+    <!-- 多账号总览：账号管理里添加的每份网页凭证都能独立查积分 -->
+    <a-card title="多账号总览" :bordered="false" class="mb-4">
+      <template v-if="allPoints && allPoints.accounts.length">
+        <a-row :gutter="[16, 16]" class="mb-3">
+          <a-col :span="8">
+            <a-statistic
+              title="账号总余额"
+              :value="allPoints.totals.left"
+              :precision="2"
+            />
+            <div class="text-xs text-slate-500 mt-2">
+              {{ allPoints.totals.ok_accounts }} / {{ allPoints.totals.accounts }} 个账号取到数据
+            </div>
+          </a-col>
+          <a-col :span="8">
+            <a-statistic title="账号总量" :value="allPoints.totals.total" :precision="2" />
+          </a-col>
+          <a-col :span="8">
+            <a-statistic title="账号已用" :value="allPoints.totals.used" :precision="2" />
+          </a-col>
+        </a-row>
+
+        <a-table
+          size="small"
+          :pagination="false"
+          :data-source="allPoints.accounts"
+          :columns="acctColumns"
+          row-key="id"
+        >
+          <template #bodyCell="{ column, record }">
+            <template v-if="column.key === 'name'">
+              <div>{{ record.nickname || record.name }}</div>
+              <div v-if="!record.ok" class="text-xs text-red-500">{{ record.error }}</div>
+            </template>
+            <template v-else-if="column.key === 'left'">
+              <span v-if="record.ok" class="font-medium">{{ fmt(record.left) }}</span>
+              <span v-else class="text-slate-400">—</span>
+            </template>
+            <template v-else-if="column.key === 'total'">
+              {{ record.ok ? fmt(record.total) : '—' }}
+            </template>
+            <template v-else-if="column.key === 'used'">
+              {{ record.ok ? fmt(record.used) : '—' }}
+            </template>
+            <template v-else-if="column.key === 'state'">
+              <a-tag v-if="!record.ok" color="red">失效</a-tag>
+              <a-tag v-else-if="record.throttled" color="orange">限流</a-tag>
+              <a-tag v-else color="green">正常</a-tag>
+            </template>
+          </template>
+        </a-table>
+      </template>
+      <a-empty v-else description="还没有添加账号。到「账号管理」里添加后，这里会显示每个账号的积分。" />
+    </a-card>
+
+    <div class="text-xs text-slate-500 mb-2">
+      以下为<b>当前本地后端账号</b>（桌面凭证）的明细——与上面的多账号是两套独立凭证。
+    </div>
+
     <a-row :gutter="[16, 16]">
       <a-col :span="6">
         <a-card :bordered="false">
@@ -158,11 +217,21 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import client from '@/api/client'
-import type { PointsData, PointsPackage } from '@/api/points'
+import type { PointsData, PointsPackage, AllPointsData } from '@/api/points'
 
 const data = ref<PointsData | null>(null)
+const allPoints = ref<AllPointsData | null>(null)
 const loading = ref(false)
 const error = ref('')
+
+// 多账号表的列
+const acctColumns = [
+  { title: '账号', key: 'name' },
+  { title: '余额', key: 'left', width: '18%' },
+  { title: '总量', key: 'total', width: '16%' },
+  { title: '已用', key: 'used', width: '16%' },
+  { title: '状态', key: 'state', width: '12%' },
+]
 
 const sourceColumns = [
   { title: '来源', key: 'source', width: '26%' },
@@ -212,6 +281,12 @@ async function load(force = false) {
   loading.value = true
   error.value = ''
   try {
+    // 多账号（网页凭证）与单账号（本地后端）分别拉：一个失败不影响另一个显示
+    try {
+      const { data: ap } = await client.get('/web-accounts/points-all' + (force ? '?refresh=1' : ''))
+      allPoints.value = ap
+    } catch (e) { /* 账号管理没配也不影响下面的明细 */ }
+
     const { data: d } = await client.get('/points/points' + (force ? '?refresh=1' : ''))
     // 逐笔列表按发放时间倒序；补 rowKey 供表格使用
     const pkgs = (d.packages as PointsPackage[])

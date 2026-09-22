@@ -346,6 +346,48 @@ const routes = [
     },
   },
   {
+    // 所有账号的积分明细（并发拉取）。
+    // 积分明细页原先只看本地后端那一个账号，但账号管理里可以有多份网页凭证，
+    // 每份都能独立查积分——只看一个会漏掉其余账号。
+    method: 'GET',
+    path: '/points-all',
+    handler: async ({ res, req }) => {
+      const force = /[?&]refresh=1/.test(req.url || '');
+      const list = accounts.load().accounts.filter((a) => a.enabled);
+
+      const results = await Promise.all(list.map(async (a) => {
+        // 不强制刷新时优先用缓存：上游一次往返 200-800ms，账号多时并发也要时间
+        if (!force && a.points && a.points_at && Date.now() - a.points_at < 60_000) {
+          return { id: a.id, name: a.name, nickname: a.nickname || '', ok: true, cached: true, ...a.points };
+        }
+        const r = await web.api.quotaOverview(a.cookie);
+        if (!r.ok) {
+          accounts.patchInternal(a.id, { last_error: r.error });
+          return { id: a.id, name: a.name, nickname: a.nickname || '', ok: false, error: r.error, expired: !!r.expired };
+        }
+        const summary = { left: r.left, total: r.total, used: r.used };
+        accounts.patchInternal(a.id, { points: summary, points_at: Date.now(), last_error: '' });
+        return {
+          id: a.id, name: a.name, nickname: a.nickname || '', ok: true, cached: false,
+          ...summary, subscribed: r.subscribed, throttled: r.throttled, packages: r.packages,
+        };
+      }));
+
+      const ok = results.filter((r) => r.ok);
+      return sendJSON(res, 200, {
+        accounts: results,
+        // 汇总口径：只累加取到数据的账号，避免失败的账号把总数拉低
+        totals: {
+          accounts: results.length,
+          ok_accounts: ok.length,
+          left: ok.reduce((s, r) => s + (r.left || 0), 0),
+          total: ok.reduce((s, r) => s + (r.total || 0), 0),
+          used: ok.reduce((s, r) => s + (r.used || 0), 0),
+        },
+      });
+    },
+  },
+  {
     method: 'GET',
     path: '/pool',
     handler: ({ res }) => {

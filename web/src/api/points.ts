@@ -77,3 +77,31 @@ export interface AccountsData {
   no_credential: number
   unknown: number
 }
+
+// 多账号积分（网页凭证，各自独立）
+export interface AccountPoints {
+  id: number
+  name: string
+  nickname: string
+  ok: boolean
+  cached?: boolean
+  left?: number
+  total?: number
+  used?: number
+  subscribed?: boolean
+  throttled?: boolean
+  packages?: PointsPackage[]
+  error?: string
+  expired?: boolean
+}
+
+export interface AllPointsData {
+  accounts: AccountPoints[]
+  totals: {
+    accounts: number
+    ok_accounts: number
+    left: number
+    total: number
+    used: number
+  }
+}
