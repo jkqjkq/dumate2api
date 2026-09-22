@@ -52,7 +52,7 @@ export interface Account {
   user_id: string
   last_login: number
   age_days: number | null
-  state: 'active' | 'stale' | 'unknown'
+  state: 'active' | 'standby' | 'no_credential' | 'unknown'
   has_credentials: boolean
   active: boolean
   points: { left: number; total: number; used: number } | null
@@ -73,6 +73,7 @@ export interface AccountsData {
   accounts: Account[]
   total: number
   active: number
-  stale: number
+  standby: number
+  no_credential: number
   unknown: number
 }

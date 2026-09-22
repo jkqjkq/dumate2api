@@ -18,8 +18,9 @@
           </a-statistic>
           <div class="text-xs mt-2">
             <template v-if="accounts">
-              <a-tag v-if="accounts.active" color="green">有效 {{ accounts.active }}</a-tag>
-              <a-tag v-if="accounts.stale" color="orange">失效 {{ accounts.stale }}</a-tag>
+              <a-tag v-if="accounts.active" color="green">使用中 {{ accounts.active }}</a-tag>
+              <a-tag v-if="accounts.standby" color="blue">备用 {{ accounts.standby }}</a-tag>
+              <a-tag v-if="accounts.no_credential" color="orange">无凭证 {{ accounts.no_credential }}</a-tag>
               <a-tag v-if="accounts.unknown" color="default">未知 {{ accounts.unknown }}</a-tag>
             </template>
             <span v-else class="text-slate-400">—</span>
@@ -358,10 +359,20 @@ const dateText = (ts: number | null) =>
   ts ? new Date(ts).toLocaleDateString('zh-CN') : '—'
 const daysLeft = (ts: number | null) =>
   ts ? Math.ceil((ts - Date.now()) / 86400000) : 0
-const stateColor = (s: string) =>
-  s === 'active' ? 'green' : s === 'stale' ? 'orange' : 'default'
-const stateText = (s: string) =>
-  s === 'active' ? '有效' : s === 'stale' ? '失效' : '未知'
+const stateColor = (s: string) => {
+  if (s === 'active') return 'green'
+  if (s === 'standby') return 'blue'
+  if (s === 'no_credential') return 'orange'
+  return 'default'
+}
+// 桌面端同一时刻只持有一份登录态，所以非当前账号标「备用」而不是「失效」——
+// 它的网页凭证通常仍然有效，写成失效会被误读成账号坏了
+const stateText = (s: string) => {
+  if (s === 'active') return '使用中'
+  if (s === 'standby') return '备用'
+  if (s === 'no_credential') return '无凭证'
+  return '未知'
+}
 // 网页端签到结果：字段值来自后端，映射成人话
 const checkinText = (r: string) =>
   r === 'claimed' ? '已签到' : r === 'already' ? '今日已签' : r === 'failed' ? '签到失败' : ''

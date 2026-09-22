@@ -59,15 +59,17 @@ function listAccounts() {
     const lastLogin = p.lastLogin || 0;
     const ageDays = lastLogin ? Math.floor((now - lastLogin) / 86400000) : null;
     const active = p.profileId === j.activeProfileId;
-    // 凭证分布：活跃账号的 cookie 存在顶层 cookies 字段，非活跃账号只有自己
-    // 的 encryptedCookies 才代表它还能用。只看 lastLogin 会把一个早就没有
-    // 凭证的历史账号报成「有效」，所以凭证缺失优先判为失效。
+    // 桌面端同一时刻只有一份登录态（存在顶层 cookies，归属当前活跃账号），
+    // 非活跃账号只有自己带 encryptedCookies 才算还能用。
+    //
+    // 注意这**不等于账号失效**：切到别的账号后，前一个账号在桌面端不可用，
+    // 但它的网页凭证（签到/抽奖/积分）通常仍然有效。原先一律标成「失效」，
+    // 会被读成「账号坏了」，而实际只是「当前没在用它的桌面凭证」。
     const hasCredentials = !!p.encryptedCookies || active;
     let state;
-    if (!hasCredentials) state = 'stale';
-    else if (ageDays === null) state = 'unknown';
-    else if (ageDays > 30) state = 'stale';
-    else state = 'active';
+    if (active) state = 'active';
+    else if (hasCredentials) state = ageDays === null ? 'unknown' : 'standby';
+    else state = 'no_credential';
 
     const web = webByAccountId.get(p.bceAccountId || p.bceUserId || '') || null;
 
@@ -255,8 +257,12 @@ const routes = [
       return sendJSON(res, 200, {
         accounts: withPoints,
         total: withPoints.length,
+        // 统计口径按新状态名：桌面端只有一个是「当前使用中」，
+        // 其余有凭证的是「备用」，没有凭证的才是「无凭证」。
+        // 不再叫 stale——那会被读成账号失效，而多数情况下网页端仍可用。
         active: withPoints.filter((a) => a.state === 'active').length,
-        stale: withPoints.filter((a) => a.state === 'stale').length,
+        standby: withPoints.filter((a) => a.state === 'standby').length,
+        no_credential: withPoints.filter((a) => a.state === 'no_credential').length,
         unknown: withPoints.filter((a) => a.state === 'unknown').length,
       });
     },
