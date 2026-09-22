@@ -5,6 +5,7 @@ const web = require('../../dumate-web');
 const loginBrowser = require('../../login-browser');
 const webPool = require('../../web-pool');
 const taskRunner = require('../../task-runner');
+const taskScheduler = require('../../task-scheduler');
 const { sendJSON } = require('../router');
 
 // 登录链接。百度 SSO 的登录页，登录后 cookie 落在 .baidu.com 域，
@@ -492,6 +493,36 @@ const routes = [
       const total = out.reduce((s, r) => s + (r.drawn || 0), 0);
       require('../../admin/auth').audit('admin', 'draw_all', '', `抽奖 ${total} 次`);
       return sendJSON(res, 200, { results: out, drawn_count: total });
+    },
+  },
+  {
+    // 任务轮询开关与状态。间隔的定法（含抖动）写在 rationale 里一并返回，
+    // 界面直接展示，避免「这个间隔是怎么来的」只能靠猜。
+    method: 'GET',
+    path: '/tasks/schedule',
+    handler: ({ res }) => sendJSON(res, 200, taskScheduler.snapshot()),
+  },
+  {
+    method: 'POST',
+    path: '/tasks/schedule',
+    handler: ({ res, body }) => {
+      try {
+        const r = taskScheduler.configure(body || {});
+        require('../../admin/auth').audit('admin', 'task_schedule_config',
+          r.enabled ? 'on' : 'off', `${r.minutes} 分钟`);
+        return sendJSON(res, 200, r);
+      } catch (e) {
+        return sendJSON(res, 400, { error: e.message });
+      }
+    },
+  },
+  {
+    // 立即跑一轮（不等定时器），用于验证配置
+    method: 'POST',
+    path: '/tasks/poll-now',
+    handler: async ({ res }) => {
+      const r = await taskScheduler.runOnce('manual');
+      return sendJSON(res, 200, r);
     },
   },
   {

@@ -18,6 +18,7 @@ const { routes: keysRoutes } = require('./routes/keys');
 const { routes: accountRoutes } = require('./routes/account');
 const { routes: webAccountsRoutes } = require('./routes/accounts');
 const autotask = require('./routes/autotask');
+const taskScheduler = require('../task-scheduler');
 
 const PORT = parseInt(process.env.DUMATE_ADMIN_PORT || '9081', 10);
 const HOST = process.env.DUMATE_ADMIN_HOST || '127.0.0.1';
@@ -149,6 +150,8 @@ function start() {
   ensureDir();
   // 定时器只在进程内，重启后按保存的配置重新排期
   autotask.schedule();
+  // 任务轮询定时器同样只活在进程内，重启后按保存的配置重新排期
+  taskScheduler.schedule();
   log('dumate2api admin starting...');
 
   if (process.argv.includes('--reset-admin')) {
