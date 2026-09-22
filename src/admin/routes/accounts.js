@@ -6,6 +6,7 @@ const loginBrowser = require('../../login-browser');
 const webPool = require('../../web-pool');
 const taskRunner = require('../../task-runner');
 const taskScheduler = require('../../task-scheduler');
+const records = require('../../records');
 const { sendJSON } = require('../router');
 
 // 登录链接。百度 SSO 的登录页，登录后 cookie 落在 .baidu.com 域，
@@ -21,6 +22,10 @@ async function doCheckin(account) {
     accounts.patchInternal(account.id, {
       last_error: info.error,
       last_login_ok_at: info.expired ? null : account.last_login_ok_at,
+    });
+    records.append({
+      type: 'checkin', account_id: account.id, account: account.name,
+      ok: false, result: 'failed', error: info.error,
     });
     return { id: account.id, name: account.name, ok: false, error: info.error, expired: !!info.expired };
   }
@@ -39,6 +44,10 @@ async function doCheckin(account) {
         month_points: info.month_points,
       },
     });
+    records.append({
+      type: 'checkin', account_id: account.id, account: account.name,
+      ok: true, result: 'already', total_times: info.total_times,
+    });
     return { id: account.id, name: account.name, ok: true, already: true, info };
   }
 
@@ -54,6 +63,11 @@ async function doCheckin(account) {
       sign_in_days: info.sign_in_days,
       month_points: info.month_points,
     },
+  });
+  records.append({
+    type: 'checkin', account_id: account.id, account: account.name,
+    ok: res.ok, result: res.ok ? 'claimed' : 'failed',
+    total_times: info.total_times, error: res.error || '',
   });
   return { id: account.id, name: account.name, ok: res.ok, error: res.error, info };
 }
@@ -479,6 +493,21 @@ const routes = [
           }
         }
 
+        // 一次抽奖可能连抽多次，按「每次抽到的奖品」逐条记录，
+        // 这样记录页能列出具体中了什么而不是只写「抽了 N 次」
+        for (const w of wonPrizes) {
+          records.append({
+            type: 'draw', account_id: a.id, account: a.name,
+            ok: true, prize: w.name, prize_type: w.type, prize_value: w.value,
+          });
+        }
+        if (!wonPrizes.length && draws.length) {
+          records.append({
+            type: 'draw', account_id: a.id, account: a.name,
+            ok: draws.some((d) => d.ok), count: draws.filter((d) => d.ok).length,
+          });
+        }
+
         out.push({
           id: a.id, name: a.name, ok: true,
           before: remaining,
@@ -523,6 +552,62 @@ const routes = [
     handler: async ({ res }) => {
       const r = await taskScheduler.runOnce('manual');
       return sendJSON(res, 200, r);
+    },
+  },
+  {
+    // 操作记录：签到 / 任务 / 抽奖，按时间倒序。
+    // 支持按账号、类型、天数过滤，前端用同一份数据出列表和日历两种视图。
+    method: 'GET',
+    path: '/records',
+    handler: ({ res, req }) => {
+      const q = (k) => (req.url.match(new RegExp(`[?&]${k}=([^&]*)`)) || [])[1];
+      const limit = Math.min(1000, parseInt(q('limit') || '200', 10) || 200);
+      const accountId = q('account_id') ? Number(decodeURIComponent(q('account_id'))) : null;
+      const type = q('type') ? decodeURIComponent(q('type')) : null;
+      const days = Math.min(180, Math.max(1, parseInt(q('days') || '30', 10) || 30));
+      const since = Date.now() - days * 86400000;
+
+      const { rows, total } = records.read({ limit, account_id: accountId, type, since });
+      return sendJSON(res, 200, {
+        rows,
+        total,
+        days,
+        // 日历视图要的按天聚合
+        daily: records.dailySummary(days),
+        // 记录类型与含义，前端据此渲染标签，避免各处自己硬编码
+        types: {
+          checkin: '签到',
+          task: '任务',
+          draw: '抽奖',
+        },
+      });
+    },
+  },
+  {
+    // 各账号的签到日历（直接取上游的 sign_in_days，不受本地记录起点限制）
+    method: 'GET',
+    path: '/checkin-calendar',
+    handler: async ({ res, req }) => {
+      const months = Math.min(6, Math.max(1, parseInt((req.url.match(/[?&]months=(\d+)/) || [])[1] || '1', 10)));
+      const list = accounts.load().accounts.filter((a) => a.enabled);
+      const out = [];
+
+      for (const a of list) {
+        const info = await web.api.loginBonusInfo(a.cookie);
+        out.push({
+          account_id: a.id,
+          name: a.name,
+          nickname: a.nickname || '',
+          ok: info.ok,
+          error: info.ok ? '' : info.error,
+          has_issued_today: info.ok ? info.has_issued : null,
+          total_times: info.ok ? info.total_times : null,
+          // 上游返回的是「哪些天签过」，这是权威数据；
+          // 本地记录只能回答「我什么时候去点的」，两者互补
+          sign_in_days: info.ok ? (info.sign_in_days || []) : [],
+        });
+      }
+      return sendJSON(res, 200, { accounts: out, months });
     },
   },
   {

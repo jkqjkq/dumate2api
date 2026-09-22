@@ -30,6 +30,20 @@ function appendLog(entry) {
     fs.mkdirSync(DATA_DIR, { recursive: true });
     fs.appendFileSync(path.join(DATA_DIR, LOG_FILE), `${JSON.stringify(entry)}\n`, 'utf8');
   } catch (e) { /* 记录失败不影响任务本身 */ }
+  // 同时写进统一记录流，供「记录」页按时间轴展示
+  try {
+    require('./records').append({
+      type: 'task',
+      account_id: entry.account_id,
+      account: entry.account,
+      ok: entry.ok,
+      task_id: entry.task_id,
+      title: entry.title,
+      via: entry.via || '',
+      already: !!entry.already,
+      error: entry.error || '',
+    });
+  } catch (e) { /* 同上 */ }
 }
 
 function recentRuns(limit = 50) {
