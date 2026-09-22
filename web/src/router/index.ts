@@ -6,6 +6,7 @@ const MainLayout = () => import('@/layouts/MainLayout.vue')
 const Dashboard = () => import('@/views/DashboardView.vue')
 const Models = () => import('@/views/ModelsView.vue')
 const Keys = () => import('@/views/KeysView.vue')
+const Account = () => import('@/views/AccountView.vue')
 
 const router = createRouter({
   history: createWebHashHistory(),
@@ -18,6 +19,7 @@ const router = createRouter({
         { path: '', component: Dashboard, meta: { title: '仪表盘', key: 'dashboard' } },
         { path: 'models', component: Models, meta: { title: '模型管理', key: 'models' } },
         { path: 'keys', component: Keys, meta: { title: 'API Key', key: 'keys' } },
+        { path: 'account', component: Account, meta: { title: '登录态', key: 'account' } },
       ],
     },
   ],
