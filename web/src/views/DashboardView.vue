@@ -87,35 +87,7 @@
       <a-col :span="17">
         <a-card title="近 14 天调用趋势" :bordered="false" class="h-full">
           <a-empty v-if="!daily.length" description="还没有请求记录" />
-          <template v-else>
-            <svg :viewBox="`0 0 ${chart.w} ${chart.h}`" class="w-full" :style="{ height: '200px' }">
-              <!-- 网格与纵轴刻度 -->
-              <g v-for="(t, i) in chart.ticks" :key="'t' + i">
-                <line
-                  :x1="chart.padL" :y1="t.y" :x2="chart.w - chart.padR" :y2="t.y"
-                  stroke="#f0f0f0" stroke-width="1"
-                />
-                <text :x="chart.padL - 8" :y="t.y + 4" text-anchor="end"
-                      font-size="11" fill="#94a3b8">{{ t.label }}</text>
-              </g>
-              <!-- 面积 + 折线 -->
-              <path :d="chart.area" fill="url(#grad)" stroke="none" />
-              <path :d="chart.line" fill="none" stroke="#fa8c16" stroke-width="2" />
-              <defs>
-                <linearGradient id="grad" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="0%" stop-color="#fa8c16" stop-opacity="0.25" />
-                  <stop offset="100%" stop-color="#fa8c16" stop-opacity="0.02" />
-                </linearGradient>
-              </defs>
-              <!-- 横轴日期 -->
-              <text
-                v-for="(d, i) in chart.xLabels" :key="'x' + i"
-                :x="d.x" :y="chart.h - 4" text-anchor="middle"
-                font-size="11" fill="#94a3b8"
-              >{{ d.label }}</text>
-            </svg>
-            <div class="text-xs text-slate-400 mt-1">折线为每日请求数</div>
-          </template>
+          <div v-else ref="chartEl" style="height: 220px"></div>
         </a-card>
       </a-col>
 
@@ -248,7 +220,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import client from '@/api/client'
 import type { SystemStatus } from '@/api/system'
 import type { PointsData, AccountsData } from '@/api/points'
@@ -333,37 +305,79 @@ function healthColor(a: DashAccount) {
   return 'bg-green-500'
 }
 
-// 手写 SVG 折线图：只为一条趋势线引入图表库不划算，
-// 而 recharts/echarts 的体积对这个页面来说不成比例。
-const chart = computed(() => {
-  const w = 800, h = 220, padL = 48, padR = 16, padT = 16, padB = 28
+// 趋势图用 ECharts 按需引入：只加载折线图需要的模块，
+// 比全量引入（约 1MB）小得多，也避免为一个图表拖慢首屏。
+import * as echarts from 'echarts/core'
+import { LineChart } from 'echarts/charts'
+import {
+  GridComponent, TooltipComponent, LegendComponent, DataZoomComponent,
+} from 'echarts/components'
+import { CanvasRenderer } from 'echarts/renderers'
+
+echarts.use([
+  LineChart, GridComponent, TooltipComponent, LegendComponent,
+  DataZoomComponent, CanvasRenderer,
+])
+
+const chartEl = ref<HTMLElement | null>(null)
+let chartInst: echarts.ECharts | null = null
+
+// 请求数与 Token 放同一张图：两者趋势不同步时（请求少但 Token 高）
+// 单看一条线会以为流量正常，双轴才能看出真正的负载变化。
+function renderChart() {
+  if (!chartEl.value) return
+  if (!chartInst) chartInst = echarts.init(chartEl.value)
+
   const rows = daily.value
-  if (!rows.length) return { w, h, padL, padR, line: '', area: '', ticks: [], xLabels: [] }
-
-  const values = rows.map((r) => r.requests)
-  const max = Math.max(...values, 1)
-  // 纵轴取整到 4 段，避免出现 1234 这种刻度
-  const step = Math.ceil(max / 4 / 10) * 10 || 1
-  const top = step * 4
-
-  const x = (i: number) => padL + (i * (w - padL - padR)) / Math.max(1, rows.length - 1)
-  const y = (v: number) => padT + (1 - v / top) * (h - padT - padB)
-
-  const pts = rows.map((r, i) => `${x(i)},${y(r.requests)}`)
-  const line = 'M' + pts.join(' L')
-  const area = `${line} L${x(rows.length - 1)},${h - padB} L${x(0)},${h - padB} Z`
-
-  const ticks = []
-  for (let i = 0; i <= 4; i++) {
-    const v = step * i
-    ticks.push({ y: y(v), label: String(v) })
-  }
-  // 横轴只标首、中、尾，避免挤在一起
-  const idx = [0, Math.floor((rows.length - 1) / 2), rows.length - 1]
-  const xLabels = idx.map((i) => ({ x: x(i), label: rows[i]?.day?.slice(5) || '' }))
-
-  return { w, h, padL, padR, line, area, ticks, xLabels }
-})
+  chartInst.setOption({
+    grid: { left: 48, right: 48, top: 32, bottom: 28 },
+    tooltip: {
+      trigger: 'axis',
+      valueFormatter: (v: number) => (v == null ? '—' : v.toLocaleString('zh-CN')),
+    },
+    legend: { data: ['请求数', 'Token'], right: 0, top: 0, itemWidth: 12, itemHeight: 8 },
+    xAxis: {
+      type: 'category',
+      data: rows.map((r) => r.day.slice(5)),
+      boundaryGap: false,
+      axisLine: { lineStyle: { color: '#e5e7eb' } },
+      axisLabel: { color: '#94a3b8', fontSize: 11 },
+    },
+    yAxis: [
+      {
+        type: 'value', name: '请求', nameTextStyle: { color: '#94a3b8', fontSize: 11 },
+        axisLabel: { color: '#94a3b8', fontSize: 11 },
+        splitLine: { lineStyle: { color: '#f3f4f6' } },
+      },
+      {
+        type: 'value', name: 'Token', nameTextStyle: { color: '#94a3b8', fontSize: 11 },
+        axisLabel: {
+          color: '#94a3b8', fontSize: 11,
+          formatter: (v: number) => (v >= 1e6 ? (v / 1e6).toFixed(1) + 'M' : v >= 1e3 ? (v / 1e3).toFixed(0) + 'K' : v),
+        },
+        splitLine: { show: false },
+      },
+    ],
+    series: [
+      {
+        name: '请求数', type: 'line', smooth: true, symbol: 'none',
+        data: rows.map((r) => r.requests),
+        lineStyle: { color: '#fa8c16', width: 2 },
+        areaStyle: {
+          color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+            { offset: 0, color: 'rgba(250,140,22,0.25)' },
+            { offset: 1, color: 'rgba(250,140,22,0.02)' },
+          ]),
+        },
+      },
+      {
+        name: 'Token', type: 'line', smooth: true, symbol: 'none', yAxisIndex: 1,
+        data: rows.map((r) => r.total_tokens),
+        lineStyle: { color: '#1677ff', width: 2 },
+      },
+    ],
+  })
+}
 
 async function refresh(force = false) {
   loading.value = true
@@ -384,6 +398,9 @@ async function refresh(force = false) {
     daily.value = dy.data.rows
     dash.value = db.data
     lastRefresh.value = new Date().toLocaleTimeString('zh-CN')
+    // 等 DOM 更新后再渲染，否则 ref 还没挂上
+    await nextTick()
+    renderChart()
   } catch (e: any) {
     error.value = e?.response?.data?.error || e?.message || '未知错误'
   } finally {
@@ -391,5 +408,16 @@ async function refresh(force = false) {
   }
 }
 
-onMounted(() => refresh())
+function onResize() { chartInst?.resize() }
+
+onMounted(() => {
+  window.addEventListener('resize', onResize)
+  refresh()
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('resize', onResize)
+  chartInst?.dispose()
+  chartInst = null
+})
 </script>
