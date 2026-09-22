@@ -74,13 +74,20 @@ restart.bat
 |------|--------|------|
 | `DUMATE2API_PORT` | `9080` | 代理监听端口 |
 | `DUMATE2API_HOST` | `127.0.0.1` | 代理监听地址 |
-| `DUMATE2API_KEY` | `nokey` | 代理 API Key（可选） |
+| `DUMATE_REQUIRE_KEY` | 未设置 | 设为 `1` 才校验 API Key。**默认关闭**：不设置时任何来源无需 key 即可调用 |
 | `DUMATE_INSTALL_DIR` | `D:\Program Files\code program\baidudazi\DuMate` | DuMate 安装目录 |
 | `DUMATE_UPSTREAM_PORT` | `8980` | 自建后端监听端口 |
 | `DUMATE_AUTOSTART` | `auto` | `auto`=无实例时才拉起；`always`=总是自己拉起；`off`=只用已有实例 |
 | `DUMATE_UPSTREAM_LOG` | - | 设为 `1` 时把后端日志打到 stdout |
 | `DUMATE_MIN_MAX_TOKENS` | `32768` | 输出预算下限，防止思维链吃光正文（`0` 关闭该策略） |
 | `DUMATE_MAX_MAX_TOKENS` | `131072` | 输出预算上限 |
+| `DUMATE_ADMIN_PORT` | `9081` | 管理系统监听端口 |
+| `DUMATE_ADMIN_HOST` | `127.0.0.1` | 管理系统监听地址 |
+| `DUMATE_ADMIN_DATA` | `./data` | 管理系统数据目录（账号、key、请求日志） |
+
+> `DUMATE2API_KEY` 在早期版本里被文档描述为"代理 API Key"，但代码中从未读取它，
+> 设置它并不会带来任何鉴权效果。真实开关是 `DUMATE_REQUIRE_KEY`，配套的 key
+> 在管理系统（`http://127.0.0.1:9081`）的「API Key」页创建。
 
 ## cc-switch 配置教程
 
