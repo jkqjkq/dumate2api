@@ -78,19 +78,22 @@ function mtimeOf() {
   try { return fs.statSync(filePath()).mtimeMs; } catch (e) { return 0; }
 }
 
-// 合并默认值：磁盘上只存改动过的字段也能工作，缺项回落到默认
+// 规范化。关键点：**文件存在时 aliases 就是文件里的内容**，不再把默认表
+// 合回去。原先每次 load 都 `{...DEFAULT_ALIASES, ...aliases}`，导致界面上
+// 删掉一个默认别名后它又冒出来——删除永远无效，用户没有任何办法解除映射。
+// 默认表只在「文件不存在」时作为初始值。
 function normalize(raw) {
-  const r = raw && typeof raw === 'object' ? raw : {};
-  const aliases = (r.aliases && typeof r.aliases === 'object') ? r.aliases : {};
+  const r = raw && typeof raw === 'object' ? raw : null;
+  const hasAliases = r && r.aliases && typeof r.aliases === 'object' && !Array.isArray(r.aliases);
   return {
-    aliases: { ...DEFAULT_ALIASES, ...aliases },
-    upstream_models: Array.isArray(r.upstream_models) && r.upstream_models.length
+    aliases: hasAliases ? { ...r.aliases } : { ...DEFAULT_ALIASES },
+    upstream_models: r && Array.isArray(r.upstream_models) && r.upstream_models.length
       ? r.upstream_models.map(String)
       : DEFAULT_UPSTREAM.slice(),
-    exposed: Array.isArray(r.exposed) && r.exposed.length
+    exposed: r && Array.isArray(r.exposed) && r.exposed.length
       ? r.exposed.map(String)
       : DEFAULT_EXPOSED.slice(),
-    fallback: typeof r.fallback === 'string' && r.fallback ? r.fallback : DEFAULTS.fallback,
+    fallback: r && typeof r.fallback === 'string' && r.fallback ? r.fallback : DEFAULTS.fallback,
   };
 }
 
