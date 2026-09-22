@@ -18,6 +18,12 @@ export interface ActivityRecord {
   prize_value?: number
   count?: number
   error?: string
+  // 积分变化：差值 + 前后余额，三个都要——差值说明发了多少，
+  // 前后值说明从多少变到多少（0 → 30 是首次发放，26 → 56 是累加）
+  points_delta?: number | null
+  points_before?: number | null
+  points_after?: number | null
+  total_points?: number
 }
 
 export interface DailySummary {

@@ -17,6 +17,11 @@ const LOGIN_URL = 'https://login.bce.baidu.com/?redirect=' +
 // 签到结果写回账号记录。抽出来单独一个函数是因为「一键签到」和
 // 「单账号签到」两条路径都要用，且都要在失败时记下原因。
 async function doCheckin(account) {
+  // 动作前的积分快照，用于算这次签到带来多少积分变化。
+  // 放在最前面取：已签到的分支不需要它，但多取一次的成本远低于
+  // 「有的分支有差值、有的没有」造成的记录不一致。
+  account._pointsBefore = await records.pointsSnapshot(account.cookie);
+
   const info = await web.api.loginBonusInfo(account.cookie);
   if (!info.ok) {
     accounts.patchInternal(account.id, {
@@ -44,14 +49,28 @@ async function doCheckin(account) {
         month_points: info.month_points,
       },
     });
+    // 已签到的分支也记录，但积分变化是 0——这次确实没有发放。
+    // 记 0 而不是留空，因为「这次没发」和「没测到」是两件事。
+    // 前后值用当前余额（两者相同），让表格里这一行的格式与其他行一致。
+    const cur = account._pointsBefore ? account._pointsBefore.left : null;
     records.append({
       type: 'checkin', account_id: account.id, account: account.name,
       ok: true, result: 'already', total_times: info.total_times,
+      total_points: info.total_points,
+      points_delta: 0, points_before: cur, points_after: cur,
     });
-    return { id: account.id, name: account.name, ok: true, already: true, info };
+    return {
+      id: account.id, name: account.name, ok: true, already: true, info,
+      points_delta: 0, points_before: cur, points_after: cur,
+    };
   }
 
   const res = await web.api.claimLoginBonus(account.cookie);
+  // 签到前先取一次积分快照，签完再取一次，差值就是这次签到发了多少。
+  // 上游不返回金额，只能用余额差值——这是实测真值，不是估算。
+  const afterPoints = res.ok ? await records.pointsSnapshot(account.cookie) : null;
+  const pd = records.pointsDelta(account._pointsBefore, afterPoints);
+
   accounts.patchInternal(account.id, {
     last_error: res.ok ? '' : res.error,
     last_login_ok_at: res.ok ? Date.now() : account.last_login_ok_at,
@@ -67,9 +86,17 @@ async function doCheckin(account) {
   records.append({
     type: 'checkin', account_id: account.id, account: account.name,
     ok: res.ok, result: res.ok ? 'claimed' : 'failed',
-    total_times: info.total_times, error: res.error || '',
+    total_times: info.total_times,
+    total_points: info.total_points,
+    points_delta: pd.delta,
+    points_before: pd.before,
+    points_after: pd.after,
+    error: res.error || '',
   });
-  return { id: account.id, name: account.name, ok: res.ok, error: res.error, info };
+  return {
+    id: account.id, name: account.name, ok: res.ok, error: res.error, info,
+    points_delta: pd.delta, points_before: pd.before, points_after: pd.after,
+  };
 }
 
 const routes = [
@@ -455,6 +482,10 @@ const routes = [
         const st = await web.api.drawStatus(a.cookie);
         if (!st.ok) { out.push({ id: a.id, name: a.name, ok: false, error: st.error }); continue; }
 
+        // 抽奖前后的积分快照：抽到积分类奖品会让总量上涨，
+        // 差值就是这一轮实际到手的积分。
+        const beforePoints = await records.pointsSnapshot(a.cookie);
+
         let remaining = st.remaining_draws || 0;
         const draws = [];
         // 抽到没次数为止。上限 20 次防止服务端计数异常时无限循环。
@@ -494,17 +525,24 @@ const routes = [
         }
 
         // 一次抽奖可能连抽多次，按「每次抽到的奖品」逐条记录，
-        // 这样记录页能列出具体中了什么而不是只写「抽了 N 次」
-        for (const w of wonPrizes) {
+        // 这样记录页能列出具体中了什么而不是只写「抽了 N 次」。
+        // 积分变化记在第一条上（整轮的总变化），避免每条都重复同一个数。
+        const dp = records.pointsDelta(beforePoints, await records.pointsSnapshot(a.cookie));
+        for (let i = 0; i < wonPrizes.length; i++) {
+          const w = wonPrizes[i];
           records.append({
             type: 'draw', account_id: a.id, account: a.name,
             ok: true, prize: w.name, prize_type: w.type, prize_value: w.value,
+            points_delta: i === 0 ? dp.delta : null,
+            points_before: i === 0 ? dp.before : null,
+            points_after: i === 0 ? dp.after : null,
           });
         }
         if (!wonPrizes.length && draws.length) {
           records.append({
             type: 'draw', account_id: a.id, account: a.name,
             ok: draws.some((d) => d.ok), count: draws.filter((d) => d.ok).length,
+            points_delta: dp.delta, points_before: dp.before, points_after: dp.after,
           });
         }
 
@@ -516,6 +554,7 @@ const routes = [
           results: draws,
           claimed,
           won: wonPrizes,
+          points_delta: dp.delta,
         });
       }
 

@@ -66,4 +66,42 @@ function dailySummary(days = 30) {
   return Object.values(byAccount);
 }
 
-module.exports = { append, read, dailySummary, FILE };
+// 积分快照：动作前后各取一次，差值就是这次动作带来的积分变化。
+//
+// 为什么用差值而不是接口返回的字段：签到接口只返回 true，任务接口也不带
+// 奖励金额；上游唯一权威的积分口径是 quota_overview 的余额。差值法是实测
+// 出来的真值，而且签到/任务/抽奖三条路径能共用同一套逻辑。
+//
+// 用 left（可用余额）而不是 total（累计总量）作为对比基准：
+// 「余额 26 → 56」是用户实际能用的钱；总量会受模型消耗影响，
+// 看起来会像「发了 30 但总量只涨了 10」，容易误读。
+async function pointsSnapshot(cookie) {
+  try {
+    const web = require('./dumate-web');
+    const r = await web.api.quotaOverview(cookie);
+    if (!r.ok) return null;
+    return { left: r.left, total: r.total, at: Date.now() };
+  } catch (e) {
+    return null;
+  }
+}
+
+// 算积分变化。返回 { delta, before, after } —— 三个值都要留着：
+// 差值说明「这次发了多少」，前后值说明「从多少变到多少」，
+// 后者能让人一眼看出是首次发放（0 → 30）还是累加（26 → 56）。
+//
+// 快照缺失（接口失败）时返回 delta: null 而不是 0——0 会被读成
+// 「这次没给积分」，而真相是「没测到」，两者含义不同。
+function pointsDelta(before, after) {
+  const b = before ? before.left : null;
+  const a = after ? after.left : null;
+  if (b === null || a === null) return { delta: null, before: b, after: a };
+  const d = a - b;
+  return {
+    delta: Number.isFinite(d) ? Math.round(d * 100) / 100 : null,
+    before: Math.round(b * 100) / 100,
+    after: Math.round(a * 100) / 100,
+  };
+}
+
+module.exports = { append, read, dailySummary, pointsSnapshot, pointsDelta, FILE };

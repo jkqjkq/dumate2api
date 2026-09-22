@@ -41,6 +41,9 @@ function appendLog(entry) {
       title: entry.title,
       via: entry.via || '',
       already: !!entry.already,
+      points_delta: entry.points_delta,
+      points_before: entry.points_before,
+      points_after: entry.points_after,
       error: entry.error || '',
     });
   } catch (e) { /* 同上 */ }
@@ -68,6 +71,10 @@ async function runTask(account, task) {
     return { ok: false, task_id: task.task_id, title: task.title, skipped: true, error: `${task.task_type} 无法自动完成` };
   }
 
+  // 任务奖励的积分不在接口响应里，只能用积分余额差值测。
+  // 在动作前取一次快照，完成后再取一次。
+  const before = await records.pointsSnapshot(account.cookie);
+
   // QUERY_INPUT：先发一条内容匹配的消息。这一步同时满足「用一次模型」和
   // 「内容匹配」两个条件，服务端据此认定任务已完成。
   let via = 'complete-only';
@@ -86,15 +93,21 @@ async function runTask(account, task) {
 
   // 再上报完成
   const c = await web.api.completeTask(account.cookie, task.task_id);
+
+  // 完成任务可能发的是抽奖次数而不是积分，所以差值可能为 0；
+  // 那不代表失败，只是这次奖励的形式不是积分。
+  const after = await records.pointsSnapshot(account.cookie);
+  const pd = records.pointsDelta(before, after);
+
   if (!c.ok) {
     // 已发放不算失败——任务本来就已经完成过
     const already = c.code === 410121 || /已发放/.test(c.error || '');
     return {
       ok: already, task_id: task.task_id, title: task.title,
-      already, via, error: already ? '' : c.error,
+      already, via, ...pd, error: already ? '' : c.error,
     };
   }
-  return { ok: true, task_id: task.task_id, title: task.title, via };
+  return { ok: true, task_id: task.task_id, title: task.title, via, ...pd };
 }
 
 // 跑一个账号的所有可自动任务
@@ -111,7 +124,9 @@ async function runForAccount(account) {
     results.push(r);
     appendLog({
       ts: Date.now(), account_id: account.id, account: account.name,
-      task_id: r.task_id, title: r.title, ok: r.ok, via: r.via, error: r.error || '',
+      task_id: r.task_id, title: r.title, ok: r.ok, via: r.via,
+      points_delta: r.delta, points_before: r.before, points_after: r.after,
+      error: r.error || '',
     });
   }
 

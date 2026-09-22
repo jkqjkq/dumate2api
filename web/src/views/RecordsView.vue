@@ -118,28 +118,38 @@
             <template v-if="record.type === 'checkin'">
               {{ checkinText(record.result) }}
               <span v-if="record.total_times" class="text-xs text-slate-400 ml-1">
-                （累计 {{ record.total_times }} 次）
+                · 累计 {{ record.total_times }} 次
               </span>
+              <a-tag v-if="!record.ok" color="red" class="ml-1">失败</a-tag>
+              <span v-if="record.error" class="text-xs text-red-500 ml-1">{{ record.error }}</span>
             </template>
             <template v-else-if="record.type === 'task'">
               {{ record.title }}
               <a-tag v-if="record.already" color="default" class="ml-1">已发放</a-tag>
+              <a-tag v-if="!record.ok" color="red" class="ml-1">失败</a-tag>
+              <span v-if="record.error" class="text-xs text-red-500 ml-1">{{ record.error }}</span>
             </template>
             <template v-else-if="record.type === 'draw'">
               <template v-if="record.prize">
                 抽到 <span class="font-medium">{{ record.prize }}</span>
-                <span v-if="record.prize_value" class="text-xs text-slate-400 ml-1">
-                  （价值 {{ record.prize_value }}）
-                </span>
               </template>
               <template v-else>抽了 {{ record.count || 1 }} 次</template>
             </template>
           </template>
-          <template v-else-if="column.key === 'ok'">
-            <a-tag :color="record.ok ? 'green' : 'red'">
-              {{ record.ok ? '成功' : '失败' }}
-            </a-tag>
-            <div v-if="record.error" class="text-xs text-red-500">{{ record.error }}</div>
+          <template v-else-if="column.key === 'points'">
+            <template v-if="record.points_delta !== null && record.points_delta !== undefined">
+              <span :class="record.points_delta > 0 ? 'text-green-600' : 'text-slate-400'">
+                余额 {{ record.points_delta > 0 ? '+' + record.points_delta : record.points_delta }}
+                <span
+                  v-if="record.points_before !== null && record.points_after !== null"
+                  class="text-xs text-slate-400"
+                >
+                  ({{ fmtNum(record.points_before) }} → {{ fmtNum(record.points_after) }})
+                </span>
+              </span>
+              <div class="text-xs text-slate-400">{{ record.account }}</div>
+            </template>
+            <span v-else class="text-slate-400">—</span>
           </template>
         </template>
       </a-table>
@@ -182,16 +192,18 @@ const dailyColumns = [
   { title: '按天', key: 'days' },
 ]
 const detailColumns = [
-  { title: '时间', key: 'ts', width: '20%' },
+  { title: '时间', key: 'ts', width: '18%' },
   { title: '类型', key: 'type', width: '10%' },
   { title: '账号', key: 'account', width: '16%' },
-  { title: '内容', key: 'detail' },
-  { title: '结果', key: 'ok', width: '14%' },
+  { title: '结果', key: 'detail' },
+  { title: '积分', key: 'points', width: '18%' },
 ]
 
 const typeText = (t: string) => records.value?.types?.[t] || t
 const typeColor = (t: string) =>
   t === 'checkin' ? 'green' : t === 'task' ? 'blue' : t === 'draw' ? 'orange' : 'default'
+
+const fmtNum = (n: number) => n.toLocaleString('zh-CN', { maximumFractionDigits: 2 })
 
 function checkinText(r?: string) {
   return r === 'claimed' ? '签到成功'
