@@ -1,5 +1,22 @@
+export interface UsageToday {
+  requests: number
+  tokens: number
+  failed: number
+  success_rate: number | null
+  avg_ms: number | null
+  // 老日志没有首字字段，样本数说明这个均值基于多少条记录
+  avg_first_token_ms: number | null
+  first_token_samples: number
+  input_tokens: number
+  output_tokens: number
+  stream_count: number
+  models: Array<{ model: string; tokens: number }>
+  consumed_points: number
+  point_records: number
+}
+
 export interface UsageCards {
-  today: { requests: number; tokens: number; failed: number; consumed_points: number; point_records: number }
+  today: UsageToday
   week: { requests: number; tokens: number; failed: number }
   consumed: number
   consumed_records: number

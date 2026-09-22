@@ -61,6 +61,62 @@
       </a-col>
     </a-row>
 
+    <!-- 今日概览：只有请求数与 token 说不清「今天跑得怎么样」，
+         补上成功率、快慢与今日在用的模型 -->
+    <a-card title="今日概览" :bordered="false" class="mt-4">
+      <a-empty v-if="!data?.cards.today.requests" description="今天还没有请求" />
+      <template v-else>
+        <a-descriptions :column="4" size="small" bordered>
+          <a-descriptions-item label="请求数">
+            {{ fmt(data.cards.today.requests) }}
+            <a-tag v-if="data.cards.today.failed" color="red" class="ml-1">
+              失败 {{ data.cards.today.failed }}
+            </a-tag>
+          </a-descriptions-item>
+          <a-descriptions-item label="成功率">
+            <span :class="successRateColor">{{ successRateText }}</span>
+          </a-descriptions-item>
+          <a-descriptions-item label="Token">
+            {{ compact(data.cards.today.tokens) }}
+          </a-descriptions-item>
+          <a-descriptions-item label="实付积分">
+            {{ fmt(data.cards.today.consumed_points) }}
+            <span class="text-xs text-slate-400 ml-1">
+              （{{ data.cards.today.point_records }} 条）
+            </span>
+          </a-descriptions-item>
+          <a-descriptions-item label="平均耗时">
+            {{ data.cards.today.avg_ms !== null ? fmt(data.cards.today.avg_ms) + ' ms' : '—' }}
+          </a-descriptions-item>
+          <a-descriptions-item label="平均首字">
+            <template v-if="data.cards.today.avg_first_token_ms !== null">
+              {{ fmt(data.cards.today.avg_first_token_ms) }} ms
+              <span class="text-xs text-slate-400 ml-1">
+                （{{ data.cards.today.first_token_samples }} 条样本）
+              </span>
+            </template>
+            <span v-else class="text-slate-400">—</span>
+          </a-descriptions-item>
+          <a-descriptions-item label="输入 / 输出">
+            {{ compact(data.cards.today.input_tokens) }} /
+            {{ compact(data.cards.today.output_tokens) }}
+          </a-descriptions-item>
+          <a-descriptions-item label="流式请求">
+            {{ fmt(data.cards.today.stream_count) }}
+          </a-descriptions-item>
+        </a-descriptions>
+
+        <div v-if="data.cards.today.models.length" class="mt-3">
+          <div class="text-xs text-slate-500 mb-1">今日用量按模型</div>
+          <div class="flex flex-wrap gap-2">
+            <a-tag v-for="m in data.cards.today.models" :key="m.model" color="blue">
+              {{ m.model }} · {{ compact(m.tokens) }}
+            </a-tag>
+          </div>
+        </div>
+      </template>
+    </a-card>
+
     <a-alert
       v-if="data"
       type="info"
@@ -168,7 +224,7 @@
 </template>
 
 <script setup lang="ts">
-import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import client from '@/api/client'
 import type { UsageOverview } from '@/api/usage'
 
@@ -212,6 +268,15 @@ const compact = (n: number) =>
   n >= 1e9 ? (n / 1e9).toFixed(1) + 'B'
     : n >= 1e6 ? (n / 1e6).toFixed(1) + 'M'
     : n >= 1e3 ? (n / 1e3).toFixed(1) + 'K' : String(n)
+
+const successRateText = computed(() => {
+  const r = data.value?.cards.today.success_rate
+  return r === null || r === undefined ? '—' : r + '%'
+})
+const successRateColor = computed(() => {
+  const r = data.value?.cards.today.success_rate ?? 0
+  return r >= 99 ? 'text-green-600' : r >= 95 ? 'text-orange-500' : 'text-red-500'
+})
 
 const chartEl = ref<HTMLElement | null>(null)
 let chartInst: echarts.ECharts | null = null

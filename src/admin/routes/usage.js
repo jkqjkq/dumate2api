@@ -119,6 +119,42 @@ const routes = [
         pointsTodayUsage(),
       ]);
 
+      // 今日单独算一套更细的指标：顶部卡片要回答「今天跑得怎么样」，
+      // 只有请求数与 token 不够——还得知道成功率、快慢、哪些模型在用。
+      const okRows = todayRows.filter((r) => r.status >= 200 && r.status < 400);
+      const doneRows = todayRows.filter((r) => r.ms);
+      const ftRows = todayRows.filter((r) => typeof r.first_token_ms === 'number');
+
+      const todayDetail = {
+        ...sum(todayRows),
+        success_rate: todayRows.length
+          ? Math.round((okRows.length / todayRows.length) * 1000) / 10
+          : null,
+        avg_ms: doneRows.length
+          ? Math.round(doneRows.reduce((s, r) => s + r.ms, 0) / doneRows.length)
+          : null,
+        // 首字延迟只统计有值的记录——老日志没有这个字段，
+        // 把它们当成 0 会把平均值拉低并给出错误的结论
+        avg_first_token_ms: ftRows.length
+          ? Math.round(ftRows.reduce((s, r) => s + r.first_token_ms, 0) / ftRows.length)
+          : null,
+        first_token_samples: ftRows.length,
+        input_tokens: todayRows.reduce((s, r) => s + (r.input_tokens || 0), 0),
+        output_tokens: todayRows.reduce((s, r) => s + (r.output_tokens || 0), 0),
+        stream_count: todayRows.filter((r) => r.stream).length,
+        // 今日用量按模型拆分，卡片上只标主力
+        models: Object.entries(
+          todayRows.reduce((m, r) => {
+            const k = r.model || '(未知)';
+            m[k] = (m[k] || 0) + (r.total_tokens || 0);
+            return m;
+          }, {})
+        ).map(([model, tokens]) => ({ model, tokens }))
+          .sort((a, b) => b.tokens - a.tokens),
+        consumed_points: todayPoints.consumed,
+        point_records: todayPoints.records,
+      };
+
       // 按天：补齐没有请求的日期，否则折线会把空档连成直线
       const byDay = {};
       for (const r of rows) {
@@ -146,7 +182,7 @@ const routes = [
       return sendJSON(res, 200, {
         days,
         cards: {
-          today: { ...sum(todayRows), consumed_points: todayPoints.consumed, point_records: todayPoints.records },
+          today: todayDetail,
           week: sum(weekRows),
           consumed: pointsAll.total_consumed,
           consumed_records: pointsAll.total_records,
