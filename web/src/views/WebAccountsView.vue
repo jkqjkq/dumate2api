@@ -106,6 +106,70 @@
       </a-row>
     </a-card>
 
+    <a-card title="模型网关" :bordered="false" class="mt-4">
+      <a-alert
+        :type="pool?.gateway_online ? 'success' : 'warning'"
+        show-icon
+        class="mb-3"
+      >
+        <template #message>
+          <span v-if="pool?.gateway_online">
+            网关运行中 · 端口 {{ pool.gateway_port }} · 可用账号
+            {{ pool.health?.accounts_ready ?? 0 }} / {{ pool.health?.accounts_total ?? 0 }}
+          </span>
+          <span v-else>
+            网关未启动（端口 {{ pool?.gateway_port ?? 9084 }}）
+          </span>
+        </template>
+        <template #description>
+          <div v-if="!pool?.gateway_online">
+            启动方式：双击 <code>start-web-gateway.bat</code>，或运行
+            <code>node src\web-gateway.js</code>
+          </div>
+          <div v-else>
+            用下面的账号跑模型，多账号自动轮询。客户端把 Base URL 指向
+            <code>http://127.0.0.1:{{ pool.gateway_port }}</code> 即可，
+            协议与 9080 完全一致。
+          </div>
+        </template>
+      </a-alert>
+
+      <a-table
+        size="small"
+        :pagination="false"
+        :data-source="pool?.accounts ?? []"
+        :columns="poolColumns"
+        row-key="id"
+      >
+        <template #bodyCell="{ column, record }">
+          <template v-if="column.key === 'name'">
+            <div>{{ record.nickname || record.name }}</div>
+            <div v-if="record.last_error" class="text-xs text-red-500">
+              {{ record.last_error }}
+            </div>
+          </template>
+          <template v-else-if="column.key === 'enabled'">
+            <a-tag :color="record.enabled ? 'green' : 'default'">
+              {{ record.enabled ? '参与轮询' : '已排除' }}
+            </a-tag>
+          </template>
+          <template v-else-if="column.key === 'points'">
+            {{ record.points !== null ? fmt(record.points) : '—' }}
+          </template>
+          <template v-else-if="column.key === 'action'">
+            <a-button
+              type="link"
+              size="small"
+              :loading="probing[record.id]"
+              @click="probeModel(record)"
+            >
+              测试
+            </a-button>
+          </template>
+        </template>
+      </a-table>
+    </a-card>
+
     <!-- 添加账号 -->
     <a-modal
       v-model:open="addOpen"
@@ -303,7 +367,7 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { message } from 'ant-design-vue'
 import client from '@/api/client'
-import type { WebAccount, AccountStatus } from '@/api/webaccounts'
+import type { WebAccount, AccountStatus, PoolData, PoolAccount } from '@/api/webaccounts'
 
 const accounts = ref<WebAccount[]>([])
 const loginUrl = ref('')
@@ -315,6 +379,8 @@ const checkingAll = ref(false)
 const detailLoading = ref(false)
 const detail = ref<AccountStatus | null>(null)
 const busy = reactive<Record<number, boolean>>({})
+const probing = reactive<Record<number, boolean>>({})
+const pool = ref<PoolData | null>(null)
 const verifyResult = ref<{ ok: boolean; nickname?: string; uid?: string; error?: string } | null>(null)
 
 const form = reactive({ name: '', cookie: '' })
@@ -348,6 +414,12 @@ const taskColumns = [
   { title: '任务', key: 'title', dataIndex: 'title' },
   { title: '状态', key: 'status', dataIndex: 'status' },
 ]
+const poolColumns = [
+  { title: '账号', key: 'name' },
+  { title: '轮询', key: 'enabled', width: '18%' },
+  { title: '积分', key: 'points', width: '20%' },
+  { title: '操作', key: 'action', width: '14%' },
+]
 
 const enabledCount = computed(() => accounts.value.filter((a) => a.enabled).length)
 
@@ -377,6 +449,25 @@ async function load() {
   const { data } = await client.get('/web-accounts')
   accounts.value = data.accounts
   loginUrl.value = data.login_url
+  // 池状态单独取：它依赖网关进程，网关没起时其余信息仍要能显示
+  try {
+    const { data: p } = await client.get('/web-accounts/pool')
+    pool.value = p
+  } catch (e) { /* 忽略 */ }
+}
+
+// 探测账号能否真的跑模型（走一次真实的 1-token 调用）
+async function probeModel(a: PoolAccount) {
+  probing[a.id] = true
+  try {
+    const { data } = await client.post(`/web-accounts/${a.id}/probe-model`)
+    if (data.ok) message.success(`${a.name} 可以跑模型（${data.model}）`)
+    else message.error(`${a.name} 调用失败：${data.error}`)
+  } catch (e: any) {
+    message.error(e?.response?.data?.error || '探测失败')
+  } finally {
+    probing[a.id] = false
+  }
 }
 
 async function loadLoginInfo() {

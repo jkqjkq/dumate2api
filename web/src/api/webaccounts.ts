@@ -79,3 +79,29 @@ export interface CheckinResult {
   error?: string
   expired?: boolean
 }
+
+export interface PoolAccount {
+  id: number
+  name: string
+  nickname: string
+  enabled: boolean
+  last_error: string
+  points: number | null
+  checkin_result: string
+}
+
+export interface PoolData {
+  gateway_port: number
+  gateway_online: boolean
+  health: {
+    accounts_total: number
+    accounts_ready: number
+    accounts: Array<{
+      name: string
+      enabled: boolean
+      cooling: boolean
+      token_expires_in_s: number | null
+    }>
+  } | null
+  accounts: PoolAccount[]
+}
