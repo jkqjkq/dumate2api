@@ -160,16 +160,41 @@ const api = {
     };
   },
 
-  async chargeRecords(cookie) {
-    const res = await request(cookie, 'GET', '/api/dumate/points/records/charge');
+  // 积分消耗记录。实测必须带 startAt/endAt，否则报「参数错误:StartAt」。
+  // 返回里最有价值的是 consumedPoints（窗口内总扣费）与 totalCount，
+  // 计费规则在上游，本地无法从 token 数推算。
+  async usageRecords(cookie, opts = {}) {
+    const q = new URLSearchParams();
+    if (opts.startAt) q.set('startAt', String(opts.startAt));
+    if (opts.endAt) q.set('endAt', String(opts.endAt));
+    if (opts.page) q.set('page', String(opts.page));
+    if (opts.limit) q.set('limit', String(opts.limit));
+    const res = await request(cookie, 'GET', '/api/dumate/points/records/usage?' + q.toString());
     if (!res.ok) return { ok: false, error: errOf(res), expired: res.expired };
-    return { ok: true, records: pick(res) };
+    const r = pick(res) || {};
+    return {
+      ok: true,
+      consumed_points: r.consumedPoints !== undefined ? Number(r.consumedPoints) : 0,
+      total_count: r.totalCount !== undefined ? Number(r.totalCount) : 0,
+      list: r.list || [],
+    };
   },
 
-  async usageRecords(cookie) {
-    const res = await request(cookie, 'GET', '/api/dumate/points/records/usage');
+  // 积分充值/发放记录。参数同上。
+  async chargeRecords(cookie, opts = {}) {
+    const q = new URLSearchParams();
+    if (opts.startAt) q.set('startAt', String(opts.startAt));
+    if (opts.endAt) q.set('endAt', String(opts.endAt));
+    if (opts.page) q.set('page', String(opts.page));
+    if (opts.limit) q.set('limit', String(opts.limit));
+    const res = await request(cookie, 'GET', '/api/dumate/points/records/charge?' + q.toString());
     if (!res.ok) return { ok: false, error: errOf(res), expired: res.expired };
-    return { ok: true, records: pick(res) };
+    const r = pick(res) || {};
+    return {
+      ok: true,
+      total_count: r.totalCount !== undefined ? Number(r.totalCount) : 0,
+      list: r.list || [],
+    };
   },
 
   // ---- 抽奖 ----

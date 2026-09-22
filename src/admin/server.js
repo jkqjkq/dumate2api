@@ -13,6 +13,7 @@ const { routes: authRoutes } = require('./routes/auth');
 const { routes: systemRoutes } = require('./routes/system');
 const { routes: pointsRoutes } = require('./routes/points');
 const { routes: statsRoutes } = require('./routes/stats');
+const { routes: usageRoutes } = require('./routes/usage');
 const { routes: modelsRoutes } = require('./routes/models');
 const { routes: keysRoutes } = require('./routes/keys');
 const { routes: accountRoutes } = require('./routes/account');
@@ -98,6 +99,7 @@ router.mount(PREFIX + '/auth', authRoutes.map((r) => ({ ...r, path: r.path.repla
 router.mount(PREFIX + '/system', systemRoutes);
 router.mount(PREFIX + '/points', pointsRoutes);
 router.mount(PREFIX + '/stats', statsRoutes);
+router.mount(PREFIX + '/usage', usageRoutes);
 router.mount(PREFIX + '/models', modelsRoutes);
 router.mount(PREFIX + '/keys', keysRoutes);
 router.mount(PREFIX + '/account', accountRoutes);
