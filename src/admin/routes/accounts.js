@@ -4,6 +4,7 @@ const accounts = require('../../accounts');
 const web = require('../../dumate-web');
 const loginBrowser = require('../../login-browser');
 const webPool = require('../../web-pool');
+const taskRunner = require('../../task-runner');
 const { sendJSON } = require('../router');
 
 // 登录链接。百度 SSO 的登录页，登录后 cookie 落在 .baidu.com 域，
@@ -385,6 +386,112 @@ const routes = [
           used: ok.reduce((s, r) => s + (r.used || 0), 0),
         },
       });
+    },
+  },
+  {
+    // 任务状态（只读）。列出每个账号的任务与完成情况，不执行任何动作。
+    method: 'GET',
+    path: '/tasks',
+    handler: async ({ res }) => {
+      const list = await taskRunner.listTasks();
+      return sendJSON(res, 200, {
+        accounts: list,
+        auto_types: [...taskRunner.AUTO_TYPES],
+        // 说明自动化边界，避免「为什么这几个没做」被当成漏跑
+        not_automatable: {
+          PC_PUSH: '网页端不支持，需在桌面端或移动端完成',
+          INVITATION: '需要真人注册',
+          INVITED: '需要他人的邀请码',
+        },
+        runs: taskRunner.recentRuns(20),
+      });
+    },
+  },
+  {
+    // 跑任务：把各账号可自动完成的任务做完（QUERY_INPUT / USE_SKILL）
+    method: 'POST',
+    path: '/tasks/run',
+    handler: async ({ res, body }) => {
+      const only = body && body.account_id ? Number(body.account_id) : null;
+      let results;
+      if (only) {
+        const acc = accounts.get(only);
+        if (!acc) return sendJSON(res, 404, { error: '账号不存在' });
+        results = [await taskRunner.runForAccount(acc)];
+      } else {
+        results = await taskRunner.runAll();
+      }
+      const done = results.reduce((s, r) => s + (r.done_count || 0), 0);
+      const fail = results.reduce((s, r) => s + (r.fail_count || 0), 0);
+      require('../../admin/auth').audit('admin', 'task_run', '', `完成 ${done}，失败 ${fail}`);
+      return sendJSON(res, 200, { results, done_count: done, fail_count: fail });
+    },
+  },
+  {
+    // 一键抽奖：把所有账号的可用次数抽完（可选自动领奖）
+    method: 'POST',
+    path: '/draw-all',
+    handler: async ({ res, body }) => {
+      const autoClaim = !body || body.claim !== false;
+      const list = accounts.load().accounts.filter((a) => a.enabled);
+      const out = [];
+
+      for (const a of list) {
+        const st = await web.api.drawStatus(a.cookie);
+        if (!st.ok) { out.push({ id: a.id, name: a.name, ok: false, error: st.error }); continue; }
+
+        let remaining = st.remaining_draws || 0;
+        const draws = [];
+        // 抽到没次数为止。上限 20 次防止服务端计数异常时无限循环。
+        for (let i = 0; i < Math.min(remaining, 20); i++) {
+          const r = await web.api.draw(a.cookie, crypto.randomUUID());
+          draws.push(r);
+          if (!r.ok) break;
+          if (r.remaining_draws !== null && r.remaining_draws <= 0) break;
+        }
+
+        // 领奖：只有「非 SUCCESS 且需要联系方式」的奖品才需要领。
+        // 实测所有积分/会员奖品抽到即 status=SUCCESS，自动到账，无需领取；
+        // 之前按 claimed 字段判断（该字段不存在）导致把已完成的当成待领，
+        // 逐个去领反而报「参数错误:DrawRecordID」。
+        let claimed = [];
+        if (autoClaim) {
+          const after = await web.api.drawStatus(a.cookie);
+          const pending = (after.ok ? after.my_prizes : []).filter(
+            (p) => p.status && p.status !== 'SUCCESS' && p.draw_record_id,
+          );
+          for (const p of pending.slice(0, 10)) {
+            const c = await web.api.claimPrize(a.cookie, p.draw_record_id);
+            claimed.push({ prize: p.prize_name, ok: c.ok, error: c.error || '' });
+          }
+        }
+
+        // 抽到的奖品按类型汇总，让界面能直接说「抽到了什么」
+        const finalStatus = await web.api.drawStatus(a.cookie);
+        const wonPrizes = [];
+        if (finalStatus.ok) {
+          const before = new Set((st.my_prizes || []).map((p) => p.draw_record_id));
+          for (const p of (finalStatus.my_prizes || [])) {
+            if (!before.has(p.draw_record_id)) {
+              wonPrizes.push({ name: p.prize_name, type: p.prize_type, value: p.prize_value, status: p.status });
+            }
+          }
+        }
+
+        out.push({
+          id: a.id, name: a.name, ok: true,
+          before: remaining,
+          drawn: draws.filter((d) => d.ok).length,
+          remaining_after: draws.length ? draws[draws.length - 1].remaining_draws : remaining,
+          results: draws,
+          claimed,
+          won: wonPrizes,
+        });
+      }
+
+      const total = out.reduce((s, r) => s + (r.drawn || 0), 0);
+      require('../../admin/auth').audit('admin', 'draw_all', '', `抽奖 ${total} 次`);
+      return sendJSON(res, 200, { results: out, drawn_count: total });
     },
   },
   {

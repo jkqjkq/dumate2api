@@ -198,9 +198,13 @@ const api = {
     return { ok: true, remaining_draws: r.remaining_draws ?? r.remainingDraws ?? null, result: r };
   },
 
-  async claimPrize(cookie, prizeId) {
+  // 领奖。注意：实测积分与会员类奖品抽到即 status=SUCCESS，自动到账，
+  // 不需要调这个接口；只有需要填联系方式的实物奖品才用得上。
+  // 对已 SUCCESS 的记录调用会报「参数错误:DrawRecordID」。
+  async claimPrize(cookie, drawRecordId, contact) {
     const res = await request(cookie, 'POST', '/api/dumate/activity/growth-plan/prize/claim', {
-      prize_id: prizeId,
+      draw_record_id: drawRecordId,
+      ...(contact ? { contact } : {}),
     });
     if (!res.ok) return { ok: false, error: errOf(res), expired: res.expired };
     return { ok: true, result: pick(res) };
