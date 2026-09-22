@@ -1,192 +1,224 @@
 <template>
   <div>
     <div class="flex items-center justify-between mb-4">
-      <span class="text-slate-500 text-sm">
-        上游端口 {{ status?.upstream.port ?? '—' }}
-        <template v-if="points"> · 数据 {{ fetchedAtText }}</template>
-      </span>
+      <div>
+        <h2 class="text-lg font-medium m-0">仪表盘</h2>
+        <div class="text-xs text-slate-500 mt-1">
+          账号池健康度、上游状态与今日用量总览
+          <template v-if="lastRefresh"> · 更新于 {{ lastRefresh }}</template>
+        </div>
+      </div>
       <a-button size="small" :loading="loading" @click="refresh(true)">刷新</a-button>
     </div>
 
+    <!-- 顶部指标卡：数据来自 /web-accounts/dashboard（账号池）+ /stats（用量） -->
     <a-row :gutter="[16, 16]">
-      <a-col :span="6">
-        <a-card :bordered="false">
-          <a-statistic title="账号总数" :value="accounts?.total ?? '—'">
-            <template #suffix>
-              <span class="text-sm text-slate-400">个</span>
-            </template>
+      <a-col :span="5">
+        <a-card :bordered="false" class="h-full">
+          <a-statistic title="账号总数" :value="dash?.summary.total ?? '—'">
+            <template #suffix><span class="text-sm text-slate-400">个</span></template>
           </a-statistic>
-          <div class="text-xs mt-2">
-            <template v-if="accounts">
-              <a-tag v-if="accounts.active" color="green">使用中 {{ accounts.active }}</a-tag>
-              <a-tag v-if="accounts.standby" color="blue">备用 {{ accounts.standby }}</a-tag>
-              <a-tag v-if="accounts.no_credential" color="orange">无凭证 {{ accounts.no_credential }}</a-tag>
-              <a-tag v-if="accounts.unknown" color="default">未知 {{ accounts.unknown }}</a-tag>
+          <div class="text-xs text-slate-500 mt-2">
+            <template v-if="dash">
+              启用 {{ dash.summary.enabled }} · 停用 {{ dash.summary.disabled }}
             </template>
-            <span v-else class="text-slate-400">—</span>
+            <span v-else>—</span>
           </div>
         </a-card>
       </a-col>
 
-      <a-col :span="6">
-        <a-card :bordered="false">
+      <a-col :span="5">
+        <a-card :bordered="false" class="h-full">
+          <a-statistic title="有效期内" :value="dash?.summary.valid ?? '—'" value-style="color:#52c41a">
+            <template #suffix><span class="text-sm text-slate-400">个</span></template>
+          </a-statistic>
+          <div class="text-xs text-slate-500 mt-2">
+            <template v-if="dash">
+              {{ dash.summary.valid === dash.summary.enabled ? '全部正常' : `${dash.summary.enabled - dash.summary.valid} 个待处理` }}
+            </template>
+            <span v-else>—</span>
+          </div>
+        </a-card>
+      </a-col>
+
+      <a-col :span="5">
+        <a-card :bordered="false" class="h-full">
           <a-statistic
-            title="积分余额"
-            :value="allPoints ? allPoints.totals.left : (points ? points.left : '—')"
-            :precision="2"
-          />
+            title="即将过期"
+            :value="dash?.summary.expiring_soon ?? '—'"
+            :value-style="dash && dash.summary.expiring_soon > 0 ? 'color:#faad14' : ''"
+          >
+            <template #suffix><span class="text-sm text-slate-400">个</span></template>
+          </a-statistic>
           <div class="text-xs text-slate-500 mt-2">
-            <template v-if="allPoints && allPoints.accounts.length">
-              {{ allPoints.totals.ok_accounts }} 个账号合计 ·
-              共 {{ fmt(allPoints.totals.total) }}
-            </template>
-            <template v-else-if="points">
-              本地后端账号：共 {{ fmt(points.total) }} · 已用 {{ fmt(points.used) }}
+            {{ dash && dash.summary.expiring_soon > 0 ? '7 天内到期' : '暂无风险' }}
+          </div>
+        </a-card>
+      </a-col>
+
+      <a-col :span="5">
+        <a-card :bordered="false" class="h-full">
+          <a-statistic title="积分余额" :value="dash ? dash.summary.points_left : '—'" :precision="2" />
+          <div class="text-xs text-slate-500 mt-2">
+            <template v-if="dash">
+              <a-tag v-if="dash.summary.low_points" color="orange">
+                {{ dash.summary.low_points }} 个低于 200
+              </a-tag>
+              <span v-else>{{ dash.summary.total }} 个账号合计</span>
             </template>
             <span v-else>—</span>
           </div>
         </a-card>
       </a-col>
 
-      <a-col :span="6">
-        <a-card :bordered="false">
-          <a-statistic title="套餐订阅" :value="subscribedText" />
+      <a-col :span="4">
+        <a-card :bordered="false" class="h-full">
+          <a-statistic title="今日 Token" :value="todayTokensText" value-style="color:#1677ff" />
           <div class="text-xs text-slate-500 mt-2">
-            <template v-if="plan">到期 {{ dateText(plan.expire_at) }}</template>
+            <template v-if="stats">{{ stats.today.requests }} 次请求</template>
             <span v-else>—</span>
-          </div>
-        </a-card>
-      </a-col>
-
-      <a-col :span="6">
-        <a-card :bordered="false">
-          <a-statistic title="模型限流" :value="throttleText" />
-          <div class="text-xs text-slate-500 mt-2">
-            <template v-if="points?.throttle_reason">{{ points.throttle_reason }}</template>
-            <span v-else>无限制</span>
           </div>
         </a-card>
       </a-col>
     </a-row>
 
+    <!-- 趋势 + 上游状态 -->
     <a-row :gutter="[16, 16]" class="mt-4">
-      <a-col :span="6">
-        <a-card :bordered="false">
-          <a-statistic title="今日 Token" :value="todayTokensText" />
-          <div class="text-xs text-slate-500 mt-2">
-            <template v-if="stats">
-              输入 {{ fmt(stats.today.input_tokens) }} · 输出 {{ fmt(stats.today.output_tokens) }}
-            </template>
-            <span v-else>—</span>
-          </div>
+      <a-col :span="17">
+        <a-card title="近 14 天调用趋势" :bordered="false" class="h-full">
+          <a-empty v-if="!daily.length" description="还没有请求记录" />
+          <template v-else>
+            <svg :viewBox="`0 0 ${chart.w} ${chart.h}`" class="w-full" :style="{ height: '200px' }">
+              <!-- 网格与纵轴刻度 -->
+              <g v-for="(t, i) in chart.ticks" :key="'t' + i">
+                <line
+                  :x1="chart.padL" :y1="t.y" :x2="chart.w - chart.padR" :y2="t.y"
+                  stroke="#f0f0f0" stroke-width="1"
+                />
+                <text :x="chart.padL - 8" :y="t.y + 4" text-anchor="end"
+                      font-size="11" fill="#94a3b8">{{ t.label }}</text>
+              </g>
+              <!-- 面积 + 折线 -->
+              <path :d="chart.area" fill="url(#grad)" stroke="none" />
+              <path :d="chart.line" fill="none" stroke="#fa8c16" stroke-width="2" />
+              <defs>
+                <linearGradient id="grad" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stop-color="#fa8c16" stop-opacity="0.25" />
+                  <stop offset="100%" stop-color="#fa8c16" stop-opacity="0.02" />
+                </linearGradient>
+              </defs>
+              <!-- 横轴日期 -->
+              <text
+                v-for="(d, i) in chart.xLabels" :key="'x' + i"
+                :x="d.x" :y="chart.h - 4" text-anchor="middle"
+                font-size="11" fill="#94a3b8"
+              >{{ d.label }}</text>
+            </svg>
+            <div class="text-xs text-slate-400 mt-1">折线为每日请求数</div>
+          </template>
         </a-card>
       </a-col>
 
-      <a-col :span="6">
-        <a-card :bordered="false">
-          <a-statistic title="今日请求" :value="stats ? stats.today.requests : '—'">
-            <template #suffix>
-              <span class="text-sm text-slate-400">次</span>
-            </template>
-          </a-statistic>
-          <div class="text-xs text-slate-500 mt-2">
-            <template v-if="stats">
-              <a-tag v-if="stats.today.failed" color="red">失败 {{ stats.today.failed }}</a-tag>
-              <span v-else>全部成功</span>
-            </template>
-            <span v-else>—</span>
-          </div>
-        </a-card>
-      </a-col>
-
-      <a-col :span="6">
-        <a-card :bordered="false">
-          <a-statistic title="平均耗时" :value="stats ? stats.today.avg_ms : '—'">
-            <template #suffix>
-              <span class="text-sm text-slate-400">ms</span>
-            </template>
-          </a-statistic>
-          <div class="text-xs text-slate-500 mt-2">
-            <template v-if="stats">近 {{ stats.days }} 天共 {{ fmt(stats.total.total_tokens) }} tokens</template>
-            <span v-else>—</span>
-          </div>
-        </a-card>
-      </a-col>
-
-      <a-col :span="6">
-        <a-card :bordered="false">
-          <a-statistic title="近 14 天请求" :value="stats ? stats.total.requests : '—'">
-            <template #suffix>
-              <span class="text-sm text-slate-400">次</span>
-            </template>
-          </a-statistic>
-          <div class="text-xs text-slate-500 mt-2">含所有协议路径</div>
+      <a-col :span="7">
+        <a-card title="上游状态" :bordered="false" class="h-full">
+          <a-descriptions :column="1" size="small">
+            <a-descriptions-item label="网关">
+              <a-tag :color="dash?.upstream.gateway_online ? 'green' : 'red'">
+                {{ dash?.upstream.gateway_online ? '正常' : '未启动' }}
+              </a-tag>
+              <span class="text-xs text-slate-400 ml-1">:{{ dash?.upstream.gateway_port ?? 9084 }}</span>
+            </a-descriptions-item>
+            <a-descriptions-item label="可用账号">
+              <template v-if="dash?.upstream.accounts_ready !== null && dash?.upstream.accounts_ready !== undefined">
+                {{ dash.upstream.accounts_ready }} / {{ dash.upstream.accounts_total }}
+              </template>
+              <span v-else class="text-slate-400">—</span>
+            </a-descriptions-item>
+            <a-descriptions-item label="冷却中">
+              <template v-if="dash?.upstream.cooling !== null && dash?.upstream.cooling !== undefined">
+                {{ dash.upstream.cooling }}
+              </template>
+              <span v-else class="text-slate-400">—</span>
+            </a-descriptions-item>
+            <a-descriptions-item label="本地代理">
+              <a-tag :color="status?.gateway.online ? 'green' : 'red'">
+                {{ status?.gateway.online ? '在线' : '离线' }}
+              </a-tag>
+              <span class="text-xs text-slate-400 ml-1">:{{ status?.gateway.port ?? 9080 }}</span>
+            </a-descriptions-item>
+            <a-descriptions-item label="上游端口">
+              {{ status?.upstream.port ?? '—' }}
+              <a-tag v-if="status?.upstream.managed" color="blue" class="ml-1">自建</a-tag>
+            </a-descriptions-item>
+          </a-descriptions>
         </a-card>
       </a-col>
     </a-row>
 
-    <a-card title="每日用量" :bordered="false" class="mt-4">
-      <a-empty v-if="!daily.length" description="还没有请求记录" />
-      <div v-else class="flex items-end gap-1 h-32">
-        <div
-          v-for="d in daily"
-          :key="d.day"
-          class="flex-1 flex flex-col items-center justify-end h-full group"
-          :title="`${d.day}\n请求 ${d.requests} 次\n${fmt(d.total_tokens)} tokens${d.failed ? '\n失败 ' + d.failed : ''}`"
-        >
-          <div
-            class="w-full rounded-t transition-colors"
-            :class="d.failed ? 'bg-red-400' : 'bg-blue-500'"
-            :style="{ height: barHeight(d.total_tokens) }"
-          />
-        </div>
-      </div>
-      <div v-if="daily.length" class="flex justify-between text-xs text-slate-400 mt-2">
-        <span>{{ daily[0]?.day }}</span>
-        <span>{{ daily[daily.length - 1]?.day }}</span>
-      </div>
+    <!-- 账号健康快照 -->
+    <a-card :bordered="false" class="mt-4">
+      <template #title>
+        <span>账号健康快照</span>
+        <a-tag v-if="dash" color="green" class="ml-2">在线 {{ dash.summary.valid }}</a-tag>
+      </template>
+      <a-empty v-if="!dash?.accounts.length" description="还没有添加账号" />
+      <a-row v-else :gutter="[16, 16]">
+        <a-col v-for="a in dash.accounts" :key="a.id" :span="8">
+          <div class="p-3 border border-slate-200 rounded">
+            <div class="flex items-center justify-between mb-2">
+              <span class="font-medium">{{ a.nickname || a.name }}</span>
+              <a-tag :color="a.last_error ? 'red' : a.enabled ? 'green' : 'default'">
+                {{ a.last_error ? '异常' : a.enabled ? '在线' : '停用' }}
+              </a-tag>
+            </div>
+            <!-- 健康条：长度按会员剩余天数，30 天为满 -->
+            <div class="h-1.5 bg-slate-100 rounded overflow-hidden mb-2">
+              <div
+                class="h-full rounded transition-all"
+                :class="healthColor(a)"
+                :style="{ width: healthWidth(a) }"
+              />
+            </div>
+            <div class="flex items-center justify-between text-xs">
+              <span class="text-slate-500">
+                {{ a.days_left !== null ? a.days_left + ' 天' : '到期未知' }}
+              </span>
+              <span :class="a.points !== null && a.points < 200 ? 'text-orange-500' : 'text-slate-600'">
+                {{ a.points !== null ? fmt(a.points) + ' 积分' : '积分未知' }}
+              </span>
+            </div>
+            <div v-if="a.last_error" class="text-xs text-red-500 mt-1">{{ a.last_error }}</div>
+          </div>
+        </a-col>
+      </a-row>
     </a-card>
 
-    <a-alert
-      v-if="error"
-      type="warning"
-      show-icon
-      class="mt-4"
-      :message="`积分数据获取失败：${error}`"
-    />
-
+    <!-- 用量与账号状态明细 -->
     <a-row :gutter="[16, 16]" class="mt-4">
       <a-col :span="12">
-        <a-card title="即将到期的额度" :bordered="false">
-          <a-empty v-if="!points?.expiring.length" description="没有未用完且临近到期的额度" />
-          <a-table
-            v-else
-            size="small"
-            :pagination="false"
-            :data-source="points.expiring"
-            :columns="expiringColumns"
-            row-key="package_type"
-          >
-            <template #bodyCell="{ column, record }">
-              <template v-if="column.key === 'left'">{{ fmt(record.left) }}</template>
-              <template v-else-if="column.key === 'expire'">
-                {{ dateText(record.expire_at) }}
-                <a-tag v-if="daysLeft(record.expire_at) <= 7" color="red" class="ml-1">
-                  {{ daysLeft(record.expire_at) }} 天
-                </a-tag>
-              </template>
-              <template v-else-if="column.key === 'type'">
-                <a-tag :color="record.kind === 'subscription' ? 'blue' : 'default'">
-                  {{ record.package_type || record.kind }}
-                </a-tag>
-              </template>
-            </template>
-          </a-table>
+        <a-card title="今日用量" :bordered="false">
+          <a-descriptions :column="2" size="small" bordered>
+            <a-descriptions-item label="请求数">
+              {{ stats ? stats.today.requests : '—' }}
+              <a-tag v-if="stats?.today.failed" color="red" class="ml-1">失败 {{ stats.today.failed }}</a-tag>
+            </a-descriptions-item>
+            <a-descriptions-item label="Token">
+              {{ stats ? fmt(stats.today.total_tokens) : '—' }}
+            </a-descriptions-item>
+            <a-descriptions-item label="输入">{{ stats ? fmt(stats.today.input_tokens) : '—' }}</a-descriptions-item>
+            <a-descriptions-item label="输出">{{ stats ? fmt(stats.today.output_tokens) : '—' }}</a-descriptions-item>
+            <a-descriptions-item label="平均耗时">
+              {{ stats ? stats.today.avg_ms + ' ms' : '—' }}
+            </a-descriptions-item>
+            <a-descriptions-item label="近 {{ stats?.days ?? 30 }} 天">
+              {{ stats ? fmt(stats.total.total_tokens) + ' tokens' : '—' }}
+            </a-descriptions-item>
+          </a-descriptions>
         </a-card>
       </a-col>
 
       <a-col :span="12">
-        <a-card title="账号状态" :bordered="false">
+        <a-card title="本地代理账号" :bordered="false">
           <a-table
             size="small"
             :pagination="false"
@@ -197,101 +229,21 @@
             <template #bodyCell="{ column, record }">
               <template v-if="column.key === 'state'">
                 <a-tag :color="stateColor(record.state)">{{ stateText(record.state) }}</a-tag>
-                <a-tag v-if="record.active" color="blue">当前</a-tag>
               </template>
               <template v-else-if="column.key === 'web'">
-                <template v-if="record.web">
-                  <a-tag color="green">已添加</a-tag>
-                  <div class="text-xs text-slate-500 mt-1">
-                    <template v-if="record.web.points !== null">
-                      积分 {{ fmt(record.web.points) }}
-                    </template>
-                    <span v-if="record.web.checkin_result" class="ml-1">
-                      · {{ checkinText(record.web.checkin_result) }}
-                    </span>
-                    <div v-if="record.web.last_error" class="text-red-500">
-                      {{ record.web.last_error }}
-                    </div>
-                  </div>
-                </template>
-                <a-tooltip v-else title="在「账号管理」里添加后即可签到、抽奖、查积分">
-                  <span class="text-slate-400 text-xs">未添加</span>
-                </a-tooltip>
-              </template>
-              <template v-else-if="column.key === 'points'">
-                <template v-if="record.points">
-                  <span class="font-medium">{{ fmt(record.points.left) }}</span>
-                  <span class="text-slate-400 text-xs ml-1">/ {{ fmt(record.points.total) }}</span>
-                </template>
-                <a-tooltip v-else :title="record.points_note">
-                  <span class="text-slate-400 text-xs">{{ record.points_note }}</span>
-                </a-tooltip>
-              </template>
-              <template v-else-if="column.key === 'last'">
-                {{ record.last_login ? dateText(record.last_login) : '—' }}
-                <span v-if="record.age_days !== null" class="text-slate-400 text-xs ml-1">
-                  ({{ record.age_days }} 天前)
-                </span>
+                <a-tag v-if="record.web" color="green">已添加</a-tag>
+                <span v-else class="text-xs text-slate-400">未添加</span>
               </template>
             </template>
           </a-table>
           <div class="text-xs text-slate-400 mt-2">
-            「状态」是桌面端凭证（跑模型对话用），「网页凭证」是账号管理里添加的
-            （签到/抽奖/积分用）。两套互相独立：桌面端失效不影响网页端签到，
-            反之亦然。登录态过期时间上游未提供，按凭证存在性与最后登录时间推断。
+            「本地代理账号」是桌面端凭证（跑模型用），与上面「账号健康快照」的网页凭证是两套。
           </div>
         </a-card>
       </a-col>
     </a-row>
 
-    <a-row :gutter="[16, 16]" class="mt-4">
-      <a-col :span="12">
-        <a-card title="端口发现链路" :bordered="false">
-          <a-empty
-            v-if="!status?.upstream.discovery.length"
-            description="未通过命令行或监听套接字发现，走了已知端口或自建拉起"
-          />
-          <a-steps
-            v-else
-            direction="vertical"
-            size="small"
-            :current="status.upstream.discovery.findIndex((s) => s.hit)"
-          >
-            <a-step
-              v-for="(step, i) in status.upstream.discovery"
-              :key="i"
-              :title="step.method"
-              :description="`端口 ${step.port}`"
-              :status="step.hit ? 'finish' : 'wait'"
-            />
-          </a-steps>
-        </a-card>
-      </a-col>
-      <a-col :span="12">
-        <a-card title="安装与运行时" :bordered="false">
-          <a-descriptions :column="1" size="small" bordered>
-            <a-descriptions-item label="安装目录">
-              <span class="break-all">{{ status?.install.dir }}</span>
-            </a-descriptions-item>
-            <a-descriptions-item label="后端可执行文件">
-              <a-tag :color="status?.install.exe_exists ? 'green' : 'red'">
-                {{ status?.install.exe_exists ? '存在' : '缺失' }}
-              </a-tag>
-            </a-descriptions-item>
-            <a-descriptions-item label="网关">
-              <a-tag :color="status?.gateway.online ? 'green' : 'red'">
-                {{ status?.gateway.online ? '在线' : '离线' }}
-              </a-tag>
-              端口 {{ status?.gateway.port }}
-            </a-descriptions-item>
-            <a-descriptions-item label="Node 版本">{{ status?.versions.node }}</a-descriptions-item>
-            <a-descriptions-item label="管理进程">
-              PID {{ status?.admin.pid }} / 端口 {{ status?.admin.port }}
-            </a-descriptions-item>
-          </a-descriptions>
-        </a-card>
-      </a-col>
-    </a-row>
+    <a-alert v-if="error" type="warning" show-icon class="mt-4" :message="`部分数据获取失败：${error}`" />
   </div>
 </template>
 
@@ -299,109 +251,140 @@
 import { computed, onMounted, ref } from 'vue'
 import client from '@/api/client'
 import type { SystemStatus } from '@/api/system'
-import type { PointsData, AccountsData, AllPointsData } from '@/api/points'
+import type { PointsData, AccountsData } from '@/api/points'
 import type { StatsSummary, DailyRow } from '@/api/stats'
+
+interface DashAccount {
+  id: number
+  name: string
+  nickname: string
+  enabled: boolean
+  points: number | null
+  points_total: number | null
+  subscribed: boolean
+  days_left: number | null
+  expire_at: number | null
+  checkin_result: string
+  last_error: string
+}
+
+interface DashData {
+  summary: {
+    total: number; enabled: number; disabled: number; valid: number
+    expiring_soon: number; low_points: number
+    points_left: number; points_total: number
+  }
+  upstream: {
+    gateway_online: boolean; gateway_port: number
+    accounts_total: number | null; accounts_ready: number | null; cooling: number | null
+  }
+  accounts: DashAccount[]
+}
 
 const status = ref<SystemStatus | null>(null)
 const points = ref<PointsData | null>(null)
 const accounts = ref<AccountsData | null>(null)
-const allPoints = ref<AllPointsData | null>(null)
 const stats = ref<StatsSummary | null>(null)
 const daily = ref<DailyRow[]>([])
+const dash = ref<DashData | null>(null)
 const loading = ref(false)
 const error = ref('')
+const lastRefresh = ref('')
 
-const plan = computed(() =>
-  points.value?.packages.find((p) => p.kind === 'subscription') ?? null,
-)
-const subscribedText = computed(() => {
-  if (!points.value) return '—'
-  return points.value.subscribed ? '已订阅' : '未订阅'
-})
-const throttleText = computed(() => {
-  if (!points.value) return '—'
-  return points.value.throttled ? '受限' : '正常'
-})
-const fetchedAtText = computed(() => {
-  if (!points.value) return '—'
-  return new Date(points.value.fetched_at).toLocaleTimeString('zh-CN')
-})
-// 大数字用紧凑写法：仪表盘上 28.2M 比 28,200,000 好读
-const todayTokensText = computed(() => {
-  if (!stats.value) return '—'
-  return compact(stats.value.today.total_tokens)
-})
-
-function compact(n: number) {
-  if (n >= 1e9) return (n / 1e9).toFixed(2) + 'B'
-  if (n >= 1e6) return (n / 1e6).toFixed(2) + 'M'
-  if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K'
-  return String(n)
-}
-
-// 柱高按窗口内最大值归一，最小留 2% 让零值那天也有一条可见的底
-function barHeight(v: number) {
-  const max = Math.max(...daily.value.map((d) => d.total_tokens), 1)
-  return `${Math.max(2, (v / max) * 100)}%`
-}
-
-const expiringColumns = [
-  { title: '类型', key: 'type', dataIndex: 'package_type' },
-  { title: '剩余', key: 'left' },
-  { title: '到期', key: 'expire' },
-]
 const accountColumns = [
   { title: '账号', key: 'name', dataIndex: 'name' },
-  { title: '桌面凭证', key: 'state' },
-  { title: '网页凭证', key: 'web' },
-  { title: '积分', key: 'points' },
-  { title: '最后登录', key: 'last' },
+  { title: '桌面凭证', key: 'state', width: '20%' },
+  { title: '网页凭证', key: 'web', width: '20%' },
 ]
 
-const fmt = (n: number) =>
-  n.toLocaleString('zh-CN', { maximumFractionDigits: 2 })
-const dateText = (ts: number | null) =>
-  ts ? new Date(ts).toLocaleDateString('zh-CN') : '—'
-const daysLeft = (ts: number | null) =>
-  ts ? Math.ceil((ts - Date.now()) / 86400000) : 0
+const fmt = (n: number) => n.toLocaleString('zh-CN', { maximumFractionDigits: 2 })
+const compact = (n: number) =>
+  n >= 1e9 ? (n / 1e9).toFixed(2) + 'B'
+    : n >= 1e6 ? (n / 1e6).toFixed(2) + 'M'
+    : n >= 1e3 ? (n / 1e3).toFixed(1) + 'K' : String(n)
+
+const todayTokensText = computed(() =>
+  stats.value ? compact(stats.value.today.total_tokens) : '—')
+
 const stateColor = (s: string) => {
   if (s === 'active') return 'green'
   if (s === 'standby') return 'blue'
   if (s === 'no_credential') return 'orange'
   return 'default'
 }
-// 桌面端同一时刻只持有一份登录态，所以非当前账号标「备用」而不是「失效」——
-// 它的网页凭证通常仍然有效，写成失效会被误读成账号坏了
 const stateText = (s: string) => {
   if (s === 'active') return '使用中'
   if (s === 'standby') return '备用'
   if (s === 'no_credential') return '无凭证'
   return '未知'
 }
-// 网页端签到结果：字段值来自后端，映射成人话
-const checkinText = (r: string) =>
-  r === 'claimed' ? '已签到' : r === 'already' ? '今日已签' : r === 'failed' ? '签到失败' : ''
+
+// 健康条：按会员剩余天数，30 天为满格。
+// 用天数而不是积分——积分随时会被模型消耗，天天在变；到期日是稳定的寿命指标。
+function healthWidth(a: DashAccount) {
+  if (a.days_left === null) return '0%'
+  const pct = Math.max(0, Math.min(100, (a.days_left / 30) * 100))
+  return pct + '%'
+}
+function healthColor(a: DashAccount) {
+  if (a.last_error) return 'bg-red-400'
+  if (a.days_left === null) return 'bg-slate-300'
+  if (a.days_left <= 7) return 'bg-orange-400'
+  return 'bg-green-500'
+}
+
+// 手写 SVG 折线图：只为一条趋势线引入图表库不划算，
+// 而 recharts/echarts 的体积对这个页面来说不成比例。
+const chart = computed(() => {
+  const w = 800, h = 220, padL = 48, padR = 16, padT = 16, padB = 28
+  const rows = daily.value
+  if (!rows.length) return { w, h, padL, padR, line: '', area: '', ticks: [], xLabels: [] }
+
+  const values = rows.map((r) => r.requests)
+  const max = Math.max(...values, 1)
+  // 纵轴取整到 4 段，避免出现 1234 这种刻度
+  const step = Math.ceil(max / 4 / 10) * 10 || 1
+  const top = step * 4
+
+  const x = (i: number) => padL + (i * (w - padL - padR)) / Math.max(1, rows.length - 1)
+  const y = (v: number) => padT + (1 - v / top) * (h - padT - padB)
+
+  const pts = rows.map((r, i) => `${x(i)},${y(r.requests)}`)
+  const line = 'M' + pts.join(' L')
+  const area = `${line} L${x(rows.length - 1)},${h - padB} L${x(0)},${h - padB} Z`
+
+  const ticks = []
+  for (let i = 0; i <= 4; i++) {
+    const v = step * i
+    ticks.push({ y: y(v), label: String(v) })
+  }
+  // 横轴只标首、中、尾，避免挤在一起
+  const idx = [0, Math.floor((rows.length - 1) / 2), rows.length - 1]
+  const xLabels = idx.map((i) => ({ x: x(i), label: rows[i]?.day?.slice(5) || '' }))
+
+  return { w, h, padL, padR, line, area, ticks, xLabels }
+})
 
 async function refresh(force = false) {
   loading.value = true
   error.value = ''
   try {
-    const [s, p, a, st, dy, ap] = await Promise.all([
+    const [s, p, a, st, dy, db] = await Promise.all([
       client.get('/system/status'),
       client.get('/points/points' + (force ? '?refresh=1' : '')),
       client.get('/points/accounts'),
       client.get('/stats/summary'),
       client.get('/stats/daily?days=14'),
-      client.get('/web-accounts/points-all'),
+      client.get('/web-accounts/dashboard'),
     ])
     status.value = s.data
     points.value = p.data
     accounts.value = a.data
     stats.value = st.data
     daily.value = dy.data.rows
-    allPoints.value = ap.data
+    dash.value = db.data
+    lastRefresh.value = new Date().toLocaleTimeString('zh-CN')
   } catch (e: any) {
-    // 积分依赖上游，上游没起来时其余卡片仍应显示，所以只提示不中断
     error.value = e?.response?.data?.error || e?.message || '未知错误'
   } finally {
     loading.value = false
