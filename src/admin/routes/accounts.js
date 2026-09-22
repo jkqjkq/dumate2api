@@ -3,6 +3,7 @@ const crypto = require('crypto');
 const accounts = require('../../accounts');
 const web = require('../../dumate-web');
 const loginBrowser = require('../../login-browser');
+const webPool = require('../../web-pool');
 const { sendJSON } = require('../router');
 
 // 登录链接。百度 SSO 的登录页，登录后 cookie 落在 .baidu.com 域，
@@ -342,6 +343,56 @@ const routes = [
         charge_records: charge.ok ? charge.records : null,
         usage_records: usage.ok ? usage.records : null,
       });
+    },
+  },
+  {
+    method: 'GET',
+    path: '/pool',
+    handler: ({ res }) => {
+      // 账号池的运行态（token 缓存、成功/失败计数、冷却）只存在于网关进程内，
+      // 管理端是另一个进程读不到。这里返回「配置 + 最近一次探测结果」，
+      // 需要实时运行态就查网关的 /health。
+      const gatewayPort = parseInt(process.env.DUMATE_WEB_GATEWAY_PORT || '9084', 10);
+      const list = accounts.load().accounts.map((a) => ({
+        id: a.id,
+        name: a.name,
+        nickname: a.nickname || '',
+        enabled: a.enabled,
+        last_error: a.last_error || '',
+        points: a.points ? a.points.left : null,
+        checkin_result: (a.checkin && a.checkin.last_result) || '',
+      }));
+
+      // 顺带探一下网关是否在跑，界面据此提示「先启动 9084」
+      const req = require('http').request(
+        { host: '127.0.0.1', port: gatewayPort, path: '/health', method: 'GET', timeout: 3000 },
+        (r) => {
+          let d = '';
+          r.setEncoding('utf8');
+          r.on('data', (c) => { d += c; });
+          r.on('end', () => {
+            let health = null;
+            try { health = JSON.parse(d); } catch (e) { health = null; }
+            sendJSON(res, 200, { gateway_port: gatewayPort, gateway_online: true, health, accounts: list });
+          });
+        },
+      );
+      req.on('error', () => sendJSON(res, 200, {
+        gateway_port: gatewayPort, gateway_online: false, health: null, accounts: list,
+      }));
+      req.on('timeout', () => { req.destroy(); });
+      req.end();
+    },
+  },
+  {
+    // 探测某账号能否跑模型（走一次真实的 1-token 调用）
+    method: 'POST',
+    path: '/:id/probe-model',
+    handler: async ({ res, params }) => {
+      const acc = accounts.get(params[0]);
+      if (!acc) return sendJSON(res, 404, { error: '账号不存在' });
+      const r = await webPool.probe(acc.id);
+      return sendJSON(res, r.ok ? 200 : 502, r);
     },
   },
 ];
