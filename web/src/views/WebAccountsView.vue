@@ -106,6 +106,61 @@
       </a-row>
     </a-card>
 
+    <a-card title="任务与抽奖" :bordered="false" class="mt-4">
+      <div class="flex items-center justify-between mb-3">
+        <span class="text-xs text-slate-500">
+          可自动完成：发提示词给模型（QUERY_INPUT）、体验技能（USE_SKILL）。
+          其余任务网页端无法自动做。
+        </span>
+        <a-space>
+          <a-button size="small" :loading="runningTasks" @click="runTasks">跑任务</a-button>
+          <a-button type="primary" size="small" :loading="drawing" @click="drawAll">一键抽奖</a-button>
+        </a-space>
+      </div>
+
+      <a-alert
+        v-if="lastRun"
+        type="success"
+        show-icon
+        class="mb-3"
+        :message="lastRun"
+      />
+
+      <a-table
+        size="small"
+        :pagination="false"
+        :data-source="taskAccounts"
+        :columns="accountTaskColumns"
+        row-key="account_id"
+      >
+        <template #bodyCell="{ column, record }">
+          <template v-if="column.key === 'name'">
+            <div>{{ record.nickname || record.name }}</div>
+            <div v-if="!record.ok" class="text-xs text-red-500">{{ record.error }}</div>
+          </template>
+          <template v-else-if="column.key === 'tasks'">
+            <div v-for="t in record.tasks" :key="t.task_id" class="text-xs leading-5">
+              <span :class="t.done ? 'text-green-600' : 'text-slate-400'">
+                {{ t.done ? '✓' : '○' }}
+              </span>
+              <span class="ml-1">{{ t.title }}</span>
+              <a-tag
+                v-if="!t.done"
+                :color="canAuto(t) ? 'blue' : 'default'"
+                class="ml-1"
+              >
+                {{ canAuto(t) ? '可自动' : notAutoReason(t) }}
+              </a-tag>
+            </div>
+          </template>
+          <template v-else-if="column.key === 'draw'">
+            <div>{{ record.draw_remaining ?? '—' }} 次</div>
+            <div class="text-xs text-slate-400">奖品 {{ record.my_prizes ?? '—' }} 个</div>
+          </template>
+        </template>
+      </a-table>
+    </a-card>
+
     <a-card title="模型网关" :bordered="false" class="mt-4">
       <a-alert
         :type="pool?.gateway_online ? 'success' : 'warning'"
@@ -381,6 +436,12 @@ const detail = ref<AccountStatus | null>(null)
 const busy = reactive<Record<number, boolean>>({})
 const probing = reactive<Record<number, boolean>>({})
 const pool = ref<PoolData | null>(null)
+const taskAccounts = ref<any[]>([])
+const autoTypes = ref<string[]>([])
+const notAutoMap = ref<Record<string, string>>({})
+const runningTasks = ref(false)
+const drawing = ref(false)
+const lastRun = ref('')
 const verifyResult = ref<{ ok: boolean; nickname?: string; uid?: string; error?: string } | null>(null)
 
 const form = reactive({ name: '', cookie: '' })
@@ -413,6 +474,11 @@ const prizeColumns = [
 const taskColumns = [
   { title: '任务', key: 'title', dataIndex: 'title' },
   { title: '状态', key: 'status', dataIndex: 'status' },
+]
+const accountTaskColumns = [
+  { title: '账号', key: 'name', width: '22%' },
+  { title: '任务', key: 'tasks' },
+  { title: '抽奖', key: 'draw', width: '18%' },
 ]
 const poolColumns = [
   { title: '账号', key: 'name' },
@@ -454,6 +520,70 @@ async function load() {
     const { data: p } = await client.get('/web-accounts/pool')
     pool.value = p
   } catch (e) { /* 忽略 */ }
+  await loadTasks()
+}
+
+async function loadTasks() {
+  try {
+    const { data } = await client.get('/web-accounts/tasks')
+    taskAccounts.value = data.accounts
+    autoTypes.value = data.auto_types || []
+    notAutoMap.value = data.not_automatable || {}
+  } catch (e) { /* 忽略 */ }
+}
+
+// 任务类型是否可自动完成
+function canAuto(t: any) {
+  return autoTypes.value.includes(t.task_type)
+}
+// 不可自动的原因（后端给出，避免界面自己编）
+function notAutoReason(t: any) {
+  return notAutoMap.value[t.task_type] || '需手动'
+}
+
+async function runTasks() {
+  runningTasks.value = true
+  lastRun.value = ''
+  try {
+    const { data } = await client.post('/web-accounts/tasks/run', {})
+    const parts = []
+    if (data.done_count) parts.push(`完成 ${data.done_count} 个`)
+    if (data.fail_count) parts.push(`失败 ${data.fail_count} 个`)
+    // 没有可做任务时要说清原因，否则「什么都没发生」看起来像坏了
+    const skipped = data.results.reduce((s: number, r: any) => s + (r.not_automatable?.length || 0), 0)
+    if (!parts.length) {
+      lastRun.value = skipped
+        ? `没有可自动完成的任务（${skipped} 个任务需手动或前往客户端）`
+        : '没有可自动完成的任务'
+    } else {
+      lastRun.value = parts.join('，') + (skipped ? `；${skipped} 个需手动` : '')
+    }
+    await loadTasks()
+  } catch (e: any) {
+    message.error(e?.response?.data?.error || '跑任务失败')
+  } finally {
+    runningTasks.value = false
+  }
+}
+
+async function drawAll() {
+  drawing.value = true
+  lastRun.value = ''
+  try {
+    const { data } = await client.post('/web-accounts/draw-all', {})
+    if (!data.drawn_count) {
+      lastRun.value = '没有可用的抽奖次数——先跑任务赚次数'
+    } else {
+      const won: string[] = []
+      data.results.forEach((r: any) => (r.won || []).forEach((w: any) => won.push(w.name)))
+      lastRun.value = `抽了 ${data.drawn_count} 次` + (won.length ? `，抽到：${won.join('、')}` : '')
+    }
+    await loadTasks()
+  } catch (e: any) {
+    message.error(e?.response?.data?.error || '抽奖失败')
+  } finally {
+    drawing.value = false
+  }
 }
 
 // 探测账号能否真的跑模型（走一次真实的 1-token 调用）
