@@ -163,7 +163,12 @@ const routes = [
     method: 'GET',
     path: '/gateway-list',
     handler: async ({ res }) => {
-      const port = parseInt(process.env.DUMATE2API_PORT || '9080', 10);
+      // 同 system.js：默认看 9080（稳定版），开发实例用
+      // DUMATE_ADMIN_GATEWAY_PORT 指向 9082，避免读到稳定版的模型列表
+      const port = parseInt(
+        process.env.DUMATE_ADMIN_GATEWAY_PORT || process.env.DUMATE2API_PORT || '9080',
+        10,
+      );
       const out = await new Promise((resolve) => {
         const req = http.request(
           // 超时放宽到 15s：本机在负载高时 /v1/models 实测出现过 1.7s 的响应，

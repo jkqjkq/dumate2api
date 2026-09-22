@@ -3,7 +3,13 @@ const http = require('http');
 const discovery = require('../../discovery');
 const launcher = require('../../upstream-launcher');
 
-const PROXY_PORT = parseInt(process.env.DUMATE2API_PORT || '9080', 10);
+// 要观察的网关端口。默认 9080（稳定版），开发实例通过 DUMATE_ADMIN_GATEWAY_PORT
+// 指向 9082——管理端与网关是两个独立进程，各自监听不同端口，不能让管理端
+// 写死去看 9080，否则开发实例会显示稳定版的数字。
+const PROXY_PORT = parseInt(
+  process.env.DUMATE_ADMIN_GATEWAY_PORT || process.env.DUMATE2API_PORT || '9080',
+  10,
+);
 
 function probeJSON(port, path, method = 'GET', body = null) {
   return new Promise((resolve) => {
