@@ -650,6 +650,109 @@ const routes = [
     },
   },
   {
+    // 仪表盘聚合：一次给全所有账号的关键指标，避免前端为每个账号发多次请求。
+    //
+    // 只聚合我们真实拥有的数据。参考实现里的「连败降权」「Redis 模式」
+    // 在这套系统里没有对应机制（池是轮询 + 冷却，没有降权，也不用 Redis），
+    // 所以不编造这两个字段——界面上缺一个格子好过填一个假数字。
+    method: 'GET',
+    path: '/dashboard',
+    handler: async ({ res }) => {
+      const list = accounts.load().accounts;
+      const gatewayPort = parseInt(process.env.DUMATE_WEB_GATEWAY_PORT || '9084', 10);
+
+      // 网关的实时池状态（token 缓存、冷却）只在网关进程里，能读到就用，
+      // 读不到也不影响其余指标
+      const gw = await new Promise((resolve) => {
+        const req = require('http').request(
+          { host: '127.0.0.1', port: gatewayPort, path: '/health', method: 'GET', timeout: 3000 },
+          (r) => {
+            let d = '';
+            r.setEncoding('utf8');
+            r.on('data', (c) => { d += c; });
+            r.on('end', () => { try { resolve(JSON.parse(d)); } catch (e) { resolve(null); } });
+          },
+        );
+        req.on('error', () => resolve(null));
+        req.on('timeout', () => { req.destroy(); resolve(null); });
+        req.end();
+      });
+
+      // 每个账号的积分与订阅到期，用于健康快照。
+      // 用缓存优先：仪表盘是高频页面，不必每次都为每个账号打一次上游。
+      const detail = await Promise.all(list.map(async (a) => {
+        const cachedFresh = a.points && a.points_at && Date.now() - a.points_at < 60_000;
+        if (cachedFresh && a.points.expire_at) {
+          return { id: a.id, points: a.points, expire_at: a.points.expire_at, cached: true };
+        }
+        const r = await web.api.quotaOverview(a.cookie);
+        if (!r.ok) return { id: a.id, points: a.points || null, expire_at: a.points ? a.points.expire_at : null, error: r.error };
+        const sub = (r.packages || []).find((p) => p.kind === 'subscription' && p.expire_at);
+        const summary = {
+          left: r.left, total: r.total, used: r.used,
+          expire_at: sub ? sub.expire_at : null,
+          subscribed: r.subscribed,
+        };
+        accounts.patchInternal(a.id, { points: summary, points_at: Date.now(), last_error: '' });
+        return { id: a.id, points: summary, expire_at: summary.expire_at };
+      }));
+
+      const byId = new Map(detail.map((d) => [d.id, d]));
+      const now = Date.now();
+
+      const enriched = list.map((a) => {
+        const d = byId.get(a.id) || {};
+        const p = d.points || {};
+        const daysLeft = d.expire_at ? Math.ceil((d.expire_at - now) / 86400000) : null;
+        return {
+          id: a.id,
+          name: a.name,
+          nickname: a.nickname || '',
+          enabled: a.enabled,
+          points: p.left !== undefined ? p.left : null,
+          points_total: p.total !== undefined ? p.total : null,
+          subscribed: !!p.subscribed,
+          // 会员剩余天数：参考图的健康条用它当「寿命」
+          days_left: daysLeft,
+          expire_at: d.expire_at || null,
+          checkin_result: (a.checkin && a.checkin.last_result) || '',
+          last_error: a.last_error || '',
+        };
+      });
+
+      const enabled = enriched.filter((a) => a.enabled);
+      const withPoints = enabled.filter((a) => a.points !== null);
+      // 低余额阈值：低于 200 视为需要注意（与参考图口径一致）
+      const lowPoints = withPoints.filter((a) => a.points < 200).length;
+      const expiringSoon = enabled.filter((a) => a.days_left !== null && a.days_left <= 7).length;
+
+      return sendJSON(res, 200, {
+        // 顶部卡片
+        summary: {
+          total: enriched.length,
+          enabled: enabled.length,
+          disabled: enriched.length - enabled.length,
+          // 「有效期内」= 有凭证且订阅未过期
+          valid: enabled.filter((a) => a.days_left === null || a.days_left > 0).length,
+          expiring_soon: expiringSoon,
+          low_points: lowPoints,
+          points_left: withPoints.reduce((s, a) => s + (a.points || 0), 0),
+          points_total: withPoints.reduce((s, a) => s + (a.points_total || 0), 0),
+        },
+        // 上游/池状态
+        upstream: {
+          gateway_online: !!gw,
+          gateway_port: gatewayPort,
+          accounts_total: gw ? gw.accounts_total : null,
+          accounts_ready: gw ? gw.accounts_ready : null,
+          cooling: gw ? (gw.accounts || []).filter((x) => x.cooling).length : null,
+          // 网关未启动时这些数字没有意义，如实标 null 而不是填 0
+        },
+        accounts: enriched,
+      });
+    },
+  },
+  {
     method: 'GET',
     path: '/pool',
     handler: ({ res }) => {
