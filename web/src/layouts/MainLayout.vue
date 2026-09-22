@@ -34,6 +34,10 @@
           <template #icon><HistoryOutlined /></template>
           <span>任务记录</span>
         </a-menu-item>
+        <a-menu-item key="usage">
+          <template #icon><BarChartOutlined /></template>
+          <span>用量统计</span>
+        </a-menu-item>
       </a-menu>
     </a-layout-sider>
     <a-layout>
@@ -54,7 +58,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { DashboardOutlined, DeploymentUnitOutlined, KeyOutlined, UserOutlined, WalletOutlined, TeamOutlined, HistoryOutlined } from '@ant-design/icons-vue'
+import { DashboardOutlined, DeploymentUnitOutlined, KeyOutlined, UserOutlined, WalletOutlined, TeamOutlined, HistoryOutlined, BarChartOutlined } from '@ant-design/icons-vue'
 import { auth } from '@/stores/auth'
 
 const collapsed = ref(false)

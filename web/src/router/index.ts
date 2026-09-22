@@ -10,6 +10,7 @@ const Account = () => import('@/views/AccountView.vue')
 const Points = () => import('@/views/PointsView.vue')
 const WebAccounts = () => import('@/views/WebAccountsView.vue')
 const Records = () => import('@/views/RecordsView.vue')
+const Usage = () => import('@/views/UsageView.vue')
 
 const router = createRouter({
   history: createWebHashHistory(),
@@ -26,6 +27,7 @@ const router = createRouter({
         { path: 'points', component: Points, meta: { title: '积分明细', key: 'points' } },
         { path: 'web-accounts', component: WebAccounts, meta: { title: '账号管理', key: 'web-accounts' } },
         { path: 'records', component: Records, meta: { title: '任务记录', key: 'records' } },
+        { path: 'usage', component: Usage, meta: { title: '用量统计', key: 'usage' } },
       ],
     },
   ],
