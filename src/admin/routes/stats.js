@@ -2,6 +2,14 @@
 const reqlog = require('../../reqlog');
 const { sendJSON } = require('../router');
 
+// 解析并钳制查询参数。下界同样重要：days=0 会让窗口从「现在」开始、
+// 结果恒为空，界面显示「还没有请求记录」，看起来像没有数据而不是参数错。
+function clampInt(raw, def, min, max) {
+  const n = parseInt(raw, 10);
+  if (!Number.isFinite(n)) return def;
+  return Math.min(max, Math.max(min, n));
+}
+
 function dayKey(ts) {
   const d = new Date(ts);
   // 本地时区的 YYYY-MM-DD：用 UTC 会把晚上的请求算到第二天
@@ -46,7 +54,7 @@ const routes = [
     method: 'GET',
     path: '/daily',
     handler: ({ res, req }) => {
-      const days = Math.min(90, parseInt((req.url.match(/[?&]days=(\d+)/) || [])[1] || '14', 10));
+      const days = clampInt((req.url.match(/[?&]days=(\d+)/) || [])[1], 14, 1, 90);
       const rows = load(days);
       const buckets = {};
       for (const r of rows) {
@@ -69,7 +77,7 @@ const routes = [
     method: 'GET',
     path: '/by-model',
     handler: ({ res, req }) => {
-      const days = Math.min(90, parseInt((req.url.match(/[?&]days=(\d+)/) || [])[1] || '30', 10));
+      const days = clampInt((req.url.match(/[?&]days=(\d+)/) || [])[1], 30, 1, 90);
       const buckets = {};
       for (const r of load(days)) {
         const k = r.model || '(未知)';
@@ -86,7 +94,7 @@ const routes = [
     method: 'GET',
     path: '/by-path',
     handler: ({ res, req }) => {
-      const days = Math.min(90, parseInt((req.url.match(/[?&]days=(\d+)/) || [])[1] || '30', 10));
+      const days = clampInt((req.url.match(/[?&]days=(\d+)/) || [])[1], 30, 1, 90);
       const buckets = {};
       for (const r of load(days)) {
         const k = r.path || '(未知)';
@@ -103,7 +111,7 @@ const routes = [
     method: 'GET',
     path: '/recent',
     handler: ({ res, req }) => {
-      const limit = Math.min(200, parseInt((req.url.match(/[?&]limit=(\d+)/) || [])[1] || '50', 10));
+      const limit = clampInt((req.url.match(/[?&]limit=(\d+)/) || [])[1], 50, 1, 200);
       const status = (req.url.match(/[?&]status=(\d+)/) || [])[1];
       const filter = status ? (r) => String(r.status) === status : null;
       const { rows, total } = reqlog.read({ limit, filter });

@@ -140,10 +140,21 @@ const routes = [
       const port = await discovery.discoverPort();
       if (!port) return sendJSON(res, 502, { error: '未找到上游，无法探测' });
 
-      const results = [];
-      for (const m of models) {
-        results.push(await probeModel(port, m));
+      // 并发探测：串行等 20 个模型最坏是 20×15s=300s，而前端 axios 超时
+      // 只有 30s，浏览器早断了而服务端还在发请求。分池并发把最坏压到约
+      // 15s，同时不至于一次性打爆上游。
+      const CONCURRENCY = 5;
+      const results = new Array(models.length);
+      let cursor = 0;
+      async function worker() {
+        while (cursor < models.length) {
+          const i = cursor++;
+          results[i] = await probeModel(port, models[i]);
+        }
       }
+      await Promise.all(
+        Array.from({ length: Math.min(CONCURRENCY, models.length) }, worker),
+      );
       return sendJSON(res, 200, { upstream_port: port, results });
     },
   },
