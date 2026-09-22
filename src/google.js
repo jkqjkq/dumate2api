@@ -5,30 +5,35 @@
 // completions, so this module converts between the two:
 //   - generateContent / streamGenerateContent request  -> OpenAI chat request
 //   - OpenAI chat response / SSE stream                -> Google response
-// Model names pass straight through so DuMate's own IDs (glm-5, model-text,
-// claude-3-5-sonnet-20241022, gpt-4o) reach the upstream unchanged; unknown
-// / legacy Gemini names fall back to glm-5 (the strongest local model).
+//
+// 模型名走 modelmap.js 这唯一的映射来源，与管理端「模型管理」页共享配置。
+// 本模块原先自带第三份映射表：既不知道管理端的改动（改了别名对 /v1beta
+// 不生效），未知名字还直接透传——上游只认 model-text / model-artifact-validate
+// / glm-5，透传一个 gemini-1.5-pro 只会拿到 404。现在未知名字一律走
+// modelmap 的 fallback，与管理端表现一致。
 
 const { resolveMaxTokens } = require('./budget');
+const modelmap = require('./modelmap');
 
-const DEFAULT_MODEL = 'glm-5';
+// 回落名由 modelmap 决定，不再在本模块另立一个常量——两处常量必然漂移
+const DEFAULT_MODEL = modelmap.DEFAULTS.fallback;
 
-// Gemini CLI may be configured with a generic name; map those to DuMate-local.
+// Gemini CLI 可能配置了通用名，这些名字上游不认，映射到本地可用模型
 const GEMINI_TO_DUMATE = {
-  'gemini-2.5-pro': DEFAULT_MODEL,
-  'gemini-2.5-flash': DEFAULT_MODEL,
-  'gemini-3-pro': DEFAULT_MODEL,
-  'gemini-3-flash': DEFAULT_MODEL,
-  'gemini-3-pro-preview': DEFAULT_MODEL,
-  'gemini-pro': DEFAULT_MODEL,
-  'gemini-flash': DEFAULT_MODEL,
+  'gemini-2.5-pro': 'model-text',
+  'gemini-2.5-flash': 'model-text',
+  'gemini-3-pro': 'model-text',
+  'gemini-3-flash': 'model-text',
+  'gemini-3-pro-preview': 'model-text',
+  'gemini-pro': 'model-text',
+  'gemini-flash': 'model-text',
 };
 
 function mapModel(name) {
-  if (!name) return DEFAULT_MODEL;
+  if (!name) return modelmap.load().fallback;
   if (GEMINI_TO_DUMATE[name]) return GEMINI_TO_DUMATE[name];
-  // DuMate native IDs pass through untouched.
-  return name;
+  // 上游原生 ID 原样透传，其余交给统一映射（查不到则回落 fallback）
+  return modelmap.mapModel(name);
 }
 
 function partsToText(parts) {
