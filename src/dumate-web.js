@@ -207,11 +207,36 @@ const api = {
   },
 
   // ---- 任务 ----
+  // 实测返回结构是 { groups: [{ group_code, group_name, tasks: [...] }] }，
+  // 不是平铺数组。任务是否完成看 completed_count >= repeat_count——
+  // 这是客户端 completedIds 的判定口径（bundle 里就是这么算的）。
   async tasks(cookie) {
     const res = await request(cookie, 'GET', '/api/dumate/activity/growth-plan/tasks');
     if (!res.ok) return { ok: false, error: errOf(res), expired: res.expired };
-    const r = pick(res);
-    return { ok: true, tasks: Array.isArray(r) ? r : (r && (r.tasks || r.list)) || [] };
+    const r = pick(res) || {};
+    const groups = Array.isArray(r.groups) ? r.groups : [];
+    const flat = [];
+    for (const g of groups) {
+      for (const t of (g.tasks || [])) {
+        flat.push({
+          task_id: t.task_id,
+          task_type: t.task_type,
+          title: t.title,
+          sub_title: t.sub_title || '',
+          // query 是 QUERY_INPUT 类任务要发的内容；服务端据此校验
+          query: t.query || '',
+          reward_count: t.reward_count || 0,
+          reward_points: t.reward_points || 0,
+          repeat_count: t.repeat_count || 1,
+          completed_count: t.completed_count || 0,
+          done: (t.completed_count || 0) >= (t.repeat_count || 1),
+          group_code: g.group_code,
+          group_name: g.group_name,
+          display_terminal: t.display_terminal || [],
+        });
+      }
+    }
+    return { ok: true, groups, tasks: flat };
   },
 
   async completeTask(cookie, taskId) {
@@ -219,7 +244,14 @@ const api = {
       task_id: taskId,
     });
     if (!res.ok) return { ok: false, error: errOf(res), expired: res.expired };
-    return { ok: true, result: pick(res) };
+    const r = pick(res);
+    // 业务层可能返回 success:false + code（如 410121 该任务次数已发放）。
+    // 只看 HTTP 状态会把「已发放」当成完成，所以业务码也要判。
+    const biz = res.data || {};
+    if (biz.success === false || (typeof biz.code === 'number' && biz.code !== 0)) {
+      return { ok: false, code: biz.code, error: biz.message || `业务错误 ${biz.code}`, result: r };
+    }
+    return { ok: true, result: r };
   },
 
   async pageStatus(cookie) {
