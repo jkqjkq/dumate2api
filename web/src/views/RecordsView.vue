@@ -58,7 +58,9 @@
       </a-spin>
     </a-card>
 
-    <!-- 按天聚合：一眼看出哪天做了什么 -->
+    <!-- 按天聚合：一眼看出哪天做了什么。
+         只标类型不显示次数——「哪天做过什么」是这张表要回答的，
+         次数在下面的明细里能数，放在这里只会让每行变长。 -->
     <a-card title="活动概览" :bordered="false" class="mb-4">
       <a-empty v-if="!records?.daily?.length" description="还没有操作记录" />
       <a-table
@@ -73,21 +75,16 @@
           <template v-if="column.key === 'name'">
             {{ record.account }}
           </template>
-          <template v-else-if="column.key === 'counts'">
-            <a-tag v-for="(n, t) in record.counts" :key="t" :color="typeColor(String(t))" class="mr-1">
-              {{ typeText(String(t)) }} {{ n }}
-            </a-tag>
-          </template>
           <template v-else-if="column.key === 'days'">
             <div v-for="(acts, day) in record.days" :key="day" class="text-xs leading-5">
               <span class="text-slate-400">{{ day }}</span>
               <a-tag
-                v-for="(n, t) in acts"
+                v-for="(_, t) in acts"
                 :key="t"
                 :color="typeColor(String(t))"
                 class="ml-1"
               >
-                {{ typeText(String(t)) }}{{ n > 1 ? '×' + n : '' }}
+                {{ typeText(String(t)) }}
               </a-tag>
             </div>
           </template>
@@ -184,8 +181,7 @@ const accountOptions = ref<Array<{ label: string; value: number | null }>>([
 ])
 
 const dailyColumns = [
-  { title: '账号', key: 'name', width: '18%' },
-  { title: '累计', key: 'counts', width: '28%' },
+  { title: '账号', key: 'name', width: '20%' },
   { title: '按天', key: 'days' },
 ]
 const detailColumns = [
