@@ -92,6 +92,9 @@ function forwardToUpstream(port, path, method, headers, body, callback) {
 }
 
 function readBody(req) {
+  // 鉴权阶段可能已经为模型白名单预读过请求体；流只能消费一次，
+  // 直接返回缓存，否则 handler 拿到空串
+  if (typeof req._rawBody === 'string') return Promise.resolve(req._rawBody);
   return new Promise((resolve) => {
     const chunks = [];
     req.on('data', (c) => chunks.push(c));
@@ -603,6 +606,19 @@ const server = http.createServer(async (req, res) => {
 
   const url = req.url.split('?')[0];
 
+  // 兜住异步 handler 的拒绝。原来只包了同步 try/catch，而 handler 是 async：
+  // `await ensureUpstream()` 抛错时（例如网关先于 DuMate 启动——启动日志里
+  // 明确提示「Will retry on first request」就是这条路径）拒绝会绕过同步
+  // catch，既不写响应（客户端永久挂起），又变成 unhandledRejection 让进程退出。
+  const fail = (err) => {
+    log('Error:', err.message);
+    if (!res.headersSent) {
+      sendJSON(res, 500, { error: { message: err.message, type: 'api_error' } });
+    } else {
+      res.end();
+    }
+  };
+
   try {
     // Health check
     if (url === '/health' || url === '/ping') {
@@ -621,7 +637,26 @@ const server = http.createServer(async (req, res) => {
     if (REQUIRE_KEY && url !== '/health' && url !== '/ping') {
       const token = keysvc.tokenFromHeaders(req.headers);
       const key = keysvc.resolve(token);
-      const model = null;   // 模型白名单在解析出请求体后另行判定
+
+      // 模型白名单需要知道请求的是哪个模型。只有 key 真的配了白名单时才
+      // 预读请求体——否则给默认路径凭空加一次完整读取。预读的内容存到
+      // req._rawBody，handler 里的 readBody 会直接取用，不会二次消费流。
+      let model = null;
+      const hasModelRule = key && Array.isArray(key.model_allowlist) && key.model_allowlist.length > 0;
+      if (hasModelRule && req.method === 'POST') {
+        const gm = url.match(/^\/v1beta\/models\/([^:/?]+):/);
+        if (gm) {
+          model = decodeURIComponent(gm[1]);
+        } else {
+          const raw = await readBody(req);
+          req._rawBody = raw;
+          try {
+            const parsed = JSON.parse(raw);
+            model = parsed && parsed.model ? String(parsed.model) : null;
+          } catch (e) { model = null; }
+        }
+      }
+
       const verdict = keysvc.validate(key, reqlog.clientIP(req), model);
       if (!verdict.ok) {
         const status = key ? 403 : 401;
@@ -642,27 +677,27 @@ const server = http.createServer(async (req, res) => {
     // ==================== OpenAI compatible ====================
     // Models list
     if (url === '/v1/models' && req.method === 'GET') {
-      return handleOpenAIModels(req, res);
+      return await handleOpenAIModels(req, res);
     }
 
     // Chat completions (OpenAI format, pass-through with model mapping)
     if (url === '/v1/chat/completions' && req.method === 'POST') {
-      return handleOpenAIChat(req, res);
+      return await handleOpenAIChat(req, res);
     }
 
     // Responses API (Codex CLI 0.155+ 只认 wire_api="responses")
     if ((url === '/v1/responses' || url === '/responses') && req.method === 'POST') {
-      return handleOpenAIResponses(req, res);
+      return await handleOpenAIResponses(req, res);
     }
 
     // ==================== Google Generative Language compatible ====================
     const googleModels = url.match(/^\/v1beta\/models$/);
     const googleGenerate = url.match(/^\/v1beta\/models\/([^:/?]+):(generateContent|streamGenerateContent)$/);
     if (googleModels && req.method === 'GET') {
-      return handleGoogleModels(req, res);
+      return await handleGoogleModels(req, res);
     }
     if (googleGenerate && req.method === 'POST') {
-      return handleGoogleGenerateContent(req, res, googleGenerate[2] === 'streamGenerateContent');
+      return await handleGoogleGenerateContent(req, res, googleGenerate[2] === 'streamGenerateContent');
     }
 
     // ==================== Anthropic compatible ====================
@@ -670,23 +705,22 @@ const server = http.createServer(async (req, res) => {
     // Some clients (Claude Code / cc-switch) hit the bare path, others the
     // /v1-prefixed one. Accept both.
     if ((url === '/v1/messages' || url === '/messages') && req.method === 'POST') {
-      return handleAnthropicMessages(req, res);
+      return await handleAnthropicMessages(req, res);
     }
 
     // Also support /v1/chat/completions for Anthropic-style path
     if (url === '/api/v1/messages' && req.method === 'POST') {
-      return handleAnthropicMessages(req, res);
+      return await handleAnthropicMessages(req, res);
     }
 
     if ((url === '/v1/messages/count_tokens' || url === '/messages/count_tokens' || url === '/api/v1/messages/count_tokens') && req.method === 'POST') {
-      return handleAnthropicCountTokens(req, res);
+      return await handleAnthropicCountTokens(req, res);
     }
 
     // 404
     sendJSON(res, 404, { error: { message: `Not found: ${url}`, type: 'invalid_request_error' } });
   } catch (err) {
-    log('Error:', err.message);
-    sendJSON(res, 500, { error: { message: err.message, type: 'api_error' } });
+    fail(err);
   }
 });
 
