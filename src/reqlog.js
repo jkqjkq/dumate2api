@@ -79,8 +79,9 @@ function usageFromSSE(text) {
   return best;
 }
 
-// 从请求体里推断模型名与是否流式，供日志展示
-function describeRequest(body) {
+// 从请求体里推断模型名与是否流式，供日志展示。
+// Google 协议把模型放在 URL 路径而不是 body，所以额外接受一个回退名。
+function describeRequest(body, fallbackModel) {
   let model = '';
   let stream = false;
   let messages = 0;
@@ -92,6 +93,7 @@ function describeRequest(body) {
       messages = Array.isArray(m) ? m.length : 0;
     }
   } catch (e) { /* 忽略 */ }
+  if (!model && fallbackModel) model = fallbackModel;
   return { model, stream, messages };
 }
 

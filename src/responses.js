@@ -230,13 +230,27 @@ function openAIToResponse(openaiResp, model) {
 }
 
 // 流式：OpenAI SSE -> Responses SSE
-function translateStreamToResponses(upstreamRes, res, model) {
+function translateStreamToResponses(upstreamRes, res, model, onDone) {
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
     'Cache-Control': 'no-cache',
     'Connection': 'keep-alive',
     'Access-Control-Allow-Origin': '*',
   });
+
+  // 收尾时把最终 usage 交回调用方做埋点；两条收尾路径都要走一次
+  let finished = false;
+  const finish = (status) => {
+    if (finished) return;
+    finished = true;
+    if (onDone) {
+      const u = usage ? usageFrom(usage) : { input_tokens: 0, output_tokens: 0, total_tokens: 0 };
+      onDone(
+        { input: u.input_tokens || 0, output: u.output_tokens || 0, total: u.total_tokens || 0 },
+        status,
+      );
+    }
+  };
 
   const responseId = newResponseId();
   const createdAt = Math.floor(Date.now() / 1000);
@@ -429,6 +443,7 @@ function translateStreamToResponses(upstreamRes, res, model) {
       },
     });
     res.end();
+    finish(200);
   });
 
   upstreamRes.on('error', () => {
@@ -437,6 +452,7 @@ function translateStreamToResponses(upstreamRes, res, model) {
       response: { ...baseResponse('failed'), error: { code: 'upstream_error', message: 'upstream stream error' } },
     });
     res.end();
+    finish(502);
   });
 }
 

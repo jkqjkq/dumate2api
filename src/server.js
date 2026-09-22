@@ -303,7 +303,8 @@ async function handleGoogleModels(req, res) {
   });
 }
 
-async function handleGoogleGenerateContent(req, res, isStream) {
+async function handleGoogleGenerateContent(req, res, isStream, pathModel) {
+  const startedAt = Date.now();
   const bodyStr = await readBody(req);
   let googleReq;
   try {
@@ -313,18 +314,37 @@ async function handleGoogleGenerateContent(req, res, isStream) {
   }
 
   googleReq.stream = isStream;
+  // Google 的模型名在 URL 路径上，body 里没有，埋点要显式带上
+  const info = reqlog.describeRequest(googleReq, pathModel);
+  req._logPath = '/v1beta:generateContent';
+
   const openaiReq = googleToOpenAI(googleReq);
 
   const port = await ensureUpstream();
   const outBody = JSON.stringify(openaiReq);
   forwardToUpstream(port, '/chat/completions', 'POST', {}, outBody, (upstreamRes) => {
     if (upstreamRes.fakeResponse) {
+      logRequest(req, res, startedAt, info, 502, null, { error: 'upstream_unavailable' });
       return sendJSON(res, 502, { error: { code: 502, message: 'DuMate upstream unavailable', status: 'UNAVAILABLE' } });
+    }
+
+    // 上游报错时必须把状态码透出去。原实现在这里不检查 statusCode 就
+    // writeHead(200)，于是 429/500 被翻译成「HTTP 200 + 空候选」，
+    // 客户端以为成功、拿到的却是空回答。
+    if (upstreamRes.statusCode >= 400) {
+      return collectAndFinish(upstreamRes, (data) => {
+        logRequest(req, res, startedAt, info, upstreamRes.statusCode, null, { error: 'upstream_error' });
+        sendJSON(res, upstreamRes.statusCode, {
+          error: { code: upstreamRes.statusCode, message: 'Upstream error: ' + data.substring(0, 300), status: 'UNAVAILABLE' },
+        });
+      });
     }
 
     if (isStream) {
       // Google streaming supports both ?alt=sse and bare streamGenerateContent.
-      translateStreamToGoogle(upstreamRes, res, googleReq.model);
+      translateStreamToGoogle(upstreamRes, res, googleReq.model, (usage, status) => {
+        logRequest(req, res, startedAt, info, status, usage);
+      });
     } else {
       let data = '';
       let done = false;
@@ -333,12 +353,14 @@ async function handleGoogleGenerateContent(req, res, isStream) {
         done = true;
         try {
           const openaiResp = JSON.parse(data);
+          logRequest(req, res, startedAt, info, 200, reqlog.pickUsage(openaiResp.usage));
           res.writeHead(200, {
             'Content-Type': 'application/json',
             'Access-Control-Allow-Origin': '*',
           });
           res.end(JSON.stringify(openAIToGoogle(openaiResp, googleReq.model)));
         } catch (e) {
+          logRequest(req, res, startedAt, info, 502, null, { error: 'parse_error' });
           sendJSON(res, 502, { error: { code: 502, message: 'Upstream parse error: ' + data.substring(0, 200), status: 'INTERNAL' } });
         }
       };
@@ -353,6 +375,7 @@ async function handleGoogleGenerateContent(req, res, isStream) {
 // ==================== OpenAI Responses API (Codex CLI) ====================
 
 async function handleOpenAIResponses(req, res) {
+  const startedAt = Date.now();
   const bodyStr = await readBody(req);
   let reqBody;
   try {
@@ -362,16 +385,21 @@ async function handleOpenAIResponses(req, res) {
   }
 
   const isStream = reqBody.stream !== false; // Codex 默认流式
+  const info = reqlog.describeRequest(reqBody);
+  req._logPath = '/v1/responses';
+
   const openaiReq = responsesToOpenAI(reqBody, isStream);
 
   const port = await ensureUpstream();
   const outBody = JSON.stringify(openaiReq);
   forwardToUpstream(port, '/chat/completions', 'POST', {}, outBody, (upstreamRes) => {
     if (upstreamRes.fakeResponse) {
+      logRequest(req, res, startedAt, info, 502, null, { error: 'upstream_unavailable' });
       return sendJSON(res, 502, { error: { message: 'DuMate upstream unavailable', type: 'api_error' } });
     }
     if (!upstreamRes.statusCode || upstreamRes.statusCode >= 400) {
       return collectAndFinish(upstreamRes, (data) => {
+        logRequest(req, res, startedAt, info, upstreamRes.statusCode || 502, null, { error: 'upstream_error' });
         sendJSON(res, upstreamRes.statusCode || 502, {
           error: { message: 'Upstream error: ' + data.substring(0, 300), type: 'api_error' },
         });
@@ -379,13 +407,17 @@ async function handleOpenAIResponses(req, res) {
     }
 
     if (isStream) {
-      translateStreamToResponses(upstreamRes, res, reqBody.model);
+      translateStreamToResponses(upstreamRes, res, reqBody.model, (usage, status) => {
+        logRequest(req, res, startedAt, info, status, usage);
+      });
     } else {
       collectAndFinish(upstreamRes, (data) => {
         try {
           const openaiResp = JSON.parse(data);
+          logRequest(req, res, startedAt, info, 200, reqlog.pickUsage(openaiResp.usage));
           sendJSON(res, 200, openAIToResponse(openaiResp, reqBody.model));
         } catch (e) {
+          logRequest(req, res, startedAt, info, 502, null, { error: 'parse_error' });
           sendJSON(res, 502, { error: { message: 'Upstream parse error: ' + data.substring(0, 200), type: 'api_error' } });
         }
       });
@@ -705,7 +737,7 @@ const server = http.createServer(async (req, res) => {
       return await handleGoogleModels(req, res);
     }
     if (googleGenerate && req.method === 'POST') {
-      return await handleGoogleGenerateContent(req, res, googleGenerate[2] === 'streamGenerateContent');
+      return await handleGoogleGenerateContent(req, res, googleGenerate[2] === 'streamGenerateContent', decodeURIComponent(googleGenerate[1]));
     }
 
     // ==================== Anthropic compatible ====================

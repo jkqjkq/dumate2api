@@ -192,7 +192,7 @@ function openAIToGoogle(openaiResp, originalModel) {
 }
 
 // Translate OpenAI SSE stream into Google streamGenerateContent SSE events.
-function translateStreamToGoogle(upstreamRes, res, originalModel) {
+function translateStreamToGoogle(upstreamRes, res, originalModel, onDone) {
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
     'Cache-Control': 'no-cache',
@@ -205,6 +205,16 @@ function translateStreamToGoogle(upstreamRes, res, originalModel) {
   let inputTokens = 0;
   let outputTokens = 0;
   let finishReason = null;
+
+  // 收尾时回报 usage 供埋点；end/error 两条路径只会生效一次
+  let finished = false;
+  const finish = (status) => {
+    if (finished) return;
+    finished = true;
+    if (onDone) {
+      onDone({ input: inputTokens, output: outputTokens, total: inputTokens + outputTokens }, status);
+    }
+  };
 
   upstreamRes.on('data', (chunk) => {
     buffer += chunk.toString('utf8');
@@ -271,10 +281,12 @@ function translateStreamToGoogle(upstreamRes, res, originalModel) {
     // Google's streaming protocol ends by closing the connection; no [DONE]
     // sentinel (that is an OpenAI SSE convention and breaks GoogleGenAI).
     res.end();
+    finish(200);
   });
 
   upstreamRes.on('error', () => {
     res.end();
+    finish(502);
   });
 }
 
