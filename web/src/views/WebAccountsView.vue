@@ -126,6 +126,53 @@
         :message="lastRun"
       />
 
+      <div class="flex items-center justify-between mb-3 p-3 bg-slate-50 rounded">
+        <div>
+          <div class="text-sm">
+            <span class="font-medium">后台自动轮询</span>
+            <a-tag :color="sched?.enabled ? 'green' : 'default'" class="ml-2">
+              {{ sched?.enabled ? '已开启' : '已关闭' }}
+            </a-tag>
+          </div>
+          <div class="text-xs text-slate-500 mt-1">
+            <template v-if="sched?.enabled && sched.next_run_at">
+              下次检查 {{ new Date(sched.next_run_at).toLocaleString('zh-CN') }} ·
+              间隔 {{ sched.minutes }} 分钟（±{{ (sched.jitter_ratio * 100) }}% 抖动）
+            </template>
+            <template v-else>
+              开启后每隔一段时间检查有无可完成任务，自动完成并领取抽奖次数
+            </template>
+          </div>
+        </div>
+        <a-space>
+          <a-select
+            v-model:value="schedMinutes"
+            size="small"
+            style="width: 110px"
+            :options="minuteOptions"
+          />
+          <a-switch
+            :checked="sched?.enabled"
+            :loading="schedSaving"
+            @change="toggleSchedule"
+          />
+        </a-space>
+      </div>
+
+      <a-alert
+        v-if="sched"
+        type="info"
+        show-icon
+        class="mb-3"
+        message="间隔是怎么定的"
+      >
+        <template #description>
+          <ul class="pl-4 mb-0 text-xs">
+            <li v-for="(r, i) in sched.rationale" :key="i">{{ r }}</li>
+          </ul>
+        </template>
+      </a-alert>
+
       <a-table
         size="small"
         :pagination="false"
@@ -442,6 +489,17 @@ const notAutoMap = ref<Record<string, string>>({})
 const runningTasks = ref(false)
 const drawing = ref(false)
 const lastRun = ref('')
+const sched = ref<any>(null)
+const schedMinutes = ref(30)
+const schedSaving = ref(false)
+// 只给不低于下限的选项——低于 5 分钟对封号只有风险没有收益
+const minuteOptions = [
+  { label: '15 分钟', value: 15 },
+  { label: '30 分钟', value: 30 },
+  { label: '1 小时', value: 60 },
+  { label: '2 小时', value: 120 },
+  { label: '6 小时', value: 360 },
+]
 const verifyResult = ref<{ ok: boolean; nickname?: string; uid?: string; error?: string } | null>(null)
 
 const form = reactive({ name: '', cookie: '' })
@@ -530,6 +588,27 @@ async function loadTasks() {
     autoTypes.value = data.auto_types || []
     notAutoMap.value = data.not_automatable || {}
   } catch (e) { /* 忽略 */ }
+  try {
+    const { data: sc } = await client.get('/web-accounts/tasks/schedule')
+    sched.value = sc
+    if (sc.minutes) schedMinutes.value = sc.minutes
+  } catch (e) { /* 忽略 */ }
+}
+
+async function toggleSchedule(v: boolean) {
+  schedSaving.value = true
+  try {
+    const { data } = await client.post('/web-accounts/tasks/schedule', {
+      enabled: v,
+      minutes: schedMinutes.value,
+    })
+    sched.value = data
+    message.success(v ? `已开启，间隔 ${data.minutes} 分钟` : '已关闭')
+  } catch (e: any) {
+    message.error(e?.response?.data?.error || '设置失败')
+  } finally {
+    schedSaving.value = false
+  }
 }
 
 // 任务类型是否可自动完成
