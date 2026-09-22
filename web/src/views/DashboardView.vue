@@ -194,6 +194,25 @@
                 <a-tag :color="stateColor(record.state)">{{ stateText(record.state) }}</a-tag>
                 <a-tag v-if="record.active" color="blue">当前</a-tag>
               </template>
+              <template v-else-if="column.key === 'web'">
+                <template v-if="record.web">
+                  <a-tag color="green">已添加</a-tag>
+                  <div class="text-xs text-slate-500 mt-1">
+                    <template v-if="record.web.points !== null">
+                      积分 {{ fmt(record.web.points) }}
+                    </template>
+                    <span v-if="record.web.checkin_result" class="ml-1">
+                      · {{ checkinText(record.web.checkin_result) }}
+                    </span>
+                    <div v-if="record.web.last_error" class="text-red-500">
+                      {{ record.web.last_error }}
+                    </div>
+                  </div>
+                </template>
+                <a-tooltip v-else title="在「账号管理」里添加后即可签到、抽奖、查积分">
+                  <span class="text-slate-400 text-xs">未添加</span>
+                </a-tooltip>
+              </template>
               <template v-else-if="column.key === 'points'">
                 <template v-if="record.points">
                   <span class="font-medium">{{ fmt(record.points.left) }}</span>
@@ -212,8 +231,9 @@
             </template>
           </a-table>
           <div class="text-xs text-slate-400 mt-2">
-            上游积分接口只按当前登录账号计算，切换账号后需重启后端才能查另一个账号的积分；
-            登录态过期时间上游未提供，按凭证存在性与最后登录时间推断
+            「状态」是桌面端凭证（跑模型对话用），「网页凭证」是账号管理里添加的
+            （签到/抽奖/积分用）。两套互相独立：桌面端失效不影响网页端签到，
+            反之亦然。登录态过期时间上游未提供，按凭证存在性与最后登录时间推断。
           </div>
         </a-card>
       </a-col>
@@ -326,7 +346,8 @@ const expiringColumns = [
 ]
 const accountColumns = [
   { title: '账号', key: 'name', dataIndex: 'name' },
-  { title: '状态', key: 'state' },
+  { title: '桌面凭证', key: 'state' },
+  { title: '网页凭证', key: 'web' },
   { title: '积分', key: 'points' },
   { title: '最后登录', key: 'last' },
 ]
@@ -341,6 +362,9 @@ const stateColor = (s: string) =>
   s === 'active' ? 'green' : s === 'stale' ? 'orange' : 'default'
 const stateText = (s: string) =>
   s === 'active' ? '有效' : s === 'stale' ? '失效' : '未知'
+// 网页端签到结果：字段值来自后端，映射成人话
+const checkinText = (r: string) =>
+  r === 'claimed' ? '已签到' : r === 'already' ? '今日已签' : r === 'failed' ? '签到失败' : ''
 
 async function refresh(force = false) {
   loading.value = true

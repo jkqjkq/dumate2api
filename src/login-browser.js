@@ -57,6 +57,32 @@ let session = {
 
 let ctx = null;
 let pollTimer = null;
+let profileDir = null;
+
+// 每次登录用全新的临时 profile。
+// 不能复用固定目录：里面会残留上次的登录态，导致再次点「添加账号」时窗口
+// 一打开就已登录、程序立刻判定成功并关窗，用户根本没机会操作；想换账号时
+// 也会被旧 cookie 覆盖。
+function newProfileDir() {
+  const base = process.env.DUMATE_ADMIN_DATA || path.resolve(__dirname, '..', 'data');
+  const dir = path.join(base, 'browser-profile', `run-${Date.now()}-${process.pid}`);
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+function removeProfileDir(dir) {
+  if (!dir) return;
+  // 浏览器刚退出时文件可能还被占用，删不掉不影响下次（会用新目录），
+  // 但留着会一直堆垃圾，所以延迟重试一次
+  const attempt = (n) => {
+    try {
+      fs.rmSync(dir, { recursive: true, force: true });
+    } catch (e) {
+      if (n > 0) setTimeout(() => attempt(n - 1), 1500);
+    }
+  };
+  attempt(1);
+}
 
 function snapshot() {
   return {
@@ -76,7 +102,15 @@ function cleanup() {
   if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
   const c = ctx;
   ctx = null;
-  if (c) c.close().catch(() => {});
+  const dir = profileDir;
+  profileDir = null;
+  if (c) {
+    c.close()
+      .catch(() => {})
+      .then(() => removeProfileDir(dir));
+  } else {
+    removeProfileDir(dir);
+  }
   session.active = false;
 }
 
@@ -131,13 +165,9 @@ async function start(opts = {}) {
   };
 
   try {
-    // 独立的用户数据目录：与用户日常浏览器完全隔离，登录态不会互相影响，
-    // 也不会读到用户自己的浏览数据
-    const userDataDir = path.join(
-      process.env.DUMATE_ADMIN_DATA || path.resolve(__dirname, '..', 'data'),
-      'browser-profile',
-    );
-    fs.mkdirSync(userDataDir, { recursive: true });
+    // 每次一个全新 profile：隔离登录态，也避免读到上次的残留
+    const userDataDir = newProfileDir();
+    profileDir = userDataDir;
 
     ctx = await chromium.launchPersistentContext(userDataDir, {
       executablePath: exe,

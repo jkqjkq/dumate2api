@@ -57,6 +57,16 @@ export interface Account {
   active: boolean
   points: { left: number; total: number; used: number } | null
   points_note: string
+  // 网页端凭证（签到/抽奖/积分用）。null = 未在账号管理里添加。
+  web: {
+    id: number
+    name: string
+    enabled: boolean
+    has_error: boolean
+    last_error: string
+    checkin_result: string
+    points: number | null
+  } | null
 }
 
 export interface AccountsData {

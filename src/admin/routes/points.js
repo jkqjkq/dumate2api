@@ -34,12 +34,27 @@ function upstreamJSON(port, urlPath, timeout = 8000) {
 
 // 账号列表来自客户端的 auth.json。cookie 是加密的，这里只取身份与登录时间，
 // 不碰也不回传任何凭证字段。
+//
+// 同时合并「网页凭证」状态：同一个百度账号可能在桌面端已失效、却在网页端
+// 有效（反之亦然）。两套凭证服务于不同的能力——桌面端跑模型对话，网页端
+// 跑签到/抽奖/积分——只看一边会得出与实际能力不符的结论，所以并列展示。
 function listAccounts() {
   const file = path.join(process.env.APPDATA || '', 'qianfan-desktop-app', 'auth.json');
   let j;
   try { j = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (e) { return null; }
   const profiles = j.accountProfiles || [];
   const now = Date.now();
+
+  // 网页凭证按 bceAccountId 建索引。网页 cookie 里的 bce-login-accountid
+  // 与桌面 auth.json 的 bceAccountId 是同一个值，可据此关联两套。
+  const webAccounts = require('../../accounts');
+  const webByAccountId = new Map();
+  for (const w of webAccounts.load().accounts) {
+    const c = webAccounts.parseCookie(w.cookie);
+    const id = c['bce-login-accountid'] || w.uid || '';
+    if (id) webByAccountId.set(id, w);
+  }
+
   return profiles.map((p) => {
     const lastLogin = p.lastLogin || 0;
     const ageDays = lastLogin ? Math.floor((now - lastLogin) / 86400000) : null;
@@ -53,6 +68,9 @@ function listAccounts() {
     else if (ageDays === null) state = 'unknown';
     else if (ageDays > 30) state = 'stale';
     else state = 'active';
+
+    const web = webByAccountId.get(p.bceAccountId || p.bceUserId || '') || null;
+
     return {
       name: p.displayName || '(未命名)',
       user_id: p.bceUserId || '',
@@ -61,6 +79,16 @@ function listAccounts() {
       state,
       has_credentials: hasCredentials,
       active,
+      // 网页端凭证状态。null 表示没在账号管理里添加过这个账号。
+      web: web ? {
+        id: web.id,
+        name: web.name,
+        enabled: web.enabled,
+        has_error: !!web.last_error,
+        last_error: web.last_error || '',
+        checkin_result: (web.checkin && web.checkin.last_result) || '',
+        points: web.points ? web.points.left : null,
+      } : null,
     };
   });
 }

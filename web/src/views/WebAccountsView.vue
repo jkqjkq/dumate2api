@@ -303,7 +303,7 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { message } from 'ant-design-vue'
 import client from '@/api/client'
-import type { WebAccount, AccountStatus, CheckinResult } from '@/api/webaccounts'
+import type { WebAccount, AccountStatus } from '@/api/webaccounts'
 
 const accounts = ref<WebAccount[]>([])
 const loginUrl = ref('')

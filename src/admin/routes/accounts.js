@@ -79,12 +79,29 @@ const routes = [
         const cookie = loginBrowser.takeCookie();
         const wantName = (req.url.match(/[?&]name=([^&]*)/) || [])[1];
         try {
-          const created = accounts.create({
-            cookie,
-            name: wantName ? decodeURIComponent(wantName) : '',
-          });
+          // 先问上游这个 cookie 是谁：昵称和 uid 是列表页展示要用的，
+          // 拿不到就退回「账号 N」，不要让入库因为一次查询失败而中断
+          let info = null;
+          try { info = await web.api.userInfo(cookie); } catch (e) { info = null; }
+          const name = (wantName ? decodeURIComponent(wantName) : '') ||
+            (info && info.nickname) || '';
+
+          const created = accounts.create({ cookie, name });
+          if (info && info.ok) {
+            accounts.patchInternal(created.id, {
+              uid: info.uid || '',
+              nickname: info.nickname || '',
+              last_login_ok_at: Date.now(),
+              last_error: '',
+            });
+          }
           require('../../admin/auth').audit('admin', 'web_account_create', created.name, 'via browser');
-          return sendJSON(res, 200, { ...s, status: 'saved', has_cookie: false, account: created });
+          return sendJSON(res, 200, {
+            ...s, status: 'saved', has_cookie: false,
+            account: accounts.get(created.id) ? {
+              ...created, uid: info?.uid || '', nickname: info?.nickname || '',
+            } : created,
+          });
         } catch (e) {
           // 已存在同账号等：如实报错，但不把 cookie 丢掉——用户可改用粘贴方式
           return sendJSON(res, 409, { ...s, status: 'failed', message: e.message });
