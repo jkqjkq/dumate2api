@@ -268,7 +268,10 @@ async function handleOpenAIChat(req, res) {
         });
         res.end(data);
       };
-      upstreamRes.on('data', (c) => data += c);
+      upstreamRes.on('data', (c) => {
+        markFirstToken(res);
+        data += c;
+      });
       upstreamRes.on('end', finish);
       upstreamRes.on('aborted', finish);
       upstreamRes.on('error', finish);
