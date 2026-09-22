@@ -22,6 +22,10 @@
           <template #icon><UserOutlined /></template>
           <span>登录态</span>
         </a-menu-item>
+        <a-menu-item key="points">
+          <template #icon><WalletOutlined /></template>
+          <span>积分明细</span>
+        </a-menu-item>
       </a-menu>
     </a-layout-sider>
     <a-layout>
@@ -42,7 +46,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { DashboardOutlined, DeploymentUnitOutlined, KeyOutlined, UserOutlined } from '@ant-design/icons-vue'
+import { DashboardOutlined, DeploymentUnitOutlined, KeyOutlined, UserOutlined, WalletOutlined } from '@ant-design/icons-vue'
 import { auth } from '@/stores/auth'
 
 const collapsed = ref(false)

@@ -5,8 +5,28 @@ export interface PointsPackage {
   total: number
   used: number
   left: number
+  granted_at: number | null
   expire_at: number | null
   status: string
+}
+
+export interface SourceRow {
+  source: string
+  count: number
+  total: number
+  used: number
+  left: number
+  first_at: number | null
+  last_at: number | null
+  active_days: number
+  days_since_last: number | null
+}
+
+export interface DailyGrantRow {
+  day: string
+  granted: number
+  used: number
+  count: number
 }
 
 export interface PointsData {
@@ -19,6 +39,9 @@ export interface PointsData {
   throttle_reason: string
   packages: PointsPackage[]
   expiring: PointsPackage[]
+  sources: SourceRow[]
+  daily_grant: DailyGrantRow[]
+  expired_unused: PointsPackage[]
   upstream_port: number
   fetched_at: number
   cached?: boolean
