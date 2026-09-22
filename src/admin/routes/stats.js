@@ -39,13 +39,16 @@ const routes = [
   {
     method: 'GET',
     path: '/summary',
-    handler: ({ res }) => {
+    handler: ({ res, req }) => {
       const today = dayKey(Date.now());
-      const all = load(30);
+      // 窗口可配：之前写死 30，而前端标签跟着这个值走，
+      // 想改成 7 天就得同时改前后端两处，容易对不上
+      const days = clampInt((req.url.match(/[?&]days=(\d+)/) || [])[1], 30, 1, 90);
+      const all = load(days);
       const todayRows = all.filter((r) => dayKey(r.ts) === today);
       return sendJSON(res, 200, {
         today: summarize(todayRows),
-        days: 30,
+        days,
         total: summarize(all),
       });
     },

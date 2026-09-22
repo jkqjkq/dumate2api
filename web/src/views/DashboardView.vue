@@ -182,8 +182,11 @@
             <a-descriptions-item label="平均耗时">
               {{ stats ? stats.today.avg_ms + ' ms' : '—' }}
             </a-descriptions-item>
-            <a-descriptions-item label="近 {{ stats?.days ?? 30 }} 天">
+            <a-descriptions-item :label="`累计 ${stats?.days ?? 30} 天`">
               {{ stats ? fmt(stats.total.total_tokens) + ' tokens' : '—' }}
+              <span class="text-xs text-slate-400 ml-1">
+                / {{ stats ? stats.total.requests : '—' }} 次
+              </span>
             </a-descriptions-item>
           </a-descriptions>
         </a-card>
