@@ -23,36 +23,54 @@ function runPS(script, timeout = 12000) {
   });
 }
 
+// PowerShell 查询结果缓存。本机实测单次 PowerShell 冷启动 5 秒以上，
+// 两个查询叠加就是 10-23 秒——而客户端版本和进程列表都不会秒级变化。
+// 不缓存的话每次打开页面都要等这么久。
+const PS_TTL = 30000;
+const psCache = {};
+
+async function cachedPS(key, fn) {
+  const hit = psCache[key];
+  if (hit && Date.now() - hit.at < PS_TTL) return hit.value;
+  const value = await fn();
+  psCache[key] = { at: Date.now(), value };
+  return value;
+}
+
 // 客户端版本只能从可执行文件元数据取：app.asar 是加密的，
 // 后端二进制没有版本资源，注册表在部分安装方式下也没有条目。
 async function clientVersion() {
-  const exe = path.join(launcher.installRoot(), 'DuMate.exe');
-  if (!fs.existsSync(exe)) return null;
-  const out = (await runPS(
-    `(Get-Item '${exe.replace(/'/g, "''")}').VersionInfo | ` +
-    `ForEach-Object { $_.FileVersion + '|' + $_.ProductVersion + '|' + $_.CompanyName }`,
-  )).trim();
-  if (!out) return null;
-  const [file, product, company] = out.split('|');
-  return { file_version: file || '', product_version: product || '', company: company || '' };
+  return cachedPS('version', async () => {
+    const exe = path.join(launcher.installRoot(), 'DuMate.exe');
+    if (!fs.existsSync(exe)) return null;
+    const out = (await runPS(
+      `(Get-Item '${exe.replace(/'/g, "''")}').VersionInfo | ` +
+      `ForEach-Object { $_.FileVersion + '|' + $_.ProductVersion + '|' + $_.CompanyName }`,
+    )).trim();
+    if (!out) return null;
+    const [file, product, company] = out.split('|');
+    return { file_version: file || '', product_version: product || '', company: company || '' };
+  });
 }
 
 // 正在运行的 DuMate 进程。命令行里带着 -port，可用于交叉验证发现结果。
 async function runningProcesses() {
-  const out = await runPS(
-    `Get-CimInstance Win32_Process | Where-Object { $_.Name -match 'dumate' } | ` +
-    `ForEach-Object { $_.ProcessId.ToString() + '|' + $_.Name + '|' + ($_.CommandLine -replace "\\r?\\n", ' ') }`,
-  );
-  return out.split('\n').map((l) => l.trim()).filter(Boolean).map((line) => {
-    const [pid, name, ...rest] = line.split('|');
-    const cmd = rest.join('|');
-    const m = cmd.match(/--?port[=\s]+(\d+)/);
-    return {
-      pid: parseInt(pid, 10) || 0,
-      name: name || '',
-      port: m ? parseInt(m[1], 10) : null,
-      managed_by_proxy: null,
-    };
+  return cachedPS('processes', async () => {
+    const out = await runPS(
+      `Get-CimInstance Win32_Process | Where-Object { $_.Name -match 'dumate' } | ` +
+      `ForEach-Object { $_.ProcessId.ToString() + '|' + $_.Name + '|' + ($_.CommandLine -replace "\\r?\\n", ' ') }`,
+    );
+    return out.split('\n').map((l) => l.trim()).filter(Boolean).map((line) => {
+      const [pid, name, ...rest] = line.split('|');
+      const cmd = rest.join('|');
+      const m = cmd.match(/--?port[=\s]+(\d+)/);
+      return {
+        pid: parseInt(pid, 10) || 0,
+        name: name || '',
+        port: m ? parseInt(m[1], 10) : null,
+        managed_by_proxy: null,
+      };
+    });
   });
 }
 

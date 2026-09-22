@@ -166,7 +166,10 @@ const routes = [
       const port = parseInt(process.env.DUMATE2API_PORT || '9080', 10);
       const out = await new Promise((resolve) => {
         const req = http.request(
-          { host: '127.0.0.1', port, path: '/v1/models', method: 'GET', timeout: 4000 },
+          // 超时放宽到 15s：本机在负载高时 /v1/models 实测出现过 1.7s 的响应，
+          // 原先 4s 的窗口会偶发超时，界面就显示成「网关不可用」——而网关
+          // 其实活着。宁可多等，也不要报一个假的故障。
+          { host: '127.0.0.1', port, path: '/v1/models', method: 'GET', timeout: 15000 },
           (r) => {
             let data = '';
             r.setEncoding('utf8');
