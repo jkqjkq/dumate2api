@@ -113,6 +113,7 @@
           其余任务网页端无法自动做。
         </span>
         <a-space>
+          <a-button size="small" :loading="loadingTasks" @click="refreshTasks">刷新</a-button>
           <a-button size="small" :loading="runningTasks" @click="runTasks">跑任务</a-button>
           <a-button type="primary" size="small" :loading="drawing" @click="drawAll">一键抽奖</a-button>
         </a-space>
@@ -487,6 +488,7 @@ const taskAccounts = ref<any[]>([])
 const autoTypes = ref<string[]>([])
 const notAutoMap = ref<Record<string, string>>({})
 const runningTasks = ref(false)
+const loadingTasks = ref(false)
 const drawing = ref(false)
 const lastRun = ref('')
 const sched = ref<any>(null)
@@ -618,6 +620,18 @@ function canAuto(t: any) {
 // 不可自动的原因（后端给出，避免界面自己编）
 function notAutoReason(t: any) {
   return notAutoMap.value[t.task_type] || '需手动'
+}
+
+// 只重新拉取任务状态，不执行任何动作。
+// 与「跑任务」区分开：想看最新状态时不该被迫触发一次任务执行。
+async function refreshTasks() {
+  loadingTasks.value = true
+  try {
+    await loadTasks()
+    message.success('任务状态已刷新')
+  } finally {
+    loadingTasks.value = false
+  }
 }
 
 async function runTasks() {
