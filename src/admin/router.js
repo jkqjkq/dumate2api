@@ -52,11 +52,26 @@ function sendJSON(res, status, data) {
   res.end(body);
 }
 
+// 请求体上限。管理接口的载荷都很小（配置、key、探测列表），
+// 不设限等于让任何调用者用一次请求把内存吃满。
+const MAX_BODY = 1024 * 1024;
+
 function readBody(req) {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const chunks = [];
-    req.on('data', (c) => chunks.push(c));
+    let size = 0;
+    req.on('data', (c) => {
+      size += c.length;
+      if (size > MAX_BODY) {
+        // 不再累积，但要把剩余数据读掉，否则连接不会正常结束
+        reject(new Error('body too large'));
+        req.resume();
+        return;
+      }
+      chunks.push(c);
+    });
     req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+    req.on('error', reject);
   });
 }
 
@@ -70,7 +85,21 @@ async function handle(req, res, pathname) {
     if (!user) return unauthorized(res);
     req.user = user;
   }
-  const body = req.method === 'GET' ? null : JSON.parse((await readBody(req)) || '{}');
+
+  let body = null;
+  if (req.method !== 'GET') {
+    const raw = await readBody(req);
+    if (raw) {
+      try {
+        body = JSON.parse(raw);
+      } catch (e) {
+        // 不回显解析器原文：它会带上出错字节的位置，而登录请求体里是密码。
+        // 统一 400，而不是让它冒到 500。
+        return sendJSON(res, 400, { error: 'invalid_json' });
+      }
+    }
+  }
+
   return hit.route.handler({ req, res, body, params: hit.params, user: req.user || null });
 }
 

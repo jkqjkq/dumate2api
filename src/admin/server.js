@@ -42,8 +42,16 @@ function log(...args) {
 }
 
 function serveStatic(res, urlPath) {
-  // 去掉查询串，规范化成 dist 内的相对路径；若越界则回退 index.html
-  const clean = decodeURIComponent(urlPath.split('?')[0]);
+  // 去掉查询串，规范化成 dist 内的相对路径；若越界则回退 index.html。
+  // decodeURIComponent 对非法百分号转义会抛 URIError，而本函数由
+  // http.createServer 回调直接调用、不在 router.handle 的 catch 之内——
+  // 未捕获异常会直接结束进程，且触发条件是未认证的（`/%ZZ` 即可）。
+  let clean;
+  try {
+    clean = decodeURIComponent(urlPath.split('?')[0]);
+  } catch (e) {
+    return sendFile(res, path.join(DIST, 'index.html'));
+  }
   let rel = clean.replace(/^\/+/, '');
   const target = path.resolve(DIST, rel);
   const inside = target === DIST || target.startsWith(DIST + path.sep);
@@ -90,6 +98,18 @@ router.mount(PREFIX + '/models', modelsRoutes);
 router.mount(PREFIX + '/keys', keysRoutes);
 
 const server = http.createServer((req, res) => {
+  // 整个回调包一层：静态分支与同步抛错都不在 router.handle 的 catch 之内，
+  // 一个未捕获异常会让管理端整个进程退出（界面、key、审计全下线）
+  try {
+    handleRequest(req, res);
+  } catch (err) {
+    log('request error:', err.message);
+    if (!res.headersSent) sendJSON(res, 500, { error: 'internal_error' });
+    else res.end();
+  }
+});
+
+function handleRequest(req, res) {
   // CORS preflight：开发期 Vite(5173) 直连本端口，生产期同源不需要，留着无害
   if (req.method === 'OPTIONS') {
     res.writeHead(204, {
@@ -107,15 +127,17 @@ const server = http.createServer((req, res) => {
   }
 
   if (url.startsWith(PREFIX + '/')) {
+    // 异步链上的拒绝也要收在这里：router.handle 内部对 JSON 解析失败等
+    // 会 reject，不加 catch 就是 unhandledRejection → 进程退出
     return router.handle(req, res, url).catch((err) => {
       log('route error:', err.message);
-      if (!res.headersSent) sendJSON(res, 500, { error: err.message });
+      if (!res.headersSent) sendJSON(res, 500, { error: 'internal_error' });
       else res.end();
     });
   }
 
   return serveStatic(res, url);
-});
+}
 
 function start() {
   ensureDir();
