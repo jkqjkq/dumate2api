@@ -110,52 +110,93 @@
     <a-modal
       v-model:open="addOpen"
       title="添加账号"
-      :confirm-loading="saving"
-      ok-text="验证并添加"
-      @ok="save"
+      :footer="null"
+      width="560"
     >
-      <a-steps :current="1" size="small" class="mb-4">
-        <a-step title="登录" description="浏览器打开链接登录" />
-        <a-step title="复制 Cookie" description="F12 复制后粘贴" />
-      </a-steps>
+      <a-tabs v-model:activeKey="addMode">
+        <a-tab-pane key="browser" tab="浏览器登录（推荐）">
+          <a-alert type="info" show-icon class="mb-3">
+            <template #message>点下面的按钮会打开一个浏览器窗口</template>
+            <template #description>
+              在那个窗口里登录百度账号，程序检测到登录成功后会自动获取凭证并关闭窗口。
+              无需手动复制任何东西。
+            </template>
+          </a-alert>
 
-      <a-alert type="info" show-icon class="mb-3">
-        <template #message>
-          <a :href="loginUrl" target="_blank" rel="noopener" class="font-medium">
-            ① 点此打开登录页 →
-          </a>
-        </template>
-        <template #description>
-          <ol class="pl-4 mb-0 mt-1 text-xs">
-            <li v-for="(s, i) in loginSteps" :key="i">{{ s }}</li>
-          </ol>
-        </template>
-      </a-alert>
+          <a-form layout="vertical">
+            <a-form-item label="备注名称（可选）">
+              <a-input v-model:value="form.name" placeholder="留空则用账号昵称" />
+            </a-form-item>
+          </a-form>
 
-      <a-form layout="vertical">
-        <a-form-item label="备注名称">
-          <a-input v-model:value="form.name" placeholder="留空则用账号昵称" />
-        </a-form-item>
-        <a-form-item label="Cookie" required>
-          <a-textarea
-            v-model:value="form.cookie"
-            :rows="5"
-            placeholder="粘贴完整 Cookie，必须包含 BDUSS=..."
-          />
-          <div class="text-xs text-slate-500 mt-1">
-            粘贴后先点「验证」确认可用，再添加。Cookie 会明文保存在 data/ 目录。
+          <div v-if="loginSession && loginSession.status !== 'idle'" class="mb-3">
+            <a-alert
+              :type="loginAlertType"
+              show-icon
+              :message="loginAlertText"
+            />
           </div>
-        </a-form-item>
-        <a-form-item v-if="verifyResult">
-          <a-alert
-            :type="verifyResult.ok ? 'success' : 'error'"
-            :message="verifyResult.ok
-              ? `验证通过：${verifyResult.nickname || verifyResult.uid}`
-              : `验证失败：${verifyResult.error}`"
-            show-icon
-          />
-        </a-form-item>
-      </a-form>
+
+          <a-space>
+            <a-button
+              type="primary"
+              :loading="loginSession?.status === 'waiting'"
+              :disabled="loginSession?.status === 'waiting'"
+              @click="startBrowserLogin"
+            >
+              {{ loginSession?.status === 'waiting' ? '等待登录中…' : '打开登录窗口' }}
+            </a-button>
+            <a-button
+              v-if="loginSession?.status === 'waiting'"
+              @click="cancelBrowserLogin"
+            >
+              取消
+            </a-button>
+          </a-space>
+
+          <div v-if="!browserAvailable" class="text-xs text-red-500 mt-2">
+            未检测到 Edge 或 Chrome，请改用右侧的「手动粘贴」
+          </div>
+        </a-tab-pane>
+
+        <a-tab-pane key="manual" tab="手动粘贴">
+          <a-alert type="warning" show-icon class="mb-3">
+            <template #message>
+              <a :href="loginUrl" target="_blank" rel="noopener">① 点此打开登录页 →</a>
+            </template>
+            <template #description>
+              <ol class="pl-4 mb-0 mt-1 text-xs">
+                <li v-for="(s, i) in loginSteps" :key="i">{{ s }}</li>
+              </ol>
+            </template>
+          </a-alert>
+
+          <a-form layout="vertical">
+            <a-form-item label="备注名称">
+              <a-input v-model:value="form.name" placeholder="留空则用账号昵称" />
+            </a-form-item>
+            <a-form-item label="Cookie" required>
+              <a-textarea
+                v-model:value="form.cookie"
+                :rows="5"
+                placeholder="粘贴完整 Cookie，必须包含 BDUSS=..."
+              />
+            </a-form-item>
+            <a-form-item v-if="verifyResult">
+              <a-alert
+                :type="verifyResult.ok ? 'success' : 'error'"
+                :message="verifyResult.ok
+                  ? `验证通过：${verifyResult.nickname || verifyResult.uid}`
+                  : `验证失败：${verifyResult.error}`"
+                show-icon
+              />
+            </a-form-item>
+          </a-form>
+          <a-button type="primary" :loading="saving" block @click="saveManual">
+            验证并添加
+          </a-button>
+        </a-tab-pane>
+      </a-tabs>
     </a-modal>
 
     <!-- 账号详情 -->
@@ -277,6 +318,27 @@ const busy = reactive<Record<number, boolean>>({})
 const verifyResult = ref<{ ok: boolean; nickname?: string; uid?: string; error?: string } | null>(null)
 
 const form = reactive({ name: '', cookie: '' })
+const addMode = ref<'browser' | 'manual'>('browser')
+const browserAvailable = ref(true)
+const loginSession = ref<any>(null)
+let pollTimer: any = null
+
+const loginAlertType = computed(() => {
+  const s = loginSession.value?.status
+  if (s === 'waiting') return 'info'
+  if (s === 'success' || s === 'saved') return 'success'
+  if (s === 'failed') return 'error'
+  return 'warning'
+})
+const loginAlertText = computed(() => {
+  const s = loginSession.value
+  if (!s) return ''
+  if (s.status === 'waiting') return '已打开登录窗口，请在其中完成登录…'
+  if (s.status === 'saved') return `已添加账号：${s.account?.name ?? ''}`
+  if (s.status === 'success') return '登录成功，正在保存…'
+  if (s.status === 'cancelled') return '已取消'
+  return s.message || '登录失败'
+})
 
 const prizeColumns = [
   { title: '奖品', key: 'name', dataIndex: 'name' },
@@ -321,16 +383,59 @@ async function loadLoginInfo() {
   const { data } = await client.get('/web-accounts/login-url')
   loginUrl.value = data.url
   loginSteps.value = data.steps
+  browserAvailable.value = data.browser_available !== false
+  // 没有可用浏览器时默认切到手动粘贴，否则用户会对着一个点不动的按钮
+  if (!browserAvailable.value) addMode.value = 'manual'
 }
 
 function openAdd() {
   form.name = ''
   form.cookie = ''
   verifyResult.value = null
+  loginSession.value = null
   addOpen.value = true
+  stopPoll()
 }
 
-async function save() {
+// 轮询登录状态。后端在检测到 cookie 时会直接落库，前端只需展示结果。
+function stopPoll() {
+  if (pollTimer) { clearInterval(pollTimer); pollTimer = null }
+}
+
+async function startBrowserLogin() {
+  try {
+    const { data } = await client.post('/web-accounts/login/start', { name: form.name })
+    loginSession.value = data
+    message.info('已打开登录窗口，请在其中登录')
+    stopPoll()
+    pollTimer = setInterval(pollLogin, 1500)
+  } catch (e: any) {
+    message.error(e?.response?.data?.error || '无法打开登录窗口')
+  }
+}
+
+async function pollLogin() {
+  const q = form.name ? `?name=${encodeURIComponent(form.name)}` : ''
+  const { data } = await client.get(`/web-accounts/login/poll${q}`)
+  loginSession.value = data
+  if (data.status === 'saved') {
+    stopPoll()
+    message.success(`已添加账号：${data.account?.name ?? ''}`)
+    await load()
+    setTimeout(() => { addOpen.value = false }, 1200)
+  } else if (data.status === 'failed' || data.status === 'cancelled') {
+    stopPoll()
+    if (data.status === 'failed') message.error(data.message || '登录失败')
+  }
+}
+
+async function cancelBrowserLogin() {
+  stopPoll()
+  await client.post('/web-accounts/login/cancel')
+  loginSession.value = null
+}
+
+async function saveManual() {
   if (!form.cookie.trim()) {
     message.error('请粘贴 Cookie')
     return

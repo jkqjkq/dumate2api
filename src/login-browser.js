@@ -15,8 +15,16 @@ const path = require('path');
 const { chromium } = require('playwright-core');
 
 const LOGIN_URL = 'https://login.bce.baidu.com/?redirect=' +
-  encodeURIComponent('https://www.dumate.cn/app');
-const TARGET_HOST = 'www.dumate.cn';
+  encodeURIComponent('https://console.bce.baidu.com/');
+const TARGET_HOST = 'console.bce.baidu.com';
+
+// 登录后必须真正落到 console 域一次：bce-long-term-sessionid 这类会话
+// cookie 是访问该域时由服务端种下的，只登录 passport 不会产生它，
+// 而调 /api/dumate/* 恰恰依赖它（实测缺它一律 401）。
+const SETTLE_URLS = [
+  'https://console.bce.baidu.com/',
+  'https://console.bce.baidu.com/ai/#/app/dumate/overview',
+];
 
 // 常见安装位置。优先 Edge（Windows 自带），再 Chrome。
 const CANDIDATES = [
@@ -72,17 +80,27 @@ function cleanup() {
   session.active = false;
 }
 
-// 判断 cookie 是否已具备登录态：BDUSS 是百度登录的核心字段
+// 判断 cookie 是否已具备登录态。光有 BDUSS 不够：调 /api/dumate/* 需要的是
+// console 域的会话（bce-long-term-sessionid），它只在访问过该域之后才存在。
+// 两者都齐了才算登录完成。
 function extractAuthCookie(cookies) {
-  const forHost = cookies.filter((c) => {
-    const d = (c.domain || '').replace(/^\./, '');
-    return TARGET_HOST === d || TARGET_HOST.endsWith('.' + d) || d === 'baidu.com';
-  });
-  const hasBduss = forHost.some((c) => c.name === 'BDUSS' && c.value);
-  if (!hasBduss) return null;
-  // 拼成标准 Cookie 头。同名 cookie 以域更具体的为准。
+  const pick = (name) => {
+    let best = null;
+    for (const c of cookies) {
+      if (c.name !== name || !c.value) continue;
+      // 同名 cookie 取域更具体的那个
+      if (!best || (c.domain || '').length > (best.domain || '').length) best = c;
+    }
+    return best;
+  };
+
+  if (!pick('BDUSS')) return null;
+  // 缺会话 cookie 时返回 null，让轮询继续等——此时页面多半还在跳转中
+  if (!pick('bce-long-term-sessionid')) return null;
+
   const byName = new Map();
-  for (const c of forHost) {
+  for (const c of cookies) {
+    if (!c.value) continue;
     const prev = byName.get(c.name);
     if (!prev || (c.domain || '').length > (prev.domain || '').length) byName.set(c.name, c);
   }
@@ -142,8 +160,9 @@ async function start(opts = {}) {
       if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
     });
 
-    // 轮询 cookie：登录成功后百度会写入 BDUSS。
-    // 每 1.5 秒一次，避免过密；同时检查窗口是否还在。
+    // 轮询 cookie：登录成功后百度会写入 BDUSS，随后需要落到 console 域
+    // 才能拿到会话 cookie。检测到 BDUSS 但还没有会话时，主动导航一次。
+    let navigatedToSettle = false;
     pollTimer = setInterval(async () => {
       if (!ctx) return;
       try {
@@ -154,6 +173,20 @@ async function start(opts = {}) {
           session.status = 'success';
           session.message = '登录成功，已获取凭证';
           cleanup();
+          return;
+        }
+        // 有 BDUSS 说明已登录，但缺 console 会话：主动访问一次把它种下来
+        const hasBduss = cookies.some((c) => c.name === 'BDUSS' && c.value);
+        if (hasBduss && !navigatedToSettle) {
+          navigatedToSettle = true;
+          session.message = '已登录，正在建立控制台会话…';
+          const pages = ctx.pages();
+          const p = pages[pages.length - 1];
+          if (p) {
+            for (const u of SETTLE_URLS) {
+              try { await p.goto(u, { waitUntil: 'domcontentloaded', timeout: 30000 }); } catch (e) { /* 继续试下一个 */ }
+            }
+          }
         }
       } catch (e) {
         // 上下文已关闭，交给 close 事件处理
