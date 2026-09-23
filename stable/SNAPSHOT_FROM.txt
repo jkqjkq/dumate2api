@@ -1,16 +1,22 @@
-工作区快照（未提交）
-base: fbede72efd7f4d633efb4983e2b8fac86ba130dd
-fbede72 feat(usage): add a today breakdown to the usage page
-Wed Sep 23 11:50:00     2026
+585d9b14e222685f362c858829a07b6407bc0153
+585d9b1 docs: 补充千问通道与任务执行的约定，去掉重复的硬约束段落
+Wed Sep 24 00:47:09     2026
 
-说明：本次同步时主目录工作区是**脏的**，快照内容不等于任何单个提交：
-  - 已提交但未进上一版快照：fbede72 及 4e24925→fbede72 之间的埋点改动
-    （first_token_ms / mapped_model / ua）
-  - 未提交：points-cursor 余额游标、千问办公通道（upstream-router + qwenwork/）
-所以这里记 base 提交号 + 明确的「工作区快照」标记，而不是假装对应某个 commit。
-等这些改动提交后，下次同步可恢复成纯提交号。
+本次同步覆盖的改动（均在主目录已提交，快照与对应提交一致）：
+  - 3200458 千问办公通道完整接入管理端并按通道隔离数据
+    · req_id 贯穿埋点与千问积分归因（异步结算，按时间配对会串账）
+    · 修千问流式请求在 OpenAI 路径上不落埋点、token 恒为 0
+    · API Key 可绑定通道（keys.js 的 channel 字段 + validate 校验）
+  - 2a58e4e 修复跑任务必崩（task-runner 未引入 records 模块）
+  - 585d9b1 文档约定补充
+
+快照范围说明：stable/ 只含网关依赖闭包（src/*.js 14 个 + qwenwork/），
+不含管理端（admin/）、网页端（web/）、账号池与任务调度模块——
+那些不是 9080 网关运行所必需，且更新频繁，放进快照只会让稳定版跟着开发节奏漂移。
 
 上一版快照来源：
-4e249256f99f3648591f9709a8837c7f211f0b9a
-4e24925 fix(admin): cache PowerShell-backed reads and widen the gateway probe
-Tue Sep 22 16:01:35     2026
+工作区快照（未提交），base fbede72efd7f4d633efb4983e2b8fac86ba130dd
+fbede72 feat(usage): add a today breakdown to the usage page
+Wed Sep 23 11:50:00     2026
+（上一版记的是「工作区快照」而非纯提交号，因为当时主目录工作区是脏的；
+ 本版已恢复为纯提交号。）

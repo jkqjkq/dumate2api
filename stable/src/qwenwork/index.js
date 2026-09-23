@@ -11,6 +11,12 @@ const bridge = require('./bridge');
 const credentials = require('./credentials');
 const constants = require('./constants');
 const wasmPath = require('./wasm-path');
+const credits = require('./credits');
+
+// 在飞请求计数。积分归因在并发下有个本质限制：两个请求同时在飞时，
+// 「前后差值」分不清是谁消耗的——总和正确，单项归属不准。
+// 所以并发时如实标记 concurrent，而不是假装精确。
+let inFlight = 0;
 
 /** 预热：解析 wasm 路径。失败要早失败，别等到第一个请求才炸 */
 function warmup() {
@@ -36,7 +42,7 @@ function status() {
   };
 }
 
-async function send(payload, onChunk) {
+async function send(payload, onChunk, opts = {}) {
   const doc = await chat.ensureAuth();
   const modelKey = chat.resolveModelKey(payload && payload.model);
   const bodyJson = chat.buildBody(modelKey, payload);
@@ -47,6 +53,29 @@ async function send(payload, onChunk) {
     modelKey,
     machineId: credentials.machineId(),
   });
+
+  // 积分归因：**必须在请求完成后**调用。请求要几秒（实测 4s），
+  // 在发出前调用会在请求还没结算时就读余额，差值恒为 0。
+  // 不 await —— 采集在响应发出后进行，不占请求延迟。
+  const startedAt = Date.now();
+  const wasConcurrent = inFlight > 0;
+  inFlight++;
+  // 账号快照提前取好：capture 是异步队列，延后 require 可能撞上 credentials
+  // 模块的初始化时序（DPAPI/AES-GCM 在首次 decryptAuth 时才建表）。
+  // 失败也无所谓——没有账号信息就少一个字段，不阻断归因
+  let accountSnap = null;
+  try {
+    const u = (credentials.decryptAuth().user || {});
+    accountSnap = { id: u.id || '', name: u.name || '', tier: u.tier || '', planId: u.planId || '' };
+  } catch { /* 没有凭证信息就让字段缺省 */ }
+  const settle = () => {
+    inFlight = Math.max(0, inFlight - 1);
+    // reqId 由调用方（server.js）生成，与请求埋点同源：归因要等结算，
+    // 时间戳对不上，只有这个键能把两边精确配对
+    credits.capture({ model: modelKey, startedAt, reqId: opts.reqId, concurrent: wasConcurrent, account: accountSnap })
+      .catch(() => { /* 采集失败绝不影响已发出的响应 */ });
+  };
+
   if (onChunk) {
     let firstErr = null;
     const res = await chat.postStream(built.url, built.body, built.headers, (inner) => {
@@ -60,6 +89,7 @@ async function send(payload, onChunk) {
       } catch (e) { /* 正常数据帧不是错误结构 */ }
       onChunk(inner);
     });
+    settle();
     if (firstErr) {
       const err = new Error(`qwenwork ${firstErr.code}: ${firstErr.message}`);
       err.statusCode = firstErr.code;
@@ -70,6 +100,7 @@ async function send(payload, onChunk) {
   const res = await chat.post(built.url, built.body, built.headers);
   const es = chat.envelopeStatus(res.raw);
   if (es && es.code >= 400) {
+    settle();
     const err = new Error(`qwenwork ${es.code}: ${es.message}`);
     err.statusCode = es.code;
     throw err;
@@ -81,6 +112,7 @@ async function send(payload, onChunk) {
     if (raw === '[DONE]') continue;
     payloads.push(...chat.unwrap(raw));
   }
+  settle();
   return chat.aggregate(payloads, modelKey);
 }
 
@@ -121,4 +153,8 @@ async function listModels() {
   return constants.FALLBACK_MODELS.slice();
 }
 
-module.exports = { warmup, status, send, listModels, chatCompletion: (p) => send(p), chatCompletionStream: (p, cb) => send(p, cb) };
+module.exports = {
+  warmup, status, send, listModels,
+  chatCompletion: (p, opts) => send(p, undefined, opts),
+  chatCompletionStream: (p, cb, opts) => send(p, cb, opts),
+};

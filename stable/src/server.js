@@ -61,9 +61,14 @@ async function handleDirectChannel(req, res, payload, route, ctx) {
   const provider = require('./qwenwork');
   const wantStream = !!payload.stream;
 
+  // 请求 id 在这里就定下来：埋点与积分归因两边都要用同一个值才能配对。
+  // 归因要等 1.5s 结算，时间戳对不上；靠时间猜会让同秒内的两条请求互相串账。
+  if (!req._reqId) req._reqId = reqlog.newReqId();
+  const reqId = req._reqId;
+
   try {
     if (!wantStream) {
-      const result = await provider.send(payload);
+      const result = await provider.send(payload, undefined, { reqId });
       const out = kind === 'openai' ? result : result;
       if (kind === 'anthropic') {
         const anth = openAIToAnthropic(out, payload.model);
@@ -94,7 +99,16 @@ async function handleDirectChannel(req, res, payload, route, ctx) {
     const { PassThrough } = require('stream');
     const shim = new PassThrough();
 
+    // 流式累计正文，供结束时的埋点取 token（OpenAI 路径原本没有任何
+    // 落埋点的地方——千问的流式请求因此从不出现在请求日志里）。
+    // 只保留尾部窗口：usage 只在最后一两个块里，而流可以活很久。
+    let seen = '';
+    const TAIL = 32768;
+    let logged = false;
+
     const done = (usage, status) => {
+      if (logged) return;
+      logged = true;
       logRequest(req, res, startedAt, info, status || 200, usage || null);
     };
 
@@ -140,9 +154,21 @@ async function handleDirectChannel(req, res, payload, route, ctx) {
             shim.end();
             return;
           }
+          // 首字时刻：直连通道的 first_token_ms 全靠这里标，
+          // 不标则请求日志里千问的「首字延迟」永远是空
+          markFirstToken(res);
+          // OpenAI 路径没有翻译器，得在这里自己扫 usage。
+          // **必须补上 `data: ` 前缀**：inner 是解信封后的裸 JSON，
+          // 而 usageFromSSE 按 `data:` 行扫描——不补前缀就永远扫不到，
+          // 流式请求的 token 会一直记成 0。
+          seen += `data: ${inner}\n`;
+          if (seen.length > TAIL) seen = seen.slice(-TAIL);
           shim.write(`data: ${inner}\n\n`);
-        });
+        }, { reqId });
         shim.end();
+        // OpenAI 路径的收尾埋点。翻译器分支各自在 done 里记，
+        // 只有这里没有——不补上，千问的流式请求就不进请求日志。
+        if (kind === 'openai') done(reqlog.usageFromSSE(seen), 200);
       } catch (e) {
         // 顺序很关键：**先 unpipe 再 end**。
         // shim 已经 pipe 到 res，若直接 shim.end()，pipe 会把 res 一并结束
@@ -150,6 +176,7 @@ async function handleDirectChannel(req, res, payload, route, ctx) {
         try { shim.unpipe(res); } catch (e2) { /* 未 pipe */ }
         try { shim.end(); } catch (e2) { /* 已结束 */ }
         const status = e.statusCode || 502;
+        done(null, status);
         logRequest(req, res, startedAt, info, status, null, { error: e.message });
         if (!res.headersSent) {
           // 首帧前就失败：回正经的 4xx JSON，客户端能看懂
@@ -273,8 +300,13 @@ function logRequest(req, res, startedAt, info, status, usage, extra) {
   const u = usage || { input: 0, output: 0, total: 0 };
   const h = req.headers || {};
   const ts = Date.now();
+  // req_id 优先取请求上已生成的（千问直连通道要把它传给积分归因，
+  // 两边必须用同一个 id 才能配对），没有则现生成一个
+  const reqId = req._reqId || reqlog.newReqId();
+  req._reqId = reqId;
   reqlog.record({
     ts,
+    req_id: reqId,
     ms: Date.now() - startedAt,
     // 首字延迟：从收到请求到上游吐出第一个字节。总耗时无法反映这一点——
     // 一个 30 秒的请求可能 0.5 秒就出字、也可能 20 秒才出字，
@@ -991,12 +1023,14 @@ const server = http.createServer(async (req, res) => {
       const token = keysvc.tokenFromHeaders(req.headers);
       const key = keysvc.resolve(token);
 
-      // 模型白名单需要知道请求的是哪个模型。只有 key 真的配了白名单时才
-      // 预读请求体——否则给默认路径凭空加一次完整读取。预读的内容存到
-      // req._rawBody，handler 里的 readBody 会直接取用，不会二次消费流。
+      // 模型白名单与通道绑定都需要知道请求的是哪个模型。只有 key 真的配了
+      // 这两类规则时才预读请求体——否则给默认路径凭空加一次完整读取。
+      // 预读的内容存到 req._rawBody，handler 里的 readBody 会直接取用，
+      // 不会二次消费流。
       let model = null;
       const hasModelRule = key && Array.isArray(key.model_allowlist) && key.model_allowlist.length > 0;
-      if (hasModelRule && req.method === 'POST') {
+      const hasChannelRule = key && !!key.channel;
+      if ((hasModelRule || hasChannelRule) && req.method === 'POST') {
         // Google 的模型名在 URL 路径里，且**可能带通道前缀**（qwen/pro），
         // 所以不能排除 '/'——早期写成 [^:/?]+ 会把 qwen/pro 截断成匹配失败。
         const gm = url.match(/^\/v1beta\/models\/([^:?]+):/);
@@ -1011,8 +1045,18 @@ const server = http.createServer(async (req, res) => {
           } catch (e) { model = null; }
         }
       }
+      // 通道绑定判定：靠模型名前缀，与 upstream-router 的分流口径一致。
+      // 解析不出来（如 GET /v1/models）就不传通道，validate 会跳过这条规则
+      // ——不该因为「无法判定通道」把只读请求拒掉。
+      let reqChannel = '';
+      if (model) {
+        try {
+          const r = require('./upstream-router').resolve(model);
+          reqChannel = r.channel || '';
+        } catch (e) { reqChannel = ''; }
+      }
 
-      const verdict = keysvc.validate(key, reqlog.clientIP(req), model);
+      const verdict = keysvc.validate(key, reqlog.clientIP(req), model, reqChannel);
       if (!verdict.ok) {
         const status = key ? 403 : 401;
         req._logPath = url;

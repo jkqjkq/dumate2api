@@ -2,9 +2,19 @@
 
 > 架构与代码详解见 [ARCHITECTURE.md](ARCHITECTURE.md)。
 
-将百度搭子（DuMate）桌面客户端的模型能力转换为 **OpenAI 兼容 API** 和 **Anthropic 兼容 API**，供 Codex CLI、Claude Code、cc-switch 等客户端本地使用。
+将百度搭子（DuMate）桌面客户端与千问办公的模型能力转换为 **OpenAI / Anthropic / Google 兼容 API**，供 Codex CLI、Claude Code、cc-switch 等客户端本地使用。
+
+**两个上游通道，靠模型名前缀分流**：
+
+| 调用方传的模型名 | 路由到 |
+|---|---|
+| `model-text` / `glm-5` 等（无前缀） | 百度搭子（本地 HTTP 上游） |
+| `qwen/pro` / `qwen/flash` | 千问办公（进程内直连云端网关） |
+| 未知前缀（如 `qwn/pro`） | **400 报错，不静默回落** |
 
 ## 原理
+
+### 通道一：百度搭子（DuMate）
 
 DuMate 桌面客户端（Electron + Go 后端）内置了一个本地 OpenAI 兼容 API：
 
@@ -16,25 +26,47 @@ http://127.0.0.1:<动态端口>/api/qianfanproxy/v1/chat/completions
 - 认证使用 `Authorization: Bearer nokey`（走已登录的百度 BCE 会话）
 - 支持流式 SSE，响应包含 `reasoning_content`（思维链）
 
-本代理项目：
-1. **自动发现** DuMate main-server 端口（三级降级：命令行 `--port=` → 进程监听套接字 → 已知端口扫描）
-2. **透传** OpenAI 格式请求（含模型名映射）
-3. **翻译** Anthropic Messages API ↔ OpenAI Chat Completions（双向，含流式）
+### 通道二：千问办公（QwenWork）
+
+千问办公是**进程内直连**，不需要任何外部服务。`src/qwenwork/` 直接调用官方客户端的 wasm 生成请求体，再发到云端网关 gateway.qwenwork.cn。
+
+三条硬约束（都是实测踩出来的）：
+
+1. **必须依赖官方 wasm**。请求体必须由 `qoder_auth_wasm_bg.wasm` 生成，本地自实现的编码会被服务端拒（`400 Invalid agent chat JSON body`）。wasm 文件**不进仓库**——它是客户端二进制资产，运行时从安装目录自动探测（取版本号最大的那个）。
+2. **不套模型映射与预算钳制**。千问的模型名（`pro`/`flash`）不在搭子别名表里，且它的推理与正文**分开流**（实测 reasoning 2060 字 / 正文 96 字），与搭子「抢同一预算」机制不同。
+3. **外层永远 HTTP 200**，真实错误在信封的 `statusCodeValue` 里。且它不发 `data: [DONE]` 而是用 `event:finish` 收尾——转发时会按 OpenAI 规范补发 `[DONE]`。
+
+用前缀而不是猜模型名的理由：两侧模型名会撞车（搭子有 `glm-5`，千问上游也是 GLM 系），猜错了两侧都返回 200，从响应里根本看不出来。未知前缀若静默跑到搭子，会拿到「看起来成功但完全不是想要的结果」，比直接 400 难查得多。
+
+### 数据流
 
 ```
-Codex CLI ──── OpenAI API ────┐
-                              ├──→ dumate2api (port 9080) ────→ DuMate main-server ────→ 百度千帆
-Claude Code ── Anthropic API ─┘
+Codex CLI ──── OpenAI/Responses ─┐
+                                 ├──→ dumate2api :9080 ──┬──→ DuMate main-server :8980 ──→ 百度千帆
+Claude Code ─── Anthropic ───────┤                       │
+任意客户端 ──── Google ──────────┘                       └──→ 千问办公云端网关（进程内直连）
 ```
 
 ## 前置条件
 
-1. **DuMate 桌面客户端已安装，并且至少登录过一次**
+1. **Node.js >= 18**（网关零第三方依赖，只用内置模块）
+2. **至少配置一条通道**（两条可同时用，也可只留一条）：
+
+**百度搭子**
+   - DuMate 桌面客户端已安装，并且至少登录过一次
    - 下载：https://cloud.baidu.com/doc/Dumate/index.html
    - 用百度账号登录一次即可，之后**不再需要启动客户端界面**
    - 登录态（cookie）保存在 `%APPDATA%\qianfan-desktop-app\auth.json`
    - 若安装目录不是默认位置，设置 `DUMATE_INSTALL_DIR`
-2. **Node.js >= 18**（无第三方依赖）
+
+**千问办公**（可选，只有要用 `qwen/*` 模型时才需要）
+   - 千问办公客户端已安装并登录过一次
+   - 登录态在 `%APPDATA%\QwenWorkCN\auth-v2.dat`，本项目**只读**（两边都写会互刷）
+   - 若探测不到安装目录，设置 `DUMATE_QWENWORK_INSTALL` 或 `CB_QWENWORK_WASM`
+   - 设为 `DUMATE_QWENWORK_AUTOSTART=off` 可完全关闭这条通道
+
+> 两条通道独立降级：搭子不可用时网关仍会监听，千问不可用时也一样
+> （`/health` 的 `channels.*.ready` 会报 false）。千问通道不会阻断启动。
 
 ## 使用
 
@@ -84,10 +116,61 @@ restart.bat
 | `DUMATE_ADMIN_PORT` | `9081` | 管理系统监听端口 |
 | `DUMATE_ADMIN_HOST` | `127.0.0.1` | 管理系统监听地址 |
 | `DUMATE_ADMIN_DATA` | `./data` | 管理系统数据目录（账号、key、请求日志） |
+| `DUMATE_ADMIN_GATEWAY_PORT` | `9080` | 管理端去读哪个网关的状态；开发实例应设为 `9082` |
+| `DUMATE_QWENWORK_AUTOSTART` | `auto` | `auto`=启用千问通道 / `off`=关闭 |
+| `DUMATE_QWENWORK_INSTALL` | 自动探测 | 千问办公安装根（wasm 探测失败时手动指定） |
+| `CB_QWENWORK_WASM` | 自动探测 | 直接指定 `qoder_auth_wasm_bg.wasm` 的完整路径 |
+| `DUMATE_QWENWORK_DAILY_CREDITS` | `100` | 千问每日免费额度的配置兜底下限 |
+
+> 完整列表见 [CLAUDE.md](CLAUDE.md)（含网页账号池、任务轮询、自动签到等）。
 
 > `DUMATE2API_KEY` 在早期版本里被文档描述为"代理 API Key"，但代码中从未读取它，
 > 设置它并不会带来任何鉴权效果。真实开关是 `DUMATE_REQUIRE_KEY`，配套的 key
 > 在管理系统（`http://127.0.0.1:9081`）的「API Key」页创建。
+
+### 管理端（可选但推荐）
+
+另起一个终端：
+
+```bash
+npm run admin          # 默认 http://127.0.0.1:9081
+```
+
+首次启动会生成管理员口令并打印在终端。**改的是哪个网关端口就要带对应变量**，
+否则管理端会读到别的实例的数据：
+
+```bash
+DUMATE_ADMIN_GATEWAY_PORT=9082 npm run admin
+```
+
+管理端提供：仪表盘、聊天测试台、用量统计、请求日志、模型管理、API Key、
+登录态、积分明细、账号管理、任务记录。
+
+**通道切换**：顶栏可在「百度搭子 / 千问办公」间切换，各页面据此显示对应通道的数据。
+千问办公没有任务记录（无签到抽奖），其账号管理为只读（单账号直连，换账号请在客户端操作）。
+
+开发时用 `start-dev.bat`（网关 9082 + 管理端 9083），与稳定版 9080 互不干扰。
+前端开发：`cd web && npm install && npm run dev`（Vite 把 `/api` 代理到 9081）。
+
+### 使用千问办公通道
+
+模型名加 `qwen/` 前缀即可，无需额外配置：
+
+```bash
+curl http://127.0.0.1:9080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"qwen/pro","messages":[{"role":"user","content":"hello"}]}'
+```
+
+可用模型由上游下发（当前 `qwen/pro`、`qwen/flash`），清单见 `GET /v1/models`
+（`owned_by` 为 `qwenwork` 的条目）或管理端「模型管理」页。
+
+**积分**：千问有独立的三个积分池——`daily`（每日免费额度，每天 00:00 重置）、
+`monthly`（订阅套餐）、`longterm`（充值赠送），与搭子的积分**互不相干，不要相加**。
+真实消耗在管理端「积分明细 / 请求日志」里按条查看（区分免费与付费池）。
+
+> 「每日上限」接口不返回，由「观测峰值 + 配置兜底」推断
+> （`DUMATE_QWENWORK_DAILY_CREDITS`），界面会标出来源。
 
 ## cc-switch 配置教程
 
@@ -310,15 +393,24 @@ model = "model-text"                 # 快（默认）
 
 | 端点 | 协议 | 说明 |
 |------|------|------|
-| `GET /v1/models` | OpenAI | 模型列表 |
+| `GET /v1/models` | OpenAI | 模型列表（两条通道的模型都列出） |
 | `POST /v1/chat/completions` | OpenAI | 聊天补全（透传 + 模型映射） |
-| `POST /v1/messages` | Anthropic | Messages API（完整翻译） |
+| `POST /v1/responses` 或 `/responses` | OpenAI Responses | Codex CLI 0.155+ 专用，翻译成 chat/completions |
+| `POST /v1/messages` 或 `/messages` 或 `/api/v1/messages` | Anthropic | Messages API（完整翻译） |
 | `POST /v1/messages/count_tokens` | Anthropic | Token 计数（估算，Claude Code 会调用） |
-| `GET /health` | - | 健康检查 |
+| `GET /v1beta/models` | Google | 模型列表（Generative Language） |
+| `POST /v1beta/models/{model}:generateContent` | Google | 生成内容（翻译层） |
+| `POST /v1beta/models/{model}:streamGenerateContent` | Google | 流式生成（翻译层） |
+| `GET /health` / `GET /ping` | - | 健康检查，含两条通道的就绪状态 |
+
+> 裸路径 `/messages` 必须保留：Claude Code 打的是不带 `/v1` 的路径。
+> Google 路径的模型名支持带前缀的 `qwen/pro`（正则不排除 `/`）。
 
 > `count_tokens` 使用 `字节数/4` 的保守估算。DuMate 未暴露分词器，该接口仅用于让 Claude Code 的上下文预算计算不报错，非精确值。
 
 ## 模型映射
+
+搭子通道（可经管理端「模型管理」页编辑）：
 
 | 请求模型名 | 实际使用 |
 |-----------|---------|
@@ -328,16 +420,22 @@ model = "model-text"                 # 快（默认）
 | `claude-3-5-sonnet-*` | `model-text` |
 | `gpt-4o` / `gpt-4` / `o1` / `o3` 等 | `model-text` |
 
-未收录的模型名一律回退为 `model-text`。
+未收录的模型名一律回退为 `fallback`（默认 `model-text`）。
+
+千问办公通道：**不做映射**，模型表由上游下发，只能按前缀名调用
+（`qwen/pro`、`qwen/flash`…）。这条通道的模型名走 `mapModel` 会被兜底成
+`model-text`，所以刻意跳过映射。
 
 ## 注意事项
 
 1. **不需要启动 DuMate 界面**：代理会直接拉起其后端 `dumate-main-server.exe`（无 GUI）。
    只有当登录态过期、需要重新登录时，才要打开一次 DuMate 客户端。
-2. **账号额度**：使用的是你百度搭子账号的模型额度（免费积分）
+2. **账号额度**：搭子用百度搭子账号的模型额度（免费积分）；千问办公用它自己的积分池
 3. **端口动态**：DuMate 每次启动端口可能变化，代理会自动重新发现（每 30s 或在发现失败时重试）
-4. **思维链**：上游返回 `reasoning_content`，Anthropic 端点会翻译为 `thinking` block
+4. **思维链**：搭子返回 `reasoning_content`，Anthropic 端点会翻译为 `thinking` block
 5. **Token 用量**：流式 Anthropic 请求会带上 `stream_options.include_usage`，在结尾的 `message_delta` 中返回真实 `input_tokens` / `output_tokens`；上游若不支持则该值为 0
+6. **千问办公的登录态只读**：管理端不写入 `auth-v2.dat`——官方客户端和我们各写一次会互相把对方的登录态刷掉。换账号请开客户端操作
+7. **仅 Windows**：依赖 PowerShell（DPAPI 解密 / 进程查询）、`%APPDATA%` 路径、`taskkill`
 
 ## 快速测试
 
@@ -354,6 +452,11 @@ curl http://127.0.0.1:9080/v1/messages \
   -H "x-api-key: nokey" \
   -H "anthropic-version: 2023-06-01" \
   -d '{"model":"claude-3-5-sonnet-20241022","max_tokens":100,"messages":[{"role":"user","content":"hello"}]}'
+
+# 测试千问办公通道（前缀路由）
+curl http://127.0.0.1:9080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"qwen/pro","messages":[{"role":"user","content":"hello"}]}'
 ```
 
 ## 无 GUI 运行原理

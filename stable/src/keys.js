@@ -114,10 +114,18 @@ function normalizeList(items) {
   return items.map((s) => String(s).trim()).filter(Boolean);
 }
 
+// 通道绑定。'' / null = 不限通道（兼容已有 key：网关按模型名前缀分流，
+// 不按 key 分流）。设成具体通道后，这把 key 只能调该通道的模型。
+const CHANNELS = ['dumate', 'qwenwork'];
+function normalizeChannel(v) {
+  const s = String(v == null ? '' : v).trim();
+  return CHANNELS.includes(s) ? s : '';
+}
+
 // ---- 校验 ----
 // 返回 { ok } 或 { ok:false, reason }。reason 直接面向使用者，
 // 所以要说清是哪一条规则挡住的，而不是笼统的「无效」。
-function validate(key, ip, model) {
+function validate(key, ip, model, channel) {
   if (!key) return { ok: false, reason: 'unknown_key' };
   if (key.enabled === false) return { ok: false, reason: 'disabled' };
 
@@ -133,6 +141,12 @@ function validate(key, ip, model) {
   const models = normalizeList(key.model_allowlist);
   if (models.length && model && !models.includes(model)) {
     return { ok: false, reason: 'model_not_allowed' };
+  }
+
+  // 通道绑定：设了就只允许走这条通道。不传 channel 时跳过（调用方没做
+  // 通道判定的老路径不该因此被拒）。
+  if (key.channel && channel && key.channel !== channel) {
+    return { ok: false, reason: 'channel_not_allowed' };
   }
 
   return { ok: true };
@@ -197,6 +211,8 @@ function create(opts = {}) {
     enabled: opts.enabled !== false,
     ip_allowlist: normalizeList(opts.ip_allowlist),
     model_allowlist: normalizeList(opts.model_allowlist),
+    // 通道绑定：留空 = 不限（网关按模型名前缀分流）
+    channel: normalizeChannel(opts.channel),
     note: String(opts.note || ''),
   };
   keys.push(key);
@@ -213,6 +229,7 @@ function update(id, patch = {}) {
   if (patch.expires_at !== undefined) k.expires_at = patch.expires_at || null;
   if (patch.ip_allowlist !== undefined) k.ip_allowlist = normalizeList(patch.ip_allowlist);
   if (patch.model_allowlist !== undefined) k.model_allowlist = normalizeList(patch.model_allowlist);
+  if (patch.channel !== undefined) k.channel = normalizeChannel(patch.channel);
   if (patch.note !== undefined) k.note = String(patch.note);
   save(data);
   return { ...k, hash: undefined };
@@ -229,6 +246,7 @@ function remove(id) {
 
 module.exports = {
   PREFIX,
+  CHANNELS,
   filePath,
   load,
   save,
