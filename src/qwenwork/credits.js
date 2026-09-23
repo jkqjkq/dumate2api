@@ -14,16 +14,91 @@
 // 「今日已用 = 上限 − 余额」里的上限来自配置（默认 100），不是接口给的，
 // 界面上必须标注来源，否则额度政策一变就没人知道数字是错的。
 const https = require('https');
+const fs = require('fs');
+const path = require('path');
 const constants = require('./constants');
 const credentials = require('./credentials');
 
 const SITE_ORIGIN = 'https://qwenwork.cn';
 const WALLETS_PATH = '/user/wallets';
 
-/** 每日免费额度上限。接口不给，只能配置。0 表示不显示分母 */
+// ---------------------------------------------------------------------------
+// 每日额度上限的推断
+//
+// 接口只给余额、不给上限（实测 /user/wallets 的 data 里没有 limit/quota
+// 字段）。但「今日消耗 = 上限 − 余额」是用户真正想看的数，所以这里用
+// **观测峰值**推断：每日额度每天 00:00 重置到上限、之后只减不增，
+// 因此当天观测到的最大值就是最接近上限的真实值。
+//
+// 峰值法有两个已知弱点，都在返回值里如实标注：
+//   1. 首次观测若在当天中途（本例 81.13），峰值就是偏小的，推断值会小于
+//      真实消耗——要等次日重置后才能校准到 100
+//   2. 若当天有过补充（充值/赠送），余额会回升，峰值反而偏大
+// 所以额外接受配置值作兜底：取「配置值」与「观测峰值」的较大者，
+// 并把来源标出来，让用户知道这个数是怎么来的。
+// ---------------------------------------------------------------------------
+const PEAK_FILE = 'qwenwork-daypeak.json';
+
+/** 每日免费额度的配置上限。接口不给，作为峰值的兜底下界。0 = 不设兜底 */
 function dailyLimit() {
   const n = Number(process.env.DUMATE_QWENWORK_DAILY_CREDITS);
   return Number.isFinite(n) && n > 0 ? n : 100;
+}
+
+function dataDir() {
+  return process.env.DUMATE_ADMIN_DATA || path.resolve(__dirname, '..', '..', 'data');
+}
+
+function peakPath() {
+  return path.join(dataDir(), PEAK_FILE);
+}
+
+function dayKey() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+function readPeak() {
+  try { return JSON.parse(fs.readFileSync(peakPath(), 'utf8')); } catch (e) { return {}; }
+}
+
+function writePeak(o) {
+  try {
+    fs.mkdirSync(dataDir(), { recursive: true });
+    const tmp = peakPath() + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(o));
+    fs.renameSync(tmp, peakPath());
+  } catch (e) { /* 峰值写不进不影响主流程 */ }
+}
+
+/**
+ * 记录本次观测，返回今日消耗的真实口径。
+ * @returns {{limit:number, limitSource:string, freeUsed:number, peak:number, calibrated:boolean}}
+ */
+function dailyUsageFromBalance(balance) {
+  const k = dayKey();
+  const st = readPeak();
+  const prev = st[k] || 0;
+  const peak = Math.max(prev, balance || 0);
+  if (peak !== prev) {
+    st[k] = Number(peak.toFixed(4));
+    // 只保留最近 30 天，避免文件无限增长
+    const keys = Object.keys(st).sort();
+    while (keys.length > 30) delete st[keys.shift()];
+    writePeak(st);
+  }
+  // 上限：配置值兜底 + 观测峰值，取较大者
+  const configured = dailyLimit();
+  const limit = Math.max(configured || 0, peak);
+  // calibrated=true 表示峰值已经追平或超过配置值（说明已观测到接近满额的状态）
+  const calibrated = peak >= (configured || 0);
+  return {
+    limit,
+    limitSource: calibrated ? 'observed' : 'config-lower-bound',
+    freeUsed: Math.max(0, Number((limit - (balance || 0)).toFixed(4))),
+    peak: Number(peak.toFixed(4)),
+    calibrated,
+  };
 }
 
 const CACHE_MS = parseInt(process.env.DUMATE_QWENWORK_CREDIT_CACHE_MS || '30000', 10);
@@ -84,13 +159,14 @@ async function fetchWallets({ force = false } = {}) {
   };
   out.total = out.daily + out.monthly + out.longterm;
   out.paid = out.monthly + out.longterm;
-  // 「每日已用」此前用 limit − daily 反推，但那依赖配置值（默认 100），
-  // 而**接口不返回上限**（实测 /user/wallets 只有余额、无 limit/quota 字段）。
-  // 额度政策一变这个差值就是错的，且它与「经本网关消耗」是两套口径，
-  // 摆在一起会被读成同一个数。所以这里不再反推，只保留真实余额。
-  out.limit = null;
-  out.limitSource = 'unavailable';
-  out.freeUsed = null;
+  // 今日真实消耗：上限由「观测峰值 + 配置兜底」得出（见 dailyUsageFromBalance），
+  // 余额是接口的真实值，两者相减即当天全部消耗——包含不经网关的对话。
+  const u = dailyUsageFromBalance(out.daily);
+  out.limit = u.limit;
+  out.limitSource = u.limitSource;
+  out.freeUsed = u.freeUsed;
+  out.peak = u.peak;
+  out.calibrated = u.calibrated;
   cache = { at: Date.now(), data: out };
   return out;
 }

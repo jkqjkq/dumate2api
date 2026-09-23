@@ -23,12 +23,16 @@ export interface QwCredits {
   longterm: number
   total: number
   /**
-   * 每日上限。**接口不返回上限**（实测 /user/wallets 只有余额、无 limit/quota
-   * 字段），所以这里恒为 null——不拿配置值反推，那是个会随政策失效的数字。
+   * 每日上限，**由观测峰值 + 配置兜底得出**（接口本身不给上限）。
+   * 每日额度每天 00:00 重置，当天观测到的最大值即最接近上限的真实值。
    */
-  limit: number | null
-  limitSource: 'unavailable'
-  /** 同上：无法给出「已用/上限」进度，故为 null */
+  limit: number
+  limitSource: 'observed' | 'config-lower-bound'
+  /** 当天观测到的每日额度峰值 */
+  peak: number
+  /** true = 峰值已追平/超过配置值（已观测到接近满额状态），消耗值可信 */
+  calibrated: boolean
+  /** 今日全部消耗 = 上限 − 余额（含客户端/网页里的对话） */
   freeUsed: number | null
   expiring: Array<{ balance: number; valid_to: string }>
   fetchedAt: number

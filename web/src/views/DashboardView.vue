@@ -29,6 +29,14 @@
               <template v-if="w.resetAt">每天 00:00 重置</template>
               <template v-else>按有效期</template>
             </div>
+            <!-- 今日已用：真实数据。上限由「观测峰值 + 配置兜底」得出，
+                 未校准时如实说明数值可能偏小。 -->
+            <div v-if="w.id === 'daily' && qw?.freeUsed != null" class="text-xs text-slate-500 mt-1">
+              今日已用 {{ qw.freeUsed.toFixed(2) }} / {{ qw.limit }}
+              <a-tag v-if="!qw.calibrated" color="orange" class="ml-1" title="尚未观测到接近满额的状态，实际消耗可能更多">
+                待校准
+              </a-tag>
+            </div>
           </a-card>
         </a-col>
 

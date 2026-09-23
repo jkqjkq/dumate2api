@@ -143,12 +143,16 @@ const routes = [
           monthly: w.monthly,
           longterm: w.longterm,
           total: w.total,
-          // 接口不返回每日上限，所以 progress（已用/上限）无法给出。
-          // 不拿配置值反推——那是个会随政策失效的数字。
-          limit: null,
-          limitSource: 'unavailable',
-          // 今日消耗 = **经本网关**的归因累计。与「当天总消耗」是两套口径：
-          // 你在客户端/网页里的对话不经网关，不会计入这里。
+          // 上限由「观测峰值 + 配置兜底」得出（见 credits.dailyUsageFromBalance）。
+          // 接口本身不给上限，所以 calibrated=false 表示还没观测到接近满额的
+          // 状态，此时消耗值可能偏小——界面要如实标注，别让人当成精确值。
+          limit: w.limit,
+          limitSource: w.limitSource,
+          peak: w.peak,
+          calibrated: w.calibrated,
+          // 今日全部消耗（含客户端/网页里的对话，不只经网关的）
+          freeUsed: w.freeUsed,
+          // 今日经本网关的消耗（另一套口径，两者不要相加）
           today: { ...todayUsage(), scope: 'gateway' },
           expiring: w.expiring || [],
           fetchedAt: w.fetchedAt,
