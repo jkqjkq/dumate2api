@@ -9,7 +9,7 @@
         </p>
       </div>
       <a-space :size="8">
-        <a-button size="small" class="ghost-btn" :loading="modelsLoading" @click="loadModels">
+        <a-button size="small" class="ghost-btn" :loading="modelsLoading" @click="refreshModels">
           <template #icon><ReloadOutlined /></template>
           刷新模型
         </a-button>
@@ -152,7 +152,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref } from 'vue'
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import {
   ReloadOutlined, DeleteOutlined, UserOutlined, RobotOutlined,
   SendOutlined, LoadingOutlined, BulbOutlined, DownOutlined,
@@ -193,19 +193,49 @@ const streamOptions = [
 
 // 通道选择：测试台原本只能靠手打 `qwen/` 前缀走千问，这里给个下拉。
 // 选项与全局切换器同源（stores/channel），避免两处各维护一份通道表。
+// 它跟随顶栏的全局切换：两处必须一致，否则会出现「顶栏显示千问、
+// 测试台下拉却是搭子」这种自相矛盾的状态。
 const labChannel = ref(channelStore.current)
 const channelOptions = CHANNELS.map((c) => ({ label: c.label, value: c.id }))
 
 // 千问模型：从管理端接口拿（含中文名），选中的值带上 `qwen/` 前缀
 const qwModels = ref<Array<{ id: string; name: string; prefixed: string }>>([])
-async function onChannelChange(id: string) {
-  model.value = ''
-  if (id === 'qwenwork' && !qwModels.value.length) {
-    try {
-      const { data } = await qwenApi.models()
-      qwModels.value = data.models || []
-    } catch { /* 拿不到就空列表，不阻断 */ }
+const qwModelsLoading = ref(false)
+
+async function loadQwModels() {
+  if (qwModelsLoading.value) return
+  qwModelsLoading.value = true
+  try {
+    const { data } = await qwenApi.models()
+    qwModels.value = data.models || []
+  } catch { /* 拿不到就空列表，不阻断 */ } finally {
+    qwModelsLoading.value = false
   }
+}
+
+// 按通道切换模型列表。**必须清空已选模型**：搭子的模型名（如 glm-5）
+// 在千问通道下无效，留着会让「当前模型」显示一个根本不存在的名字。
+async function applyChannel(id: string) {
+  model.value = ''
+  if (id === 'qwenwork') {
+    if (!qwModels.value.length) await loadQwModels()
+    model.value = qwModels.value[0]?.prefixed || ''
+  } else {
+    if (!models.value) await loadModels()
+    model.value = models.value?.exposed?.[0]?.id || models.value?.aliases?.[0]?.id || ''
+  }
+}
+
+// 顶栏切换通道时同步过来（下拉自己的 change 走 onChannelChange）
+watch(() => channelStore.current, (id) => {
+  if (labChannel.value === id) return
+  labChannel.value = id
+  applyChannel(id)
+})
+
+function onChannelChange(id: string) {
+  channelStore.set(id)
+  applyChannel(id)
 }
 
 // 上游模型与别名都列出来：别名能不能用恰恰是要试的东西
@@ -236,10 +266,18 @@ async function loadModels() {
   try {
     const { data } = await client.get('/chatlab/models')
     models.value = data
-    if (!model.value) model.value = data.exposed?.[0]?.id || data.aliases?.[0]?.id || ''
+    // 只在搭子通道下补默认值——千问通道的模型名不带前缀会跑到搭子上
+    if (!model.value && labChannel.value !== 'qwenwork') {
+      model.value = data.exposed?.[0]?.id || data.aliases?.[0]?.id || ''
+    }
   } finally {
     modelsLoading.value = false
   }
+}
+
+/** 刷新按钮：跟着当前通道走，别在千问通道下刷搭子的模型表 */
+function refreshModels() {
+  return labChannel.value === 'qwenwork' ? loadQwModels() : loadModels()
 }
 
 async function loadSessionCost() {
@@ -348,8 +386,10 @@ async function send() {
   }
 }
 
-onMounted(() => {
-  loadModels()
+onMounted(async () => {
+  // 按**当前通道**初始化，而不是永远先加载搭子的模型表：
+  // 顶栏已切到千问时进这个页面，下拉与模型列表都该是千问的
+  await applyChannel(labChannel.value)
   loadSessionCost()
 })
 </script>

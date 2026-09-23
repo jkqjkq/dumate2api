@@ -78,7 +78,182 @@ function todayUsage() {
   return { free: Number(free.toFixed(4)), paid: Number(paid.toFixed(4)), total: Number((free + paid).toFixed(4)), requests: n };
 }
 
+/**
+ * 千问办公的登录态细节（只读）。
+ *
+ * 与搭子不同：千问是单账号直连，登录态存在官方客户端的 auth-v2.dat 里，
+ * 由 Electron safeStorage（DPAPI + AES-256-GCM）加密。管理端**只读**，
+ * 写入交给客户端本身——两边各写一次会互相把对方刷掉。
+ */
+function loginDetail() {
+  const cred = require('../../qwenwork/credentials');
+  const out = {
+    ok: false,
+    error: '',
+    // 文件位置与时间：排查「是不是客户端没登录 / 文件被清了」先看这里
+    file: null,
+    fileStat: null,
+    machineId: '',
+    // 账号信息（来自解密后的 user 对象）
+    account: null,
+    // token 时间线
+    token: { accessExpiresAt: null, refreshExpiresAt: null, accessExpired: false, refreshExpired: false },
+    // 通道就绪情况
+    ready: false,
+    wasm: null,
+  };
+  try {
+    const wasmPath = require('../../qwenwork/wasm-path');
+    const w = wasmPath.resolveDetailed();
+    out.wasm = w ? w.version : null;
+  } catch (e) { /* wasm 找不到不影响读登录态 */ }
+
+  try {
+    const path = require('path');
+    const fs = require('fs');
+    const file = path.join(cred.USER_DATA_DIR(), 'auth-v2.dat');
+    out.file = file;
+    try {
+      const st = fs.statSync(file);
+      out.fileStat = { size: st.size, mtime: st.mtimeMs };
+    } catch (e) {
+      out.error = '登录态文件不存在，请先登录千问办公客户端';
+      return out;
+    }
+
+    const doc = cred.decryptAuth();
+    const u = doc.user || {};
+    out.account = {
+      id: u.id || '',
+      name: u.name || '',
+      username: u.username || '',
+      email: u.email || '',
+      tier: u.tier || '',
+      planName: u.planName || '',
+      planId: u.planId || '',
+      planSubscriptionActive: !!u.planSubscriptionActive,
+      planNextDueDate: u.planNextDueDate || null,
+      isBiz: !!u.isBiz,
+      orgName: u.orgName || null,
+      // 页面额度：千问按「页面数 / 月请求数 / 流量」限额，不是积分
+      entitlements: u.pageEntitlements || null,
+    };
+    const parse = (s) => {
+      const t = Date.parse(s || '');
+      return Number.isFinite(t) ? t : null;
+    };
+    const aExp = parse(doc.expiresAt);
+    const rExp = parse(doc.refreshTokenExpiresAt);
+    out.token = {
+      accessExpiresAt: aExp,
+      refreshExpiresAt: rExp,
+      accessExpired: aExp !== null && Date.now() >= aExp,
+      // refresh 过期不必然立刻失败（access 还能用），但必须提前告警
+      refreshExpired: rExp !== null && Date.now() >= rExp,
+    };
+    out.machineId = cred.machineId();
+    out.ok = true;
+  } catch (e) {
+    out.error = e.message;
+  }
+  return out;
+}
+
+/** 积分逐笔明细：从归因历史读，按时间倒序 */
+function creditRecords(limit) {
+  const c = require('../../qwenwork/credits');
+  const rows = c.readHistory();
+  return rows
+    .slice()
+    .sort((a, b) => (b.ts || 0) - (a.ts || 0))
+    .slice(0, limit)
+    .map((r) => ({
+      ts: r.ts,
+      req_id: r.req_id || '',
+      model: r.model || '',
+      ms: r.ms ?? null,
+      free: r.free || 0,
+      paid: r.paid || 0,
+      total: r.total || 0,
+      pool: r.pool || 'none',
+      concurrent: !!r.concurrent,
+      balance: r.balance || null,
+      account: r.account || null,
+    }));
+}
+
 const routes = [
+  {
+    method: 'GET',
+    path: '/account',
+    handler: async ({ req, res }) => {
+      return sendJSON(res, 200, loginDetail());
+    },
+  },
+  {
+    method: 'GET',
+    path: '/credits/records',
+    handler: async ({ req, res }) => {
+      const limit = Math.min(1000, Math.max(1, parseInt((req.url.match(/[?&]limit=(\d+)/) || [])[1] || '100', 10) || 100));
+      const rows = creditRecords(limit);
+      const sum = rows.reduce((s, r) => ({
+        free: s.free + r.free, paid: s.paid + r.paid, total: s.total + r.total,
+      }), { free: 0, paid: 0, total: 0 });
+      return sendJSON(res, 200, {
+        limit,
+        rows,
+        // 汇总只统计本次返回的窗口，界面要写清范围
+        window: {
+          free: Number(sum.free.toFixed(4)),
+          paid: Number(sum.paid.toFixed(4)),
+          total: Number(sum.total.toFixed(4)),
+          requests: rows.length,
+        },
+      });
+    },
+  },
+  {
+    method: 'GET',
+    path: '/accounts',
+    handler: async ({ req, res }) => {
+      // 千问是**单账号直连**：登录态只有一份（官方客户端当前登录的那个），
+      // 不存在账号池。所以这里如实返回一条，而不是伪造一个可增删的列表。
+      // 后续接入多账号时，这里改成读账号池文件即可，前端不用动。
+      const d = loginDetail();
+      const c = require('../../qwenwork/credits');
+      let wallets = null;
+      try {
+        const w = await c.fetchWallets();
+        if (w.ok) wallets = { daily: w.daily, monthly: w.monthly, longterm: w.longterm, total: w.total };
+      } catch (e) { /* 余额取不到不影响账号信息 */ }
+      const accounts = [];
+      if (d.ok && d.account) {
+        accounts.push({
+          id: d.account.id,
+          name: d.account.name,
+          username: d.account.username,
+          email: d.account.email,
+          tier: d.account.tier,
+          planName: d.account.planName,
+          active: true,
+          // 单账号模式下「是否可用」= 登录态是否还在
+          usable: !d.token.refreshExpired,
+          tokenExpiresAt: d.token.accessExpiresAt,
+          refreshExpiresAt: d.token.refreshExpiresAt,
+          refreshExpired: d.token.refreshExpired,
+          wallets,
+        });
+      }
+      return sendJSON(res, 200, {
+        // 明确告诉前端这条通道的结构，界面据此决定是否显示「添加账号」
+        mode: 'single',
+        modeNote: '千问办公为单账号直连，登录态由官方客户端维护；多账号支持待接入。',
+        count: accounts.length,
+        accounts,
+        error: d.ok ? '' : d.error,
+      });
+    },
+  },
   {
     method: 'GET',
     path: '/status',
@@ -150,6 +325,9 @@ const routes = [
           limitSource: w.limitSource,
           peak: w.peak,
           calibrated: w.calibrated,
+          // 每日免费额度的配置上限（默认 100）。界面上「免费额度 X / 100」
+          // 的分子来自接口余额、分母来自配置——接口不给分母，必须标来源。
+          dailyCap: require('../../qwenwork/credits').dailyLimit(),
           // 今日全部消耗（含客户端/网页里的对话，不只经网关的）
           freeUsed: w.freeUsed,
           // 今日经本网关的消耗（另一套口径，两者不要相加）

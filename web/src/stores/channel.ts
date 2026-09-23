@@ -42,7 +42,9 @@ export const CHANNELS = [
   {
     id: 'qwenwork',
     label: '千问办公',
-    menuKeys: ['dashboard', 'chatlab', 'usage', 'reqlogs', 'models'],
+    // 千问办公：单账号直连，没有「任务记录」（无签到/抽奖任务）。
+    // 账号管理先只读展示当前账号，后续接入多账号再开放写入。
+    menuKeys: ['dashboard', 'chatlab', 'usage', 'reqlogs', 'models', 'keys', 'account', 'points', 'web-accounts'],
   },
 ] as const
 

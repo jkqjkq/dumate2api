@@ -68,10 +68,26 @@ function clampInt(raw, def, min, max) {
   return Math.min(max, Math.max(min, n));
 }
 
-function loadRows(days) {
+// 按通道取行。**历史记录（channel 未标注）归入搭子**——分通道埋点上线前
+// 只有搭子一条通道，把它们算到「未标注」里，用户切到搭子会看到数字凭空变小，
+// 反而比默认成搭子更像在编数据。只有「查看全部」时才单列未标注。
+function loadRows(days, ch) {
   const since = Date.now() - days * 86400000;
-  const { rows } = reqlog.read({ limit: 0, filter: (r) => r.ts >= since });
+  const { rows } = reqlog.read({
+    limit: 0,
+    filter: (r) => {
+      if (r.ts < since) return false;
+      if (!ch) return true;
+      if (ch === 'dumate') return r.channel === 'dumate' || !r.channel;
+      return r.channel === ch;
+    },
+  });
   return rows;
+}
+
+/** 通道归属：无 channel 字段时，按当前筛选归入搭子；查看全部时归入未标注 */
+function effChannel(r, ch) {
+  return r.channel || (ch === 'dumate' ? 'dumate' : 'untagged');
 }
 
 // 把一组请求聚合成一行统计
@@ -100,7 +116,10 @@ const routes = [
     path: '/overview',
     handler: async ({ res, req }) => {
       const days = clampInt((req.url.match(/[?&]days=(\d+)/) || [])[1], 30, 1, 90);
-      const rows = loadRows(days);
+      // 通道筛选：dumate / qwenwork；缺省或未知值 = 全部通道
+      const chRaw = decodeURIComponent((req.url.match(/[?&]channel=([^&]*)/) || [])[1] || '');
+      const ch = chRaw === 'dumate' || chRaw === 'qwenwork' ? chRaw : '';
+      const rows = loadRows(days, ch);
       const today = dayKey(Date.now());
       const todayRows = rows.filter((r) => dayKey(r.ts) === today);
       // 本周 = 最近 7 天（含今天）
@@ -113,11 +132,13 @@ const routes = [
         failed: list.filter((r) => r.status >= 400 || r.status === 0).length,
       });
 
-      // 积分消耗问上游（本地算不出扣费）
-      const [pointsAll, todayPoints] = await Promise.all([
-        pointsUsage(days),
-        pointsTodayUsage(),
-      ]);
+      // 积分消耗问上游（本地算不出扣费）。**只有搭子有上游积分账单**——
+      // 千问办公的账在自己的池子里（/qwenwork/credits），不查搭子账号池，
+      // 否则切到千问会看到搭子的账号消费挂在页面上。
+      const showPoints = !ch || ch === 'dumate';
+      const [pointsAll, todayPoints] = showPoints
+        ? await Promise.all([pointsUsage(days), pointsTodayUsage()])
+        : [{ total_consumed: 0, total_records: 0, accounts: [] }, { consumed: 0, records: 0 }];
 
       // 今日单独算一套更细的指标：顶部卡片要回答「今天跑得怎么样」，
       // 只有请求数与 token 不够——还得知道成功率、快慢、哪些模型在用。
@@ -151,8 +172,8 @@ const routes = [
           }, {})
         ).map(([model, tokens]) => ({ model, tokens }))
           .sort((a, b) => b.tokens - a.tokens),
-        consumed_points: todayPoints.consumed,
-        point_records: todayPoints.records,
+        consumed_points: showPoints ? todayPoints.consumed : null,
+        point_records: showPoints ? todayPoints.records : null,
       };
 
       // 按天：补齐没有请求的日期，否则折线会把空档连成直线
@@ -185,7 +206,7 @@ const routes = [
       const CH_LABEL = { dumate: '百度搭子', qwenwork: '千问办公' };
       const chMap = {};
       for (const r of rows) {
-        const id = r.channel || 'untagged';
+        const id = effChannel(r, ch);
         if (!chMap[id]) chMap[id] = { id, label: CH_LABEL[id] || (id === 'untagged' ? '未标注' : id), requests: 0, total_tokens: 0, failed: 0, avg_ms: 0, _msSum: 0 };
         const c = chMap[id];
         c.requests++;
@@ -200,7 +221,7 @@ const routes = [
       // 首字延迟按通道分开：千问首帧实测 6.7s，混进搭子的均值里会让
       // 「平均首字延迟」既偏高又无法归因。
       for (const c of byChannel) {
-        const sub = rows.filter((r) => (r.channel || 'untagged') === c.id && r.first_token_ms != null);
+        const sub = rows.filter((r) => effChannel(r, ch) === c.id && r.first_token_ms != null);
         c.first_token_samples = sub.length;
         c.avg_first_token_ms = sub.length
           ? Math.round(sub.reduce((a, r) => a + r.first_token_ms, 0) / sub.length)
@@ -209,6 +230,8 @@ const routes = [
 
       return sendJSON(res, 200, {
         days,
+        // 当前通道筛选（'' = 全部）。前端据此决定是否显示「按通道」与积分卡片
+        channel: ch,
         cards: {
           today: todayDetail,
           week: sum(weekRows),
@@ -221,11 +244,14 @@ const routes = [
         daily,
         by_model: byModel,
         by_key: byKey,
-        by_channel: byChannel,
-        // 各账号的积分消耗，供「按账号」视图
+        // 已按单通道过滤时不再返回「按通道」——那只会得到一行自己的数据
+        by_channel: ch ? [] : byChannel,
+        // 各账号的积分消耗，供「按账号」视图。仅搭子有上游账单
         points_by_account: pointsAll.accounts,
         // 说明扣费口径，避免与本地 token 统计混淆
-        note: 'Token 与请求数来自本地网关日志；积分消耗来自上游计费记录，两者口径不同（不同模型单价不同）。',
+        note: ch === 'qwenwork'
+          ? '千问办公的积分在自己的池子里（见仪表盘的千问积分卡），这里只统计经网关转发的 Token 与请求数。'
+          : 'Token 与请求数来自本地网关日志；积分消耗来自上游计费记录，两者口径不同（不同模型单价不同）。',
       });
     },
   },

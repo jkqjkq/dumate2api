@@ -6,20 +6,39 @@ const { sendJSON } = require('../router');
 // 每个 key 的用量从请求日志聚合，而不是在 key 记录里累加计数：
 // 累加会写坏（进程被杀就丢），日志是既成事实，重算总是对的。
 // 按 key_id 聚合而非名字——改名不该让历史用量凭空消失。
+//
+// 按通道分开统计：同一个 key 可能同时用于搭子与千问（网关按模型名前缀
+// 分流，不按 key 分流），合并成一个数字就分不清「这把 key 到底在跑哪条通道」。
 function usageByKey(days = 30) {
   const since = Date.now() - days * 86400000;
   const { rows } = reqlog.read({ limit: 0, filter: (r) => r.ts >= since && r.key_id });
   const map = {};
   for (const r of rows) {
     const k = r.key_id;
-    if (!map[k]) map[k] = { requests: 0, total_tokens: 0, failed: 0, last_at: 0 };
-    map[k].requests++;
-    map[k].total_tokens += r.total_tokens || 0;
-    if (r.status >= 400 || r.status === 0) map[k].failed++;
-    if (r.ts > map[k].last_at) map[k].last_at = r.ts;
+    if (!map[k]) {
+      map[k] = {
+        requests: 0, total_tokens: 0, failed: 0, last_at: 0,
+        // 历史记录没有 channel 字段，归入搭子（分通道前只有搭子一条通道）
+        channels: {},
+      };
+    }
+    const m = map[k];
+    m.requests++;
+    m.total_tokens += r.total_tokens || 0;
+    if (r.status >= 400 || r.status === 0) m.failed++;
+    if (r.ts > m.last_at) m.last_at = r.ts;
+    const ch = r.channel || 'dumate';
+    if (!m.channels[ch]) m.channels[ch] = { requests: 0, total_tokens: 0, failed: 0 };
+    m.channels[ch].requests++;
+    m.channels[ch].total_tokens += r.total_tokens || 0;
+    if (r.status >= 400 || r.status === 0) m.channels[ch].failed++;
   }
   return map;
 }
+
+// 合法的通道 id。keys.js 存 channel 字段，网关鉴权段据此决定这把 key
+// 允许走哪条通道（缺省 = 不限通道，兼容已有 key）
+const CHANNELS = ['dumate', 'qwenwork'];
 
 function checkLists(body) {
   const problems = [];
@@ -36,6 +55,12 @@ function checkLists(body) {
       }
     }
   }
+  // 通道：'' / null / undefined 表示不限通道（兼容已有 key）
+  if (body.channel !== undefined && body.channel !== null && body.channel !== '') {
+    if (!CHANNELS.includes(body.channel)) {
+      problems.push(`channel 只能是 ${CHANNELS.join(' / ')} 或留空（不限）`);
+    }
+  }
   return problems;
 }
 
@@ -43,14 +68,20 @@ const routes = [
   {
     method: 'GET',
     path: '',
-    handler: ({ res }) => {
+    handler: ({ res, req }) => {
       const usage = usageByKey(30);
-      const list = keysvc.list().map((k) => ({
+      // 通道过滤：管理端切到千问时只列与千问相关的 key
+      // （channel 为 qwenwork，或未限定通道的通用 key）
+      const chRaw = decodeURIComponent((req.url.match(/[?&]channel=([^&]*)/) || [])[1] || '');
+      const ch = CHANNELS.includes(chRaw) ? chRaw : '';
+      let list = keysvc.list().map((k) => ({
         ...k,
-        usage: usage[k.id] || { requests: 0, total_tokens: 0, failed: 0, last_at: 0 },
+        usage: usage[k.id] || { requests: 0, total_tokens: 0, failed: 0, last_at: 0, channels: {} },
       }));
+      if (ch) list = list.filter((k) => !k.channel || k.channel === ch);
       return sendJSON(res, 200, {
         keys: list,
+        channel: ch,
         // 鉴权开关是环境变量，管理端只做展示与提醒
         require_key: process.env.DUMATE_REQUIRE_KEY === '1',
         days: 30,

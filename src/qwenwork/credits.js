@@ -193,6 +193,9 @@ let baseline = null; // 上一次结算后的余额；null = 还没建立基准
  * @param {object} opts
  * @param {string} opts.model   模型名，写进归因记录
  * @param {number} opts.startedAt 请求开始时刻
+ * @param {string} [opts.reqId] 请求埋点的 req_id。**两边靠它对齐**——
+ *   归因要等 1.5s 结算，时间戳对不上；不带这个键就只能靠时间猜，
+ *   同一秒内两条请求会互相串账。
  * @returns {Promise<{free:number, paid:number, pool:string}|null>}
  */
 function capture(opts = {}) {
@@ -218,6 +221,9 @@ function capture(opts = {}) {
     const pool = free > 0 ? 'daily' : (paid > 0 ? 'paid' : 'none');
     const entry = {
       ts: Date.now(),
+      // req_id：与请求埋点（requests.jsonl）的同一字段对齐。
+      // 归因要等 1.5s 结算，ts 必然晚于埋点；只有这个键能精确配对。
+      req_id: opts.reqId || '',
       model: opts.model || '',
       ms: opts.startedAt ? Date.now() - opts.startedAt : null,
       free: Number(free.toFixed(6)),
@@ -225,6 +231,11 @@ function capture(opts = {}) {
       total: Number((free + paid).toFixed(6)),
       pool,
       balance: { daily: after.daily, monthly: after.monthly, longterm: after.longterm },
+      // 扣的是哪个千问账号。千问是单账号直连（不像搭子有账号池），
+      // 入口 token 来源唯一，记录一次足够；多账号场景以后再说。
+      // 由 caller 在调用 capture 前解好传入，避免在这里 require 凭证模块
+      // 撞上 DPAPI 初始化时序
+      account: opts.account || null,
     };
     // 并发时「前后差值」分不清是谁消耗的——总和正确、单项归属不准。
     // 如实标记而不是假装精确，聚合时可按需排除。
@@ -244,7 +255,7 @@ async function primeBaseline() {
   return baseline;
 }
 
-/** 读归因历史（供管理端按天聚合） */
+/** 读归因历史（供管理端按天聚合）。rows 已带 req_id，可按请求精确关联 */
 function readHistory(limit = 0) {
   const fs = require('fs');
   const path = require('path');
@@ -264,6 +275,18 @@ function readHistory(limit = 0) {
   }
 }
 
+/**
+ * 按 req_id 建索引，供请求日志按条附上积分消耗。
+ * 用「最后一条同 id 的记录」——重试或重复采集时以最新为准。
+ */
+function indexByReqId() {
+  const map = new Map();
+  for (const r of readHistory()) {
+    if (r && r.req_id) map.set(r.req_id, r);
+  }
+  return map;
+}
+
 function record(entry) {
   const fs = require('fs');
   const path = require('path');
@@ -275,6 +298,6 @@ function record(entry) {
 }
 
 module.exports = {
-  fetchWallets, capture, primeBaseline, readHistory, record,
+  fetchWallets, capture, primeBaseline, readHistory, indexByReqId, record,
   dailyLimit, SITE_ORIGIN, WALLETS_PATH,
 };

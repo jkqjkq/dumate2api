@@ -6,6 +6,9 @@
         <template v-if="lastRefresh"> · 更新于 {{ lastRefresh }}</template>
       </template>
       <template #actions>
+        <!-- 通道跟随顶栏的全局切换，不在这里另设选择器——两处各有一个
+             开关必然出现互相矛盾的状态。这里只显示当前在看哪条通道 -->
+        <a-tag :color="isQw ? 'cyan' : 'blue'" class="mr-1">{{ chLabel }}</a-tag>
         <a-select v-model:value="days" size="small" style="width: 110px" :options="dayOptions" />
         <a-button size="small" class="ghost-btn" :loading="loading" @click="load">刷新</a-button>
       </template>
@@ -35,11 +38,28 @@
 
       <a-col :span="6">
         <a-card :bordered="false" class="h-full">
-          <a-statistic title="今日实付" :value="data?.cards.today.consumed_points ?? '—'" :precision="2" />
+          <!-- 千问的积分在它自己的池子里（每日免费 / 月度 / 长期），
+               不能复用搭子的「今日实付」——那是上游账单，千问没有 -->
+          <a-statistic
+            :title="isQw ? '免费额度余额' : '今日实付'"
+            :value="isQw
+              ? (qw?.ok ? fmtQw(qw.free) : '—')
+              : (data?.cards.today.consumed_points ?? '—')"
+            :precision="isQw || data?.cards.today.consumed_points == null ? undefined : 2"
+            :suffix="isQw && qw?.ok ? `/ ${qw.dailyCap}` : ''"
+            :value-style="isQw ? 'color:#22d3ee' : undefined"
+          />
           <div class="text-xs text-slate-500 mt-2">
-            <template v-if="data">
-              {{ data.cards.today.point_records }} 条计费记录
+            <template v-if="isQw">
+              <template v-if="qw?.ok">
+                <a-tag :color="qw.calibrated ? 'cyan' : 'default'" class="qw-mini">
+                  {{ qw.calibrated ? '实测' : '配置兜底' }}
+                </a-tag>
+                每日 00:00 重置 · 上限 {{ qw.limitSource === 'observed' ? '按观测峰值' : '取自配置' }}
+              </template>
+              <span v-else>{{ qw?.error || '取不到千问积分' }}</span>
             </template>
+            <template v-else-if="data">{{ data.cards.today.point_records }} 条计费记录</template>
             <span v-else>—</span>
           </div>
         </a-card>
@@ -77,10 +97,15 @@
             {{ compact(data.cards.today.tokens) }}
           </a-descriptions-item>
           <a-descriptions-item label="实付积分">
-            {{ fmt(data.cards.today.consumed_points) }}
-            <span class="text-xs text-slate-400 ml-1">
-              （{{ data.cards.today.point_records }} 条）
-            </span>
+            <template v-if="data.cards.today.consumed_points !== null">
+              {{ fmt(data.cards.today.consumed_points) }}
+              <span class="text-xs text-slate-400 ml-1">
+                （{{ data.cards.today.point_records }} 条）
+              </span>
+            </template>
+            <!-- 千问的积分不进搭子上游账单：如实显示 —，不补 0
+                 （会被读成「今天没花钱」），具体数字在下方「千问办公积分」卡 -->
+            <span v-else class="text-slate-400">—</span>
           </a-descriptions-item>
           <a-descriptions-item label="平均耗时">
             {{ data.cards.today.avg_ms !== null ? fmt(data.cards.today.avg_ms) + ' ms' : '—' }}
@@ -211,8 +236,73 @@
       </a-col>
     </a-row>
 
-    <!-- 按账号积分消耗 -->
-    <a-card title="按账号积分消耗" :bordered="false" class="mt-4">
+    <!-- 千问办公的积分池。与搭子的「按账号积分消耗」是两套账：
+         千问是单账号直连，积分在 qwenwork.cn 的三个池子里 -->
+    <a-card v-if="isQw" title="千问办公积分" :bordered="false" class="mt-4">
+      <a-empty v-if="!qw?.ok" :description="qw?.error || '取不到千问积分'" />
+      <template v-else>
+        <a-row :gutter="[16, 16]">
+          <a-col v-for="w in qw.wallets" :key="w.id" :span="6">
+            <div class="qw-pool">
+              <div class="qw-pool-head">
+                <span class="qw-pool-label">{{ w.label }}</span>
+                <a-tag :color="w.kind === 'free' ? 'cyan' : 'blue'" class="qw-mini">
+                  {{ w.kind === 'free' ? '免费' : '付费' }}
+                </a-tag>
+              </div>
+              <div class="qw-pool-value num">
+                {{ fmtQw(w.balance) }}
+                <span v-if="w.id === 'daily'" class="qw-pool-cap">/ {{ qw.dailyCap }}</span>
+              </div>
+              <div class="qw-pool-sub">
+                <template v-if="w.id === 'daily'">
+                  每日 00:00 重置<template v-if="w.resetAt"> · {{ fmtReset(w.resetAt) }}</template>
+                </template>
+                <template v-else-if="w.id === 'monthly'">订阅套餐内</template>
+                <template v-else>充值 / 赠送</template>
+              </div>
+            </div>
+          </a-col>
+          <a-col :span="6">
+            <div class="qw-pool">
+              <div class="qw-pool-head">
+                <span class="qw-pool-label">今日消耗</span>
+                <a-tag class="qw-mini">经本网关</a-tag>
+              </div>
+              <div class="qw-pool-value num">{{ fmtQw(qw.today.total) }}</div>
+              <div class="qw-pool-sub">
+                免费 {{ fmtQw(qw.today.free) }} · 付费 {{ fmtQw(qw.today.paid) }} ·
+                {{ qw.today.requests }} 次
+              </div>
+            </div>
+          </a-col>
+        </a-row>
+
+        <!-- 两套口径必须分开写清楚，否则用户会把它们相加 -->
+        <a-alert type="info" show-icon class="mt-3">
+          <template #message>
+            两套口径，<b>不要相加</b>
+          </template>
+          <template #description>
+            <div>
+              「今日消耗（经本网关）」= {{ fmtQw(qw.today.total) }} —— 只统计经过本网关转发的请求。
+            </div>
+            <div>
+              「今日全部消耗」= {{ fmtQw(qw.freeUsed) }} —— 上限减余额得出，
+              含在客户端 / 网页里直接对话的部分。
+              <span class="text-slate-400">
+                （上限 {{ fmtQw(qw.limit) }}，来源：
+                {{ qw.limitSource === 'observed' ? '观测峰值' : '配置兜底' }}）
+              </span>
+            </div>
+          </template>
+        </a-alert>
+      </template>
+    </a-card>
+
+    <!-- 按账号积分消耗：只有搭子有上游计费账单。千问办公的积分在它自己的
+         池子里，挂一张空表出来只会让人以为「千问没消耗」 -->
+    <a-card v-if="!isQw" title="按账号积分消耗" :bordered="false" class="mt-4">
       <div class="text-xs text-slate-500 mb-2">
         来自上游计费记录（近 {{ data?.days ?? days }} 天）——本地日志算不出扣费，单价在上游。
       </div>
@@ -246,6 +336,9 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import PageHeader from '@/components/PageHeader.vue'
 import client from '@/api/client'
+import { channelStore, CHANNELS } from '@/stores/channel'
+import { qwenworkApi } from '@/api/qwenwork'
+import type { QwCredits } from '@/api/qwenwork'
 import type { UsageOverview } from '@/api/usage'
 
 // ECharts 按需引入：只加载柱状图需要的模块
@@ -262,6 +355,29 @@ const loading = ref(false)
 const lastRefresh = ref('')
 const days = ref(30)
 
+// 当前通道。**服务端按通道过滤**而不是前端筛已聚合的数字——
+// 卡片、折线、按模型表都建立在同一批行上，前端筛只能筛掉表里的行，
+// 顶部卡片的数字仍是全通道的，两者会对不上。
+const isQw = computed(() => channelStore.current === 'qwenwork')
+const chLabel = computed(() => CHANNELS.find((c) => c.id === channelStore.current)?.label || channelStore.current)
+
+// 千问积分。它是**另一套账**：搭子的扣费在上游账单里（pointsUsage），
+// 千问的在 qwenwork.cn 的三个池子里，两边互不相干，不能合并显示。
+// 拉取在 load() 里与用量并行做。
+const qw = ref<QwCredits | null>(null)
+
+// 积分保留 2~4 位：实测单次消耗 0.0025，按 2 位显示会变成 0
+const fmtQw = (n: number | null | undefined) =>
+  n == null ? '—' : Number(n).toLocaleString('zh-CN', { maximumFractionDigits: 4 })
+
+// 免费额度的重置时刻（接口给的是 wallet 的 valid_to）
+const fmtReset = (s: string) => {
+  const d = new Date(s)
+  return Number.isFinite(d.getTime())
+    ? d.toLocaleString('zh-CN', { hour12: false, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+    : s
+}
+
 // 「未标注」= channel 字段上线前的历史记录。不并入任一通道——那会让
 // 搭子的历史数字凭空变大，而用户无从察觉。
 // 首字延迟的展示格式：与请求日志页保持一致（秒/毫秒自动切换）
@@ -270,6 +386,8 @@ function fmtMs(ms?: number | null) {
   return ms >= 1000 ? `${(ms / 1000).toFixed(2)}s` : `${ms}ms`
 }
 
+// 已按单通道过滤时服务端不返回 by_channel（只会得到一行自己的数据），
+// 此时不再显示「按通道」区块
 const hasUntagged = computed(() => (data.value?.by_channel || []).some((c) => c.id === 'untagged'))
 
 const dayOptions = [
@@ -350,8 +468,14 @@ function renderChart() {
 async function load() {
   loading.value = true
   try {
-    const { data: d } = await client.get(`/usage/overview?days=${days.value}`)
-    data.value = d
+    const ch = isQw.value ? 'qwenwork' : 'dumate'
+    // 积分与用量并行拉：两者互不依赖，串行只会白等一个来回
+    const [usage, _qw] = await Promise.all([
+      client.get(`/usage/overview?days=${days.value}&channel=${ch}`),
+      isQw.value ? qwenworkApi.credits() : Promise.resolve(null),
+    ])
+    data.value = usage.data
+    if (isQw.value) qw.value = _qw!.data
     lastRefresh.value = new Date().toLocaleTimeString('zh-CN')
     await nextTick()
     renderChart()
@@ -363,6 +487,8 @@ async function load() {
 function onResize() { chartInst?.resize() }
 
 watch(days, load)
+// 切通道要重新拉数据（服务端过滤），不能只改前端显示
+watch(() => channelStore.current, load)
 
 onMounted(() => {
   window.addEventListener('resize', onResize)
@@ -375,3 +501,48 @@ onBeforeUnmount(() => {
   chartInst = null
 })
 </script>
+
+<style scoped>
+/* 千问积分池：并列小卡，密度与顶部卡片保持一致 */
+.qw-pool {
+  padding: 12px 14px;
+  border: 1px solid var(--lab-border);
+  border-radius: 10px;
+  background: var(--lab-surface-2);
+  height: 100%;
+}
+.qw-pool-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.qw-pool-label {
+  font-size: 12px;
+  color: var(--lab-text-sub);
+}
+.qw-pool-value {
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--lab-text);
+  line-height: 1.3;
+}
+.qw-pool-cap {
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--lab-text-mute);
+}
+.qw-pool-sub {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--lab-text-mute);
+  line-height: 1.6;
+}
+.qw-mini {
+  font-size: 10px;
+  line-height: 16px;
+  padding: 0 6px;
+  margin: 0;
+}
+</style>

@@ -1,16 +1,143 @@
 <template>
   <div class="page">
-    <PageHeader title="积分明细">
+    <PageHeader
+      :title="isQw ? '千问积分' : '积分明细'"
+      :sub="isQw ? '千问办公积分池与逐笔消耗（真实数据）' : undefined"
+    >
       <template #sub>
-        <template v-if="loading">加载中…</template>
+        <template v-if="isQw">
+          千问办公积分池与逐笔消耗 · 经本网关的请求
+        </template>
+        <template v-else-if="loading">加载中…</template>
         <template v-else-if="current">共 {{ accountOptions.length }} 个账号可选</template>
         <template v-else>没有可用数据</template>
       </template>
       <template #actions>
-        <a-button size="small" class="ghost-btn" :loading="loading" @click="load(true)">刷新</a-button>
+        <a-button size="small" class="ghost-btn" :loading="loading" @click="isQw ? loadQw() : load(true)">刷新</a-button>
       </template>
     </PageHeader>
 
+    <!-- ============ 千问办公积分：三个池子 + 逐笔消耗 ============ -->
+    <template v-if="isQw">
+      <a-alert
+        v-if="qwCredits && !qwCredits.ok"
+        type="error"
+        show-icon
+        :message="qwCredits.error || '取不到千问积分'"
+      />
+      <template v-else-if="qwCredits">
+        <a-row :gutter="[16, 16]">
+          <a-col v-for="w in qwCredits.wallets" :key="w.id" :span="6">
+            <a-card :bordered="false" class="h-full">
+              <a-statistic
+                :title="w.label"
+                :value="fmtQw(w.balance)"
+                :value-style="w.kind === 'free' ? 'color:#22d3ee' : 'color:#60a5fa'"
+              />
+              <div class="text-xs text-slate-500 mt-2">
+                <a-tag :color="w.kind === 'free' ? 'cyan' : 'blue'">
+                  {{ w.kind === 'free' ? '免费' : '付费' }}
+                </a-tag>
+                <template v-if="w.id === 'daily'">
+                  每日 00:00 重置 · 上限 {{ qwCredits.dailyCap }}
+                </template>
+                <template v-else-if="w.id === 'monthly'">订阅套餐内</template>
+                <template v-else>充值 / 赠送</template>
+              </div>
+            </a-card>
+          </a-col>
+          <a-col :span="6">
+            <a-card :bordered="false" class="h-full">
+              <a-statistic
+                title="今日消耗"
+                :value="fmtQw(qwCredits.today.total)"
+                value-style="color:#fbbf24"
+              />
+              <div class="text-xs text-slate-500 mt-2">
+                免费 {{ fmtQw(qwCredits.today.free) }} · 付费 {{ fmtQw(qwCredits.today.paid) }} ·
+                {{ qwCredits.today.requests }} 次
+              </div>
+            </a-card>
+          </a-col>
+        </a-row>
+
+        <!-- 两套口径分开写：经网关的 vs 全部（含客户端内对话） -->
+        <a-alert type="info" show-icon class="mt-4">
+          <template #message>两套口径，<b>不要相加</b></template>
+          <template #description>
+            <div>
+              「今日消耗（经本网关）」= {{ fmtQw(qwCredits.today.total) }}
+              —— 只统计经过本网关转发的请求。
+            </div>
+            <div>
+              「今日全部消耗」= {{ fmtQw(qwCredits.freeUsed) }}
+              —— 上限减余额得出，含在千问客户端 / 网页里直接对话的部分。
+              <span class="text-slate-400">
+                （上限 {{ fmtQw(qwCredits.limit) }}，来源：
+                {{ qwCredits.limitSource === 'observed' ? '观测峰值' : '配置兜底' }}）
+              </span>
+            </div>
+          </template>
+        </a-alert>
+      </template>
+
+      <!-- 逐笔消耗：来自积分归因（按 req_id 与请求日志配对） -->
+      <a-card title="逐笔消耗" :bordered="false" class="mt-4">
+        <template #extra>
+          <span class="text-xs text-slate-400">
+            最近 {{ qwRecords.length }} 条 · 合计 {{ fmtQw(qwWindow.total) }}
+          </span>
+        </template>
+        <a-empty v-if="!qwRecords.length" description="还没有经网关的积分记录" />
+        <a-table
+          v-else
+          size="small"
+          :data-source="qwRecords"
+          :columns="qwRecordColumns"
+          row-key="req_id"
+          :pagination="{ pageSize: 20, size: 'small', showSizeChanger: false }"
+        >
+          <template #bodyCell="{ column, record }">
+            <template v-if="column.key === 'ts'">
+              <span class="text-xs">{{ dateTimeText(record.ts) }}</span>
+            </template>
+            <template v-else-if="column.key === 'model'">
+              <span class="font-mono text-xs">{{ record.model }}</span>
+            </template>
+            <template v-else-if="column.key === 'pool'">
+              <a-tag :color="record.pool === 'daily' ? 'cyan' : (record.pool === 'paid' ? 'blue' : 'default')">
+                {{ poolText(record.pool) }}
+              </a-tag>
+            </template>
+            <template v-else-if="column.key === 'free'">
+              <span class="text-cyan-500">{{ fmtQw(record.free) }}</span>
+            </template>
+            <template v-else-if="column.key === 'paid'">
+              <span class="text-blue-500">{{ fmtQw(record.paid) }}</span>
+            </template>
+            <template v-else-if="column.key === 'total'">
+              <span class="font-medium">{{ fmtQw(record.total) }}</span>
+              <a-tooltip v-if="record.concurrent" title="与相邻请求并发，差值可能含其它请求的消耗">
+                <a-tag color="orange" class="ml-1">并发</a-tag>
+              </a-tooltip>
+            </template>
+            <template v-else-if="column.key === 'balance'">
+              <span v-if="record.balance" class="text-xs text-slate-400">
+                日 {{ fmtQw(record.balance.daily) }} · 月 {{ fmtQw(record.balance.monthly) }} · 长 {{ fmtQw(record.balance.longterm) }}
+              </span>
+              <span v-else class="text-slate-400">—</span>
+            </template>
+            <template v-else-if="column.key === 'account'">
+              <span v-if="record.account" class="text-xs">{{ record.account.name }}</span>
+              <span v-else class="text-xs text-slate-400">—</span>
+            </template>
+          </template>
+        </a-table>
+      </a-card>
+    </template>
+
+    <!-- ============ 百度搭子：原有页面 ============ -->
+    <template v-else>
     <!-- 多账号总览：账号管理里添加的每份网页凭证都能独立查积分。
          点行即切换下方明细，避免「看汇总」和「看明细」要操作两次。 -->
     <a-card title="多账号总览" :bordered="false" class="mb-4">
@@ -257,6 +384,7 @@
       </a-table>
     </a-card>
     </div>
+    </template>
   </div>
 </template>
 
@@ -268,6 +396,9 @@ import { GridComponent, TooltipComponent, LegendComponent } from 'echarts/compon
 import { CanvasRenderer } from 'echarts/renderers'
 import PageHeader from '@/components/PageHeader.vue'
 import client from '@/api/client'
+import { channelStore } from '@/stores/channel'
+import { qwenworkApi } from '@/api/qwenwork'
+import type { QwCredits, QwCreditRecord } from '@/api/qwenwork'
 import type { PointsData, PointsPackage, AllPointsData, AccountPoints } from '@/api/points'
 import { SERIES, INK, TOOLTIP_BASE, axisStyle, compactNum, exactNum, barSeries } from '@/utils/chartTheme'
 
@@ -291,6 +422,41 @@ const allPoints = ref<AllPointsData | null>(null)
 const loading = ref(false)
 const error = ref('')
 const selectedId = ref<string>('local')
+
+// ---- 千问办公积分（与搭子的多账号积分是两套账）----
+const isQw = computed(() => channelStore.current === 'qwenwork')
+const qwCredits = ref<QwCredits | null>(null)
+const qwRecords = ref<QwCreditRecord[]>([])
+const qwWindow = ref({ free: 0, paid: 0, total: 0, requests: 0 })
+
+const qwRecordColumns = [
+  { title: '时间', key: 'ts', width: '17%' },
+  { title: '模型', key: 'model', width: '12%' },
+  { title: '扣费池', key: 'pool', width: '10%' },
+  { title: '免费', key: 'free', width: '11%' },
+  { title: '付费', key: 'paid', width: '11%' },
+  { title: '合计', key: 'total', width: '13%' },
+  { title: '请求后余额', key: 'balance', width: '16%' },
+  { title: '账号', key: 'account', width: '10%' },
+]
+
+const poolText = (p: string) =>
+  p === 'daily' ? '每日免费' : p === 'paid' ? '付费积分' : p === 'none' ? '未扣费' : '—'
+
+async function loadQw() {
+  loading.value = true
+  try {
+    const [credits, records] = await Promise.all([
+      qwenworkApi.credits().catch((e: any) => ({ data: { ok: false, error: e?.message || '取不到千问积分' } })),
+      qwenworkApi.creditRecords(200).catch(() => ({ data: { rows: [], window: { free: 0, paid: 0, total: 0, requests: 0 } } })),
+    ])
+    qwCredits.value = credits.data as QwCredits
+    qwRecords.value = records.data.rows || []
+    qwWindow.value = records.data.window || { free: 0, paid: 0, total: 0, requests: 0 }
+  } finally {
+    loading.value = false
+  }
+}
 
 // 可切换的账号：本地后端 + 每个网页账号。取不到数据的也列出来（禁用），
 // 否则用户不知道自己有这个账号、只是这次查询失败了。
@@ -390,6 +556,9 @@ const pkgRows = computed(() =>
     .map((p, i) => ({ ...p, rowKey: `${p.source}-${p.granted_at}-${i}` })))
 
 const fmt = (n: number) => n.toLocaleString('zh-CN', { maximumFractionDigits: 2 })
+// 千问积分保留 4 位：实测单次消耗 0.0025，按 2 位显示会变成 0
+const fmtQw = (n: number | null | undefined) =>
+  n == null ? '—' : Number(n).toLocaleString('zh-CN', { maximumFractionDigits: 4 })
 const dateText = (ts: number | null) =>
   ts ? new Date(ts).toLocaleDateString('zh-CN') : '—'
 // 发放/到期时间精确到秒：同一天会发多笔（实测一天 61 笔），只到日期的话
@@ -493,8 +662,16 @@ watch([current, recentDaily], async () => {
 function onResize() { grantChart?.resize() }
 
 onMounted(() => {
-  load()
+  // 按当前通道初始化：顶栏已切到千问时进这个页面，该拉的是千问积分
+  if (isQw.value) loadQw()
+  else load()
   window.addEventListener('resize', onResize)
+})
+
+// 切通道重拉：两个通道的数据源与结构都不同
+watch(() => channelStore.current, () => {
+  if (isQw.value) loadQw()
+  else load()
 })
 
 onBeforeUnmount(() => {

@@ -30,9 +30,20 @@
         <div>
           <span class="font-medium">API Key</span>
           <span class="text-slate-500 text-sm ml-2">近 {{ data?.days ?? 30 }} 天用量</span>
+          <a-tag v-if="isQw" color="cyan" class="ml-2">千问办公</a-tag>
         </div>
         <a-button type="primary" size="small" @click="openCreate">新建 Key</a-button>
       </div>
+
+      <!-- 千问通道下说明「key 与通道的关系」，否则用户会以为这里的 key 是千问专用的 -->
+      <a-alert v-if="isQw" type="info" show-icon class="mb-3">
+        <template #message>当前显示可用于千问办公的 Key</template>
+        <template #description>
+          网关按**模型名前缀**分流（<code>qwen/</code> → 千问办公，无前缀 → 搭子），
+          而不是按 key 分流。所以这里的 key 只要能调 <code>qwen/*</code> 模型就可用。
+          若把 key 的「通道绑定」设为「仅千问办公」，它就只能调千问的模型。
+        </template>
+      </a-alert>
 
       <a-table
         size="small"
@@ -45,6 +56,11 @@
           <template v-if="column.key === 'name'">
             <div>{{ record.name }}</div>
             <div class="text-xs text-slate-400 font-mono">{{ record.prefix }}…</div>
+          </template>
+          <template v-else-if="column.key === 'channel'">
+            <a-tag v-if="record.channel === 'qwenwork'" color="cyan">仅千问</a-tag>
+            <a-tag v-else-if="record.channel === 'dumate'" color="blue">仅搭子</a-tag>
+            <a-tag v-else color="default">不限</a-tag>
           </template>
           <template v-else-if="column.key === 'state'">
             <a-tag :color="stateColor(record)">{{ stateText(record) }}</a-tag>
@@ -61,6 +77,17 @@
           <template v-else-if="column.key === 'usage'">
             <div>{{ record.usage.requests }} 次</div>
             <div class="text-xs text-slate-400">{{ compact(record.usage.total_tokens) }} tokens</div>
+            <!-- 按通道拆开：同一把 key 可能两条通道都在用，合并就看不出分别跑了多少 -->
+            <div v-if="record.usage.channels && Object.keys(record.usage.channels).length > 1" class="text-xs mt-1">
+              <a-tag
+                v-for="(v, ch) in record.usage.channels"
+                :key="String(ch)"
+                :color="String(ch) === 'qwenwork' ? 'cyan' : 'blue'"
+                class="mr-1"
+              >
+                {{ String(ch) === 'qwenwork' ? '千问' : '搭子' }} {{ v.requests }}
+              </a-tag>
+            </div>
             <a-tag v-if="record.usage.failed" color="red" class="mt-1">
               失败 {{ record.usage.failed }}
             </a-tag>
@@ -113,6 +140,13 @@
           </div>
           <a-alert v-if="ipError" type="error" :message="ipError" show-icon class="mt-2" />
         </a-form-item>
+        <a-form-item label="通道绑定">
+          <a-select v-model:value="form.channel" style="width: 100%" :options="channelOptions" />
+          <div class="text-xs text-slate-500 mt-1">
+            留空 = 不限通道（网关按模型名前缀分流）。选「仅千问办公」后，
+            这把 key 只能调 <code>qwen/*</code> 模型，调搭子模型会被 403 拒绝。
+          </div>
+        </a-form-item>
         <a-form-item label="模型白名单">
           <a-select
             v-model:value="form.models"
@@ -162,11 +196,12 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import PageHeader from '@/components/PageHeader.vue'
 import { message } from 'ant-design-vue'
 import dayjs, { type Dayjs } from 'dayjs'
 import client from '@/api/client'
+import { channelStore } from '@/stores/channel'
 import type { ApiKey, KeysData } from '@/api/keys'
 
 const data = ref<KeysData | null>(null)
@@ -178,21 +213,32 @@ const saving = ref(false)
 const editing = ref<ApiKey | null>(null)
 const ipError = ref('')
 
+// 通道绑定选项。留空 = 不限（兼容已有 key）
+const channelOptions = [
+  { label: '不限通道', value: '' },
+  { label: '仅百度搭子', value: 'dumate' },
+  { label: '仅千问办公', value: 'qwenwork' },
+]
+
+const isQw = computed(() => channelStore.current === 'qwenwork')
+
 const form = reactive({
   name: '',
   ipText: '',
   models: [] as string[],
+  channel: '' as '' | 'dumate' | 'qwenwork',
   expiresAt: null as Dayjs | null,
   note: '',
 })
 
 const columns = [
-  { title: '名称', key: 'name', width: '18%' },
-  { title: '状态', key: 'state', width: '10%' },
-  { title: '限制', key: 'limits', width: '22%' },
-  { title: '用量', key: 'usage', width: '18%' },
-  { title: '有效期', key: 'expires', width: '12%' },
-  { title: '操作', key: 'action', width: '20%' },
+  { title: '名称', key: 'name', width: '16%' },
+  { title: '通道', key: 'channel', width: '9%' },
+  { title: '状态', key: 'state', width: '9%' },
+  { title: '限制', key: 'limits', width: '19%' },
+  { title: '用量', key: 'usage', width: '19%' },
+  { title: '有效期', key: 'expires', width: '11%' },
+  { title: '操作', key: 'action', width: '17%' },
 ]
 
 const compact = (n: number) =>
@@ -215,7 +261,9 @@ const ipList = computed(() =>
 )
 
 async function load() {
-  const { data: d } = await client.get('/keys')
+  // 按通道过滤：切到千问时只看与千问相关的 key（channel=qwenwork 或未限定的）
+  const q = isQw.value ? '?channel=qwenwork' : ''
+  const { data: d } = await client.get('/keys' + q)
   data.value = d
   try {
     const { data: g } = await client.get('/models/gateway-list')
@@ -228,6 +276,9 @@ function openCreate() {
   form.name = ''
   form.ipText = ''
   form.models = []
+  // 在千问通道下新建，默认绑定到千问——用户在千问页面点「新建」，
+  // 想要的显然是能调千问模型的 key
+  form.channel = isQw.value ? 'qwenwork' : ''
   form.expiresAt = null
   form.note = ''
   ipError.value = ''
@@ -239,6 +290,7 @@ function openEdit(k: ApiKey) {
   form.name = k.name
   form.ipText = k.ip_allowlist.join('\n')
   form.models = [...k.model_allowlist]
+  form.channel = (k.channel || '') as '' | 'dumate' | 'qwenwork'
   form.expiresAt = k.expires_at ? dayjs(k.expires_at) : null
   form.note = k.note || ''
   ipError.value = ''
@@ -265,6 +317,7 @@ async function save() {
     name: form.name.trim(),
     ip_allowlist: items,
     model_allowlist: form.models,
+    channel: form.channel,
     note: form.note,
     expires_at: form.expiresAt ? form.expiresAt.valueOf() : null,
   }
@@ -310,4 +363,7 @@ async function copyToken() {
 }
 
 onMounted(load)
+
+// 切通道重拉：千问只显示可用于千问的 key
+watch(() => channelStore.current, load)
 </script>

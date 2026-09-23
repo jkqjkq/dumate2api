@@ -47,6 +47,15 @@ function record(entry) {
   }
 }
 
+// 请求唯一 id。用于把这一条埋点与别处的采集精确配对——目前是千问通道的
+// 积分归因（要等结算，时间戳必然对不上），后续其它异步采集也用得上。
+// 进程内自增 + 时间戳前缀：跨进程唯一即可，不需要全局唯一。
+let seq = 0;
+function newReqId() {
+  seq = (seq + 1) % 1e6;
+  return `${Date.now().toString(36)}-${seq.toString(36)}`;
+}
+
 // 从上游 usage 里取 token 数。OpenAI 风格是 prompt_tokens/completion_tokens，
 // Anthropic 风格是 input_tokens/output_tokens，Google 是 promptTokenCount/
 // candidatesTokenCount，三条路径共用这一个函数。
@@ -123,4 +132,4 @@ function read(opts = {}) {
   return { rows, total };
 }
 
-module.exports = { record, read, pickUsage, usageFromSSE, describeRequest, clientIP, LOG_DIR };
+module.exports = { record, read, pickUsage, usageFromSSE, describeRequest, clientIP, newReqId, LOG_DIR };

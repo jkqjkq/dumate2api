@@ -1,5 +1,94 @@
 <template>
   <div class="page">
+    <!-- ============ 千问办公：单账号直连，没有账号池 ============ -->
+    <template v-if="isQw">
+      <PageHeader title="账号管理" sub="千问办公账号（只读）" />
+      <a-alert type="info" show-icon>
+        <template #message>千问办公为单账号直连</template>
+        <template #description>
+          <div>{{ qwAccounts?.modeNote || '千问办公的登录态由官方客户端维护，不是网页凭证账号池。' }}</div>
+          <div class="mt-1">
+            这里的账号不能在本页增删——需要换账号请打开千问办公客户端登录。
+            多账号支持待接入后，本页会开放添加功能。
+          </div>
+        </template>
+      </a-alert>
+
+      <a-alert
+        v-if="qwAccounts && !qwAccounts.count"
+        type="warning"
+        show-icon
+        class="mt-4"
+        :message="qwAccounts.error || '没有读到千问账号，请确认客户端已登录'"
+      />
+
+      <a-row v-else-if="qwAccounts" :gutter="[16, 16]" class="mt-4">
+        <a-col v-for="a in qwAccounts.accounts" :key="a.id" :span="12">
+          <a-card :bordered="false" class="h-full">
+            <div class="flex items-start justify-between">
+              <div>
+                <div class="font-medium">
+                  {{ a.name || '未命名' }}
+                  <a-tag color="cyan" class="ml-1">千问办公</a-tag>
+                  <a-tag v-if="a.active" color="blue" class="ml-1">当前</a-tag>
+                </div>
+                <div class="text-xs text-slate-400 mt-1">
+                  <template v-if="a.username">ID {{ a.username }} · </template>
+                  {{ a.tier || '—' }}
+                </div>
+              </div>
+              <a-tag :color="a.usable ? 'green' : 'red'">
+                {{ a.usable ? '可用' : '需重新登录' }}
+              </a-tag>
+            </div>
+
+            <a-descriptions :column="1" size="small" bordered class="mt-3">
+              <a-descriptions-item label="邮箱">
+                <span class="break-all text-xs">{{ a.email || '—' }}</span>
+              </a-descriptions-item>
+              <a-descriptions-item label="套餐">
+                {{ a.planName || '—' }}
+              </a-descriptions-item>
+              <a-descriptions-item label="access token 到期">
+                {{ a.tokenExpiresAt ? dateText(a.tokenExpiresAt) : '—' }}
+              </a-descriptions-item>
+              <a-descriptions-item label="refresh token 到期">
+                <span :class="a.refreshExpired ? 'text-red-500' : ''">
+                  {{ a.refreshExpiresAt ? dateText(a.refreshExpiresAt) : '—' }}
+                </span>
+              </a-descriptions-item>
+            </a-descriptions>
+
+            <div v-if="a.wallets" class="mt-3 grid grid-cols-3 gap-2">
+              <div class="qw-pool">
+                <div class="qw-pool-label">每日免费</div>
+                <div class="qw-pool-value num text-cyan-400">{{ fmt(a.wallets.daily) }}</div>
+              </div>
+              <div class="qw-pool">
+                <div class="qw-pool-label">月度积分</div>
+                <div class="qw-pool-value num">{{ fmt(a.wallets.monthly) }}</div>
+              </div>
+              <div class="qw-pool">
+                <div class="qw-pool-label">长期积分</div>
+                <div class="qw-pool-value num">{{ fmt(a.wallets.longterm) }}</div>
+              </div>
+            </div>
+
+            <a-alert
+              v-if="a.refreshExpired"
+              type="warning"
+              show-icon
+              class="mt-3"
+              message="refresh token 已过期"
+              description="access token 到期后将无法自动续期，请重开千问办公客户端重新登录。"
+            />
+          </a-card>
+        </a-col>
+      </a-row>
+    </template>
+
+    <!-- ============ 百度搭子：原有页面 ============ -->
+    <template v-else>
     <PageHeader title="账号管理" sub="网页凭证账号池：签到、抽奖、积分与模型轮询" />
 
     <a-alert type="info" show-icon>
@@ -108,6 +197,85 @@
       </a-row>
     </a-card>
 
+    <!-- 任务执行记录：**常驻显示**，不是仅在跑完后的提示里出现。
+         要回答「哪个账号、跑了什么任务、什么时候、真实花了多少积分」，
+         这些是既成事实，刷新页面也该看得到。 -->
+    <a-card :bordered="false" class="mt-4">
+      <template #title>
+        <span class="font-medium">任务执行记录</span>
+        <a-tag v-if="taskRuns.length" class="ml-2">{{ taskRuns.length }} 条</a-tag>
+      </template>
+      <template #extra>
+        <a-space>
+          <a-button size="small" :loading="loadingRuns" @click="loadRuns">刷新</a-button>
+          <a-button size="small" type="primary" :loading="runningTasks" @click="runTasks">跑任务</a-button>
+        </a-space>
+      </template>
+
+      <a-empty v-if="!taskRuns.length" description="还没有执行记录。点「跑任务」后会显示在这里。" />
+      <a-table
+        v-else
+        size="small"
+        :data-source="taskRuns"
+        :columns="runColumns"
+        row-key="rowKey"
+        :pagination="{ pageSize: 15, size: 'small', showSizeChanger: false }"
+      >
+        <template #bodyCell="{ column, record }">
+          <template v-if="column.key === 'ts'">
+            <span class="text-xs">{{ dateText(record.ts) }}</span>
+          </template>
+          <template v-else-if="column.key === 'account'">
+            <span class="text-xs">{{ record.account || record.account_id }}</span>
+          </template>
+          <template v-else-if="column.key === 'title'">
+            <div class="text-xs">
+              {{ record.title }}
+              <a-tag v-if="record.noop" color="default" class="ml-1">无事可做</a-tag>
+              <a-tag v-else-if="!record.ok" color="red" class="ml-1">失败</a-tag>
+              <a-tag v-else-if="record.already" color="default" class="ml-1">已发放</a-tag>
+              <a-tag v-else-if="record.ok" color="green" class="ml-1">完成</a-tag>
+            </div>
+            <div v-if="record.error" class="text-xs text-red-500 mt-1">{{ record.error }}</div>
+            <!-- 执行方式：说清这个任务是靠什么动作完成的 -->
+            <div class="text-xs text-slate-400 mt-1">
+              <template v-if="record.via === 'query-then-complete'">发消息 + 上报</template>
+              <template v-else-if="record.via === 'complete-only'">仅上报</template>
+              <template v-if="record.task_type"> · {{ record.task_type }}</template>
+            </div>
+          </template>
+          <template v-else-if="column.key === 'ms'">
+            <span v-if="record.ms != null" class="text-xs">{{ fmtMs(record.ms) }}</span>
+            <span v-else class="text-slate-400">—</span>
+            <div v-if="record.model_ms != null" class="text-xs text-slate-400">
+              发消息 {{ fmtMs(record.model_ms) }}
+            </div>
+          </template>
+          <template v-else-if="column.key === 'points'">
+            <!-- 真实积分：余额差实测。负数是发消息消耗，正数是奖励到账 -->
+            <template v-if="record.points_delta !== null && record.points_delta !== undefined">
+              <span
+                class="text-xs font-medium"
+                :class="record.points_delta > 0 ? 'text-green-600' : (record.points_delta < 0 ? 'text-amber-600' : 'text-slate-400')"
+              >
+                {{ record.points_delta > 0 ? '+' : '' }}{{ record.points_delta }}
+              </span>
+              <div
+                v-if="record.points_before !== null && record.points_after !== null"
+                class="text-xs text-slate-400"
+              >
+                {{ fmt(record.points_before) }} → {{ fmt(record.points_after) }}
+              </div>
+              <div v-if="record.expected_points" class="text-xs text-slate-400">
+                声明奖励 {{ record.expected_points }}
+              </div>
+            </template>
+            <span v-else class="text-slate-400">—</span>
+          </template>
+        </template>
+      </a-table>
+    </a-card>
+
     <a-card title="任务与抽奖" :bordered="false" class="mt-4">
       <div class="flex items-center justify-between mb-3">
         <span class="text-xs text-slate-500">
@@ -123,11 +291,17 @@
 
       <a-alert
         v-if="lastRun"
-        type="success"
+        :type="lastRun.includes('异常') || lastRun.includes('失败') ? 'warning' : 'success'"
         show-icon
         class="mb-3"
         :message="lastRun"
-      />
+      >
+        <template v-if="taskRunDetail.length" #description>
+          <ul class="pl-4 mb-0 text-xs">
+            <li v-for="(l, i) in taskRunDetail" :key="i">{{ l }}</li>
+          </ul>
+        </template>
+      </a-alert>
 
       <div class="flex items-center justify-between mb-3 p-3 bg-slate-50 rounded">
         <div>
@@ -465,15 +639,37 @@
         </template>
       </a-spin>
     </a-drawer>
+    </template>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import PageHeader from '@/components/PageHeader.vue'
 import { message } from 'ant-design-vue'
 import client from '@/api/client'
-import type { WebAccount, AccountStatus, PoolData, PoolAccount } from '@/api/webaccounts'
+import { channelStore } from '@/stores/channel'
+import { qwenworkApi } from '@/api/qwenwork'
+import type { QwAccount } from '@/api/qwenwork'
+import type { WebAccount, AccountStatus, PoolData, PoolAccount, TaskRunRow } from '@/api/webaccounts'
+
+// 千问办公：单账号直连，没有账号池。这里只读展示当前账号。
+const isQw = computed(() => channelStore.current === 'qwenwork')
+const qwAccounts = ref<{ mode: string; modeNote: string; count: number; accounts: QwAccount[]; error: string } | null>(null)
+
+async function loadQw() {
+  try {
+    const { data } = await qwenworkApi.accounts()
+    qwAccounts.value = data
+  } catch (e: any) {
+    qwAccounts.value = {
+      mode: 'single', modeNote: '', count: 0, accounts: [],
+      error: e?.message || '读取千问账号失败',
+    }
+  }
+}
+
+const dateText = (ts: number) => new Date(ts).toLocaleString('zh-CN')
 
 const accounts = ref<WebAccount[]>([])
 const loginUrl = ref('')
@@ -494,6 +690,38 @@ const runningTasks = ref(false)
 const loadingTasks = ref(false)
 const drawing = ref(false)
 const lastRun = ref('')
+// 最近一次跑任务的逐条明细（任务名 / 耗时 / 真实积分）
+const taskRunDetail = ref<string[]>([])
+
+// 任务执行历史：**常驻列表**，进页面就加载，跑完自动刷新。
+// 与「跑完后的提示条」是两回事——提示条是本次反馈，列表是历史事实。
+const taskRuns = ref<TaskRunRow[]>([])
+const loadingRuns = ref(false)
+
+const runColumns = [
+  { title: '执行时间', key: 'ts', width: '16%' },
+  { title: '账号', key: 'account', width: '13%' },
+  { title: '任务', key: 'title' },
+  { title: '耗时', key: 'ms', width: '12%' },
+  { title: '真实积分', key: 'points', width: '16%' },
+]
+
+async function loadRuns() {
+  loadingRuns.value = true
+  try {
+    const { data } = await client.get('/web-accounts/tasks/runs?limit=200')
+    // rowKey：ts 可能撞（同一毫秒多条），补上任务 id 与序号
+    taskRuns.value = (data.rows || []).map((r: TaskRunRow, i: number) => ({
+      ...r,
+      rowKey: `${r.ts}-${r.task_id ?? ''}-${i}`,
+    }))
+  } catch (e) { /* 取不到就保持原列表，不覆盖成空 */ } finally {
+    loadingRuns.value = false
+  }
+}
+
+// 任务耗时：秒/毫秒自动切换
+const fmtMs = (ms: number) => (ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`)
 const sched = ref<any>(null)
 const schedMinutes = ref(30)
 const schedSaving = ref(false)
@@ -584,6 +812,8 @@ async function load() {
     pool.value = p
   } catch (e) { /* 忽略 */ }
   await loadTasks()
+  // 执行历史是既成事实，进页面就该看到，不依赖「刚跑过」
+  await loadRuns()
 }
 
 async function loadTasks() {
@@ -654,6 +884,24 @@ async function runTasks() {
     } else {
       lastRun.value = parts.join('，') + (skipped ? `；${skipped} 个需手动` : '')
     }
+    // 账号级异常透传：不显示的话代码炸了也只会看到「没有可自动完成的任务」
+    if (data.errors?.length) {
+      lastRun.value += `；异常：${data.errors.join('；')}`
+    }
+    // 每个任务的明细：跑了什么、耗时、真实积分
+    const lines: string[] = []
+    for (const r of data.results) {
+      for (const t of r.results ?? []) {
+        const ms = t.ms != null ? `，耗时 ${(t.ms / 1000).toFixed(1)}s` : ''
+        const pd = typeof t.delta === 'number'
+          ? (t.delta > 0 ? `，+${t.delta} 积分` : t.delta < 0 ? `，${t.delta} 积分（发消息消耗）` : '')
+          : ''
+        lines.push(`${r.name || r.account_id} · ${t.title}${ms}${pd}${t.error ? '，失败：' + t.error : ''}`)
+      }
+    }
+    if (lines.length) taskRunDetail.value = lines
+    // 跑完立刻刷新常驻列表：提示条是本次反馈，列表要跟上最新事实
+    await loadRuns()
     await loadTasks()
   } catch (e: any) {
     message.error(e?.response?.data?.error || '跑任务失败')
@@ -855,6 +1103,34 @@ async function openDetail(a: WebAccount) {
 }
 
 onMounted(async () => {
+  // 按当前通道初始化：顶栏已切到千问时不该去拉搭子的网页账号
+  if (isQw.value) { await loadQw(); return }
+  await Promise.all([load(), loadLoginInfo()])
+})
+
+// 切通道重拉
+watch(() => channelStore.current, async () => {
+  if (isQw.value) { await loadQw(); return }
   await Promise.all([load(), loadLoginInfo()])
 })
 </script>
+
+<style scoped>
+/* 千问账号卡里的积分池小卡 */
+.qw-pool {
+  padding: 8px 10px;
+  border: 1px solid var(--lab-border);
+  border-radius: 8px;
+  background: var(--lab-surface-2);
+}
+.qw-pool-label {
+  font-size: 11px;
+  color: var(--lab-text-mute);
+  margin-bottom: 2px;
+}
+.qw-pool-value {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--lab-text);
+}
+</style>

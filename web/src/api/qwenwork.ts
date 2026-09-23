@@ -28,6 +28,12 @@ export interface QwCredits {
    */
   limit: number
   limitSource: 'observed' | 'config-lower-bound'
+  /**
+   * 每日免费额度的**配置上限**（默认 100）。接口不返回分母，
+   * 这个值来自配置——界面标注「/ 100」时必须说明来源，否则额度政策一变
+   * 就没人知道数字是错的。
+   */
+  dailyCap: number
   /** 当天观测到的每日额度峰值 */
   peak: number
   /** true = 峰值已追平/超过配置值（已观测到接近满额状态），消耗值可信 */
@@ -58,8 +64,107 @@ export interface QwModel {
   prefixed: string
 }
 
+/** 归因里附带的账号信息（千问是单账号直连，但字段留着方便以后扩展） */
+export interface QwAccountInfo {
+  id: string
+  name: string
+  tier: string
+  planId: string
+}
+
+/** 千问登录态（只读）。来自官方客户端的 auth-v2.dat */
+export interface QwLogin {
+  ok: boolean
+  error: string
+  file: string | null
+  fileStat: { size: number; mtime: number } | null
+  machineId: string
+  account: {
+    id: string
+    name: string
+    username: string
+    email: string
+    tier: string
+    planName: string
+    planId: string
+    planSubscriptionActive: boolean
+    planNextDueDate: string | null
+    isBiz: boolean
+    orgName: string | null
+    entitlements: {
+      pageQuota?: number
+      monthRequests?: number
+      monthTraffic?: string
+    } | null
+  } | null
+  token: {
+    accessExpiresAt: number | null
+    refreshExpiresAt: number | null
+    accessExpired: boolean
+    refreshExpired: boolean
+  }
+  ready: boolean
+  wasm: string | null
+}
+
+/** 积分逐笔记录（来自归因历史） */
+export interface QwCreditRecord {
+  ts: number
+  req_id: string
+  model: string
+  ms: number | null
+  free: number
+  paid: number
+  total: number
+  pool: 'daily' | 'paid' | 'none'
+  concurrent: boolean
+  balance: { daily: number; monthly: number; longterm: number } | null
+  account: QwAccountInfo | null
+}
+
+/** 千问账号（当前为单账号，结构留多账号扩展） */
+export interface QwAccount {
+  id: string
+  name: string
+  username: string
+  email: string
+  tier: string
+  planName: string
+  active: boolean
+  usable: boolean
+  tokenExpiresAt: number | null
+  refreshExpiresAt: number | null
+  refreshExpired: boolean
+  wallets: { daily: number; monthly: number; longterm: number; total: number } | null
+}
+
 export const qwenworkApi = {
   credits: () => client.get<QwCredits>('/qwenwork/credits'),
   daily: (days = 14) => client.get<{ days: number; rows: QwDailyRow[] }>(`/qwenwork/credits/daily?days=${days}`),
   models: () => client.get<{ models: QwModel[]; error: string }>('/qwenwork/models'),
+  status: () => client.get<{
+    ready: boolean; loggedIn: boolean; error: string;
+    wasm: string | null;
+    account: string; tier: string; planId: string;
+    tokenExpiresAt: string | null;
+    refreshExpiresAt: string | null;
+    refreshExpired: boolean;
+  }>('/qwenwork/status'),
+  // 登录态详情（只读）
+  login: () => client.get<QwLogin>('/qwenwork/account'),
+  // 积分逐笔明细
+  creditRecords: (limit = 100) =>
+    client.get<{
+      limit: number
+      rows: QwCreditRecord[]
+      window: { free: number; paid: number; total: number; requests: number }
+    }>(`/qwenwork/credits/records?limit=${limit}`),
+  // 账号列表（当前单账号，mode='single'）
+  accounts: () => client.get<{
+    mode: 'single' | 'multi'
+    modeNote: string
+    count: number
+    accounts: QwAccount[]
+    error: string
+  }>('/qwenwork/accounts'),
 }

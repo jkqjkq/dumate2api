@@ -18,6 +18,40 @@ function clampInt(raw, def, min, max) {
   return Math.min(max, Math.max(min, n));
 }
 
+/**
+ * 给千问通道的行附上积分消耗明细。
+ *
+ * 搭子靠余额游标（points-cursor）算扣费，千问的余额在另一个池子里
+ * （qwenwork.cn/user/wallets），所以是两套。这里按 **req_id** 精确配对——
+ * 归因要等 1.5s 结算，ts 必然晚于埋点，靠时间猜会把同秒内的请求串账。
+ *
+ * 分不清「免费 / 付费」时如实留空，而不是归到默认池：
+ * 并发请求的差值里可能混了别人的消耗（capture 已标 concurrent）。
+ */
+function attachQwCredits(rows) {
+  const credits = require('../../qwenwork/credits');
+  const idx = credits.indexByReqId();
+  return rows.map((r) => {
+    if (r.channel !== 'qwenwork') return r;
+    const c = idx.get(r.req_id);
+    if (!c) return r; // 还没结算完 / 采集失败：字段缺省，界面显示「—」
+    return {
+      ...r,
+      qw_free: c.free,
+      qw_paid: c.paid,
+      qw_total: c.total,
+      // 哪个池子被扣的：daily=每日免费额度，paid=月度/长期（付费）
+      qw_pool: c.pool,
+      // 与相邻请求并发时差值可能含别人消耗，界面要标出来
+      qw_concurrent: !!c.concurrent,
+      // 请求结束后的余额快照，便于核对
+      qw_balance: c.balance || null,
+      // 消耗了哪个千问账号。千问是单账号直连，记一次即可
+      qw_account: c.account || null,
+    };
+  });
+}
+
 const routes = [
   {
     // 分页列表。最新的在前。
@@ -29,11 +63,20 @@ const routes = [
       const offset = clampInt(q('offset') && decodeURIComponent(q('offset')), 0, 0, 10_000_000);
       const days = clampInt(q('days') && decodeURIComponent(q('days')), 7, 1, 90);
       const type = q('status') ? decodeURIComponent(q('status')) : '';
+      // 通道筛选：dumate / qwenwork；缺省或未知值 = 全部通道
+      const chRaw = q('channel') ? decodeURIComponent(q('channel')) : '';
+      const ch = chRaw === 'dumate' || chRaw === 'qwenwork' ? chRaw : '';
 
       // 过滤语义：all=全部；ok=仅成功（2xx/3xx）；err=仅失败（4xx/5xx/0=中断）
+      // 通道语义：历史记录没有 channel 字段，归入搭子——分通道埋点上线前
+      // 只有搭子一条通道，单列「未标注」会让用户切到搭子时数字凭空变小。
       const since = Date.now() - days * 86400000;
       const filter = (r) => {
         if (r.ts < since) return false;
+        if (ch) {
+          const eff = r.channel || 'dumate';
+          if (eff !== ch) return false;
+        }
         if (type === 'ok') return r.status >= 200 && r.status < 400;
         if (type === 'err') return r.status >= 400 || r.status === 0;
         return true;
@@ -46,10 +89,12 @@ const routes = [
       return sendJSON(res, 200, {
         // 附上实测扣费（余额差）。没有游标的行如实留空——
         // 第一条请求没有参照点，补 0 会被读成「这条没花钱」
-        rows: pointsCursor.attachCosts(rows, allInWindow),
+        // 千问的行另按 req_id 附积分明细（两套账，见 attachQwCredits）
+        rows: attachQwCredits(pointsCursor.attachCosts(rows, allInWindow)),
         total,
         limit,
         offset,
+        channel: ch,
         // 提示数据源滚动：日志超 32MB 会轮转，太老的记录可能已被移到 .1
         rotated_file: `${reqlog.LOG_DIR}\\requests.jsonl.1`,
         note: '记录由网关逐条落盘，最多保留 32MB，最老的记录可能已轮转删除。',

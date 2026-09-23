@@ -11,8 +11,9 @@ export interface UsageToday {
   output_tokens: number
   stream_count: number
   models: Array<{ model: string; tokens: number }>
-  consumed_points: number
-  point_records: number
+  // 只有搭子有上游积分账单；切到千问办公时这两项为 null
+  consumed_points: number | null
+  point_records: number | null
 }
 
 export interface UsageCards {
@@ -71,12 +72,14 @@ export interface UsagePointsAccount {
 
 export interface UsageOverview {
   days: number
+  /** 服务端实际应用的通道筛选（'' = 全部通道） */
+  channel: string
   cards: UsageCards
   daily: UsageDaily[]
   by_model: UsageByModel[]
   /**
-   * 按通道聚合。id 为 'untagged' 的是 channel 字段上线前的历史记录——
-   * 不并入任一通道，否则搭子的历史数字会凭空变大。
+   * 按通道聚合。仅在「全部通道」时返回——已按单通道过滤时为空数组，
+   * 因为那时只会得到一行自己的数据。
    */
   by_channel: UsageByChannel[]
   by_key: UsageByKey[]

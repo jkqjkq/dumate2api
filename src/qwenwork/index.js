@@ -42,7 +42,7 @@ function status() {
   };
 }
 
-async function send(payload, onChunk) {
+async function send(payload, onChunk, opts = {}) {
   const doc = await chat.ensureAuth();
   const modelKey = chat.resolveModelKey(payload && payload.model);
   const bodyJson = chat.buildBody(modelKey, payload);
@@ -60,10 +60,19 @@ async function send(payload, onChunk) {
   const startedAt = Date.now();
   const wasConcurrent = inFlight > 0;
   inFlight++;
+  // 账号快照提前取好：capture 是异步队列，延后 require 可能撞上 credentials
+  // 模块的初始化时序（DPAPI/AES-GCM 在首次 decryptAuth 时才建表）。
+  // 失败也无所谓——没有账号信息就少一个字段，不阻断归因
+  let accountSnap = null;
+  try {
+    const u = (credentials.decryptAuth().user || {});
+    accountSnap = { id: u.id || '', name: u.name || '', tier: u.tier || '', planId: u.planId || '' };
+  } catch { /* 没有凭证信息就让字段缺省 */ }
   const settle = () => {
     inFlight = Math.max(0, inFlight - 1);
-    // capture 内部已负责落盘（含并发标记由下面传入），这里只做调度
-    credits.capture({ model: modelKey, startedAt, concurrent: wasConcurrent })
+    // reqId 由调用方（server.js）生成，与请求埋点同源：归因要等结算，
+    // 时间戳对不上，只有这个键能把两边精确配对
+    credits.capture({ model: modelKey, startedAt, reqId: opts.reqId, concurrent: wasConcurrent, account: accountSnap })
       .catch(() => { /* 采集失败绝不影响已发出的响应 */ });
   };
 
@@ -144,4 +153,8 @@ async function listModels() {
   return constants.FALLBACK_MODELS.slice();
 }
 
-module.exports = { warmup, status, send, listModels, chatCompletion: (p) => send(p), chatCompletionStream: (p, cb) => send(p, cb) };
+module.exports = {
+  warmup, status, send, listModels,
+  chatCompletion: (p, opts) => send(p, undefined, opts),
+  chatCompletionStream: (p, cb, opts) => send(p, cb, opts),
+};

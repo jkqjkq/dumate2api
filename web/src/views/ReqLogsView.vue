@@ -12,6 +12,8 @@
         </template>
       </template>
       <template #actions>
+        <!-- 通道跟随顶栏的全局切换，不另设选择器 -->
+        <a-tag :color="isQw ? 'cyan' : 'blue'" class="mr-1">{{ chLabel }}</a-tag>
         <a-select
           v-if="tab === 'gateway'"
           v-model:value="filterStatus"
@@ -40,7 +42,8 @@
 
     <a-tabs v-model:activeKey="tab" @change="onTabChange">
       <a-tab-pane key="gateway" tab="网关请求" />
-      <a-tab-pane key="points" tab="积分消费明细" />
+      <!-- 「积分消费明细」是搭子上游的计费账单，千问没有这份数据 -->
+      <a-tab-pane v-if="!isQw" key="points" tab="积分消费明细" />
     </a-tabs>
 
     <a-card v-if="tab === 'gateway'" :bordered="false" class="mb-4">
@@ -64,10 +67,13 @@
           </template>
           <template v-else-if="column.key === 'channel'">
             <!-- 历史记录没有 channel 字段（分通道之前产生的），如实显示「—」
-                 而不是默认成搭子——那会让搭子的历史数字凭空变大 -->
+                 而不是默认成搭子——那会让搭子的历史数字凭空变大。
+                 服务端过滤时把它们算进搭子，但这里仍标注来源，不伪造字段 -->
             <a-tag v-if="record.channel === 'qwenwork'" color="cyan">千问</a-tag>
             <a-tag v-else-if="record.channel === 'dumate'" color="blue">搭子</a-tag>
-            <span v-else class="text-xs text-slate-400">—</span>
+            <a-tooltip v-else title="分通道埋点上线前的记录">
+              <a-tag color="default">搭子*</a-tag>
+            </a-tooltip>
           </template>
           <template v-else-if="column.key === 'model'">
             <div class="text-xs">{{ record.model || '—' }}</div>
@@ -91,7 +97,24 @@
             <div class="text-xs text-slate-400">{{ uaShort(record.ua) }}</div>
           </template>
           <template v-else-if="column.key === 'points'">
-            <span v-if="record.points_delta !== undefined" class="text-xs" :class="record.points_delta > 0 ? 'text-green-600' : 'text-slate-600'">
+            <!-- 千问通道：扣的是千问自己的积分池，与搭子的余额游标是两套账。
+                 按 req_id 精确配对，归因要等结算，刚发出的请求可能还没值 -->
+            <template v-if="record.channel === 'qwenwork'">
+              <span v-if="record.qw_total !== undefined" class="text-xs">
+                <span :class="record.qw_pool === 'daily' ? 'text-cyan-500' : 'text-blue-500'">
+                  {{ fmtQw(record.qw_total) }}
+                </span>
+                <div class="text-xs text-slate-400">
+                  {{ poolLabel(record.qw_pool) }}
+                  <a-tooltip v-if="record.qw_concurrent" title="与相邻请求并发，差值可能含其它请求的消耗">
+                    <span class="text-orange-500">· 并发</span>
+                  </a-tooltip>
+                </div>
+              </span>
+              <span v-else class="text-xs text-slate-400">—</span>
+            </template>
+            <!-- 搭子通道：余额游标差 -->
+            <span v-else-if="record.points_delta !== undefined" class="text-xs" :class="record.points_delta > 0 ? 'text-green-600' : 'text-slate-600'">
               {{ record.points_delta > 0 ? '+' : '' }}{{ record.points_delta }}
             </span>
             <span v-else class="text-xs text-slate-400">—</span>
@@ -171,7 +194,7 @@
           <div class="detail-value">
             <a-tag v-if="detail.channel === 'qwenwork'" color="cyan">千问办公</a-tag>
             <a-tag v-else-if="detail.channel === 'dumate'" color="blue">百度搭子</a-tag>
-            <span v-else class="text-slate-400">— （分通道前的记录）</span>
+            <span v-else class="text-slate-400">百度搭子（分通道前的记录）</span>
           </div>
 
           <div class="detail-label">状态码</div>
@@ -193,7 +216,42 @@
 
           <div class="detail-label">实际扣费</div>
           <div class="detail-value">
-            <template v-if="detail.points_delta !== undefined">
+            <!-- 千问：扣的是千问自己的池子（免费每日额度 / 付费月度长期），
+                 与搭子的余额游标是两套账，必须分开显示 -->
+            <template v-if="detail.channel === 'qwenwork'">
+              <template v-if="detail.qw_total !== undefined">
+                {{ fmtQw(detail.qw_total) }} 积分
+                <a-tag :color="detail.qw_pool === 'daily' ? 'cyan' : 'blue'" class="ml-1">
+                  {{ detail.qw_pool === 'daily' ? '每日免费额度' : (detail.qw_pool === 'paid' ? '付费积分' : '未扣费') }}
+                </a-tag>
+                <!-- 「每日免费额度」vs「付费积分」是用户明确要看的区分 -->
+                <div class="text-xs mt-1">
+                  <span class="text-cyan-500">免费 {{ fmtQw(detail.qw_free) }}</span>
+                  <span class="mx-1 text-slate-400">·</span>
+                  <span class="text-blue-500">付费 {{ fmtQw(detail.qw_paid) }}</span>
+                </div>
+                <!-- 千问是单账号直连，但显示出来便于核对「这条是不是我的号」 -->
+                <div v-if="detail.qw_account" class="text-xs text-slate-400 mt-1">
+                  账号：{{ detail.qw_account.name || '—' }}
+                  <span v-if="detail.qw_account.tier">（{{ detail.qw_account.tier }}）</span>
+                </div>
+                <div v-if="detail.qw_balance" class="text-xs text-slate-400">
+                  请求后余额：每日 {{ fmtQw(detail.qw_balance.daily) }} ·
+                  月度 {{ fmtQw(detail.qw_balance.monthly) }} ·
+                  长期 {{ fmtQw(detail.qw_balance.longterm) }}
+                </div>
+                <div v-if="detail.qw_concurrent" class="text-xs text-orange-500">
+                  与相邻请求并发，差值可能含其它请求的消耗
+                </div>
+              </template>
+              <template v-else>
+                —
+                <span class="text-xs text-slate-400">
+                  （归因要等结算，稍后刷新；或该请求未产生扣费）
+                </span>
+              </template>
+            </template>
+            <template v-else-if="detail.points_delta !== undefined">
               {{ detail.points_delta > 0 ? '+' : '' }}{{ detail.points_delta }}
               <span v-if="detail.points_exact === false" class="text-xs text-orange-500">
                 （与相邻请求并发，差值可能含其它请求的消耗）
@@ -223,6 +281,7 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import PageHeader from '@/components/PageHeader.vue'
 import client from '@/api/client'
+import { channelStore, CHANNELS } from '@/stores/channel'
 import type { ReqLogRow, ReqLogsData, PointsRecord, PointsRecordsData } from '@/api/reqlogs'
 
 const data = ref<ReqLogsData | null>(null)
@@ -241,6 +300,11 @@ const filterAccount = ref<number | null>(null)
 
 const detail = ref<ReqLogRow | null>(null)
 const detailOpen = ref(false)
+
+// 当前通道。网关请求按通道在服务端过滤；「积分消费明细」是搭子上游的账单，
+// 千问没有这份数据，所以整页签在千问下隐藏。
+const isQw = computed(() => channelStore.current === 'qwenwork')
+const chLabel = computed(() => CHANNELS.find((c) => c.id === channelStore.current)?.label || channelStore.current)
 
 const statusOptions = [
   { label: '全部状态', value: 'all' },
@@ -310,6 +374,12 @@ const pagination = computed(() => ({
 
 const fmtTime = (ts: number) => new Date(ts).toLocaleString('zh-CN', { hour12: false })
 const fmtNum = (n: number) => (n || 0).toLocaleString('zh-CN')
+// 千问积分保留 4 位：实测单次消耗 0.0025，按 2 位显示会变成 0
+const fmtQw = (n: number | null | undefined) =>
+  n == null ? '—' : Number(n).toLocaleString('zh-CN', { maximumFractionDigits: 4 })
+// 扣费池的中文名：区分「每日免费额度」与「付费积分」是用户明确要看的
+const poolLabel = (p?: string) =>
+  p === 'daily' ? '每日免费' : p === 'paid' ? '付费积分' : p === 'none' ? '未扣费' : '—'
 const fmtMs = (ms: number | null | undefined) =>
   typeof ms !== 'number' ? '—' : ms >= 1000 ? `${(ms / 1000).toFixed(2)}s` : `${ms}ms`
 const compact = (n: number) => (n >= 10000 ? `${(n / 1000).toFixed(1)}k` : String(n ?? 0))
@@ -349,6 +419,9 @@ async function load() {
     const params = new URLSearchParams({
       days: String(days.value),
       status: filterStatus.value,
+      // 通道在服务端过滤：日志是滚动的，前端筛只能筛掉当前页的行，
+      // 分页总数仍是全通道的，两者会对不上
+      channel: isQw.value ? 'qwenwork' : 'dumate',
       limit: String(pageSize),
       offset: String((page.value - 1) * pageSize),
     })
@@ -396,6 +469,19 @@ watch([days, filterAccount], () => {
   if (tab.value !== 'points') return
   pointsPage.value = 1
   loadPoints()
+})
+
+// 切通道：日志要按新通道重拉，并回到第一页——新通道的总条数不同，
+// 停在原来的页码会看到空白页
+watch(() => channelStore.current, () => {
+  page.value = 1
+  // 千问下没有「积分消费明细」页签，若正停在那页则切回网关请求
+  if (isQw.value && tab.value === 'points') {
+    tab.value = 'gateway'
+    load()
+    return
+  }
+  load()
 })
 
 onMounted(() => load())
