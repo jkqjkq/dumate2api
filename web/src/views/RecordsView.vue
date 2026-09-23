@@ -126,6 +126,19 @@
               <a-tag v-if="record.already" color="default" class="ml-1">已发放</a-tag>
               <a-tag v-if="!record.ok" color="red" class="ml-1">失败</a-tag>
               <span v-if="record.error" class="text-xs text-red-500 ml-1">{{ record.error }}</span>
+              <!-- 执行细节：怎么跑的（发消息+上报 / 仅上报）、耗时、声明奖励 -->
+              <div class="text-xs text-slate-400 mt-1">
+                <span v-if="record.via === 'query-then-complete'">发消息+上报</span>
+                <span v-else-if="record.via === 'complete-only'">仅上报</span>
+                <span v-else-if="record.via === 'noop'">无事可做</span>
+                <template v-if="record.ms != null">
+                  <span class="mx-1">·</span>耗时 {{ fmtMs(record.ms) }}
+                  <span v-if="record.model_ms != null" class="opacity-70">（发消息 {{ fmtMs(record.model_ms) }}）</span>
+                </template>
+                <template v-if="record.expected_points">
+                  <span class="mx-1">·</span>声明奖励 {{ record.expected_points }} 积分
+                </template>
+              </div>
             </template>
             <template v-else-if="record.type === 'draw'">
               <template v-if="record.prize">
@@ -214,6 +227,8 @@ const typeColor = (t: string) =>
     : t === 'grant' ? 'cyan' : 'default'
 
 const fmtNum = (n: number) => n.toLocaleString('zh-CN', { maximumFractionDigits: 2 })
+// 任务耗时：秒/毫秒自动切换
+const fmtMs = (ms: number) => (ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`)
 
 // 「今日已签」不等于这次发了分：签到是幂等的，已签就不再打发放接口，
 // 所以这行没有本次发放金额。当天额度通常已由服务端在 00:00 自动发过，

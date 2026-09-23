@@ -550,8 +550,18 @@ const routes = [
           INVITATION: '需要真人注册',
           INVITED: '需要他人的邀请码',
         },
-        runs: taskRunner.recentRuns(20),
+        runs: taskRunner.recentRuns(50),
       });
+    },
+  },
+  {
+    // 任务执行历史（常驻列表用）。与 /tasks 里的 runs 同源，
+    // 但独立成一个接口，便于列表单独刷新而不必重算各账号的任务状态。
+    method: 'GET',
+    path: '/tasks/runs',
+    handler: async ({ res, req }) => {
+      const limit = Math.min(500, Math.max(1, parseInt((req.url.match(/[?&]limit=(\d+)/) || [])[1] || '100', 10) || 100));
+      return sendJSON(res, 200, { limit, rows: taskRunner.recentRuns(limit) });
     },
   },
   {
@@ -570,8 +580,12 @@ const routes = [
       }
       const done = results.reduce((s, r) => s + (r.done_count || 0), 0);
       const fail = results.reduce((s, r) => s + (r.fail_count || 0), 0);
-      require('../../admin/auth').audit('admin', 'task_run', '', `完成 ${done}，失败 ${fail}`);
-      return sendJSON(res, 200, { results, done_count: done, fail_count: fail });
+      // 账号级异常（如执行器抛错）要透传给界面：runAll 把异常吞进
+      // { ok:false, error } 里，不透传的话界面只会显示「没有可自动完成的任务」，
+      // 真实原因（代码炸了）被静默吞掉
+      const errors = results.filter((r) => r.error && !r.ok).map((r) => `${r.name || r.account_id}: ${r.error}`);
+      require('../../admin/auth').audit('admin', 'task_run', '', `完成 ${done}，失败 ${fail}${errors.length ? '，异常 ' + errors.length : ''}`);
+      return sendJSON(res, 200, { results, done_count: done, fail_count: fail, errors });
     },
   },
   {

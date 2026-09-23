@@ -15,6 +15,7 @@
 const accounts = require('./accounts');
 const web = require('./dumate-web');
 const pool = require('./web-pool');
+const records = require('./records');
 
 // 可自动完成的任务类型
 const AUTO_TYPES = new Set(['QUERY_INPUT', 'USE_SKILL']);
@@ -41,9 +42,13 @@ function appendLog(entry) {
       title: entry.title,
       via: entry.via || '',
       already: !!entry.already,
+      task_type: entry.task_type || '',
+      ms: entry.ms ?? null,
+      model_ms: entry.model_ms ?? null,
       points_delta: entry.points_delta,
       points_before: entry.points_before,
       points_after: entry.points_after,
+      expected_points: entry.expected_points ?? null,
       error: entry.error || '',
     });
   } catch (e) { /* 同上 */ }
@@ -71,6 +76,7 @@ async function runTask(account, task) {
     return { ok: false, task_id: task.task_id, title: task.title, skipped: true, error: `${task.task_type} 无法自动完成` };
   }
 
+  const startedAt = Date.now();
   // 任务奖励的积分不在接口响应里，只能用积分余额差值测。
   // 在动作前取一次快照，完成后再取一次。
   const before = await records.pointsSnapshot(account.cookie);
@@ -78,15 +84,18 @@ async function runTask(account, task) {
   // QUERY_INPUT：先发一条内容匹配的消息。这一步同时满足「用一次模型」和
   // 「内容匹配」两个条件，服务端据此认定任务已完成。
   let via = 'complete-only';
+  let modelMs = null; // 发消息耗时（任务里最慢的一步，通常是它）
   if (task.task_type === 'QUERY_INPUT') {
     const msg = buildQueryMessage(task);
+    const t0 = Date.now();
     const r = await pool.callModel(account, '/chat/completions', 'POST', {
       model: 'model-text',
       messages: [{ role: 'user', content: msg }],
       max_tokens: 64,
     });
+    modelMs = Date.now() - t0;
     if (!r.ok) {
-      return { ok: false, task_id: task.task_id, title: task.title, error: `发消息失败：${r.error || ('HTTP ' + r.status)}` };
+      return { ok: false, task_id: task.task_id, title: task.title, error: `发消息失败：${r.error || ('HTTP ' + r.status)}`, model_ms: modelMs, ms: Date.now() - startedAt };
     }
     via = 'query-then-complete';
   }
@@ -99,15 +108,22 @@ async function runTask(account, task) {
   const after = await records.pointsSnapshot(account.cookie);
   const pd = records.pointsDelta(before, after);
 
+  // 任务定义里自带「该得多少奖励」，用来对照实际到账：差着就说明
+  // 奖励是抽奖次数/其它形式，或者服务端没有按预期发
+  const expected = task.reward_points || 0;
+
   if (!c.ok) {
     // 已发放不算失败——任务本来就已经完成过
     const already = c.code === 410121 || /已发放/.test(c.error || '');
     return {
       ok: already, task_id: task.task_id, title: task.title,
-      already, via, ...pd, error: already ? '' : c.error,
+      already, via, ...pd,
+      expected, model_ms: modelMs, ms: Date.now() - startedAt,
+      task_type: task.task_type,
+      error: already ? '' : c.error,
     };
   }
-  return { ok: true, task_id: task.task_id, title: task.title, via, ...pd };
+  return { ok: true, task_id: task.task_id, title: task.title, via, ...pd, expected, model_ms: modelMs, ms: Date.now() - startedAt, task_type: task.task_type };
 }
 
 // 跑一个账号的所有可自动任务
@@ -120,12 +136,24 @@ async function runForAccount(account) {
 
   const results = [];
   for (const task of pending) {
-    const r = await runTask(account, task);
+    // 单任务失败不该炸掉整个账号的批次——一个任务抛异常，剩余任务和
+    // 其他账号就都不跑了，界面上只看到「什么都没发生」
+    let r;
+    try {
+      r = await runTask(account, task);
+    } catch (e) {
+      r = { ok: false, task_id: task.task_id, title: task.title, error: e.message };
+    }
     results.push(r);
     appendLog({
       ts: Date.now(), account_id: account.id, account: account.name,
       task_id: r.task_id, title: r.title, ok: r.ok, via: r.via,
+      task_type: r.task_type || '',
+      // 耗时：总耗时 + 其中发消息的耗时（QUERY_INPUT 任务的大头）
+      ms: r.ms ?? null, model_ms: r.model_ms ?? null,
+      // 真实积分：差值实测；expected 是任务定义声明的奖励，两者对照
       points_delta: r.delta, points_before: r.before, points_after: r.after,
+      expected_points: r.expected ?? null,
       error: r.error || '',
     });
   }
