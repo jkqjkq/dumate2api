@@ -6,8 +6,10 @@ const { googleToOpenAI, openAIToGoogle, translateStreamToGoogle } = require('./g
 const { responsesToOpenAI, openAIToResponse, translateStreamToResponses } = require('./responses');
 const { resolveMaxTokens } = require('./budget');
 const reqlog = require('./reqlog');
+const pointsCursor = require('./points-cursor');
 const modelmap = require('./modelmap');
 const keysvc = require('./keys');
+const router = require('./upstream-router');
 
 const PROXY_PORT = parseInt(process.env.DUMATE2API_PORT || '9080', 10);
 const PROXY_HOST = process.env.DUMATE2API_HOST || '127.0.0.1';
@@ -17,6 +19,7 @@ const REQUIRE_KEY = process.env.DUMATE_REQUIRE_KEY === '1';
 
 let upstreamPort = null;
 let upstreamManaged = false;
+let qwenworkUp = null; // 千问办公通道端口；null = 本次启动未就绪
 let lastDiscoveryTime = 0;
 const DISCOVERY_INTERVAL = 30000; // re-discover every 30s if port changes
 
@@ -43,6 +46,130 @@ async function ensureUpstream() {
   throw new Error('DuMate main-server not found. Is DuMate running?');
 }
 
+/**
+ * 直连通道（千问办公）的统一入口。
+ *
+ * 它不是「另一个本地 HTTP 上游」——没有端口，请求由 src/qwenwork/ 自己发到
+ * gateway.qwenwork.cn。所以这里不能直接复用 forwardToUpstream。
+ *
+ * 流式路径刻意复用现有的三个翻译器（Anthropic / Responses / Google）：它们
+ * 只需要一个会吐 `data:` 行的 EventEmitter，所以这里用 PassThrough 把
+ * provider 的回调转成等价的流，而不是把三套 SSE 状态机各重写一遍。
+ */
+async function handleDirectChannel(req, res, payload, route, ctx) {
+  const { startedAt, info, kind } = ctx;
+  const provider = require('./qwenwork');
+  const wantStream = !!payload.stream;
+
+  try {
+    if (!wantStream) {
+      const result = await provider.send(payload);
+      const out = kind === 'openai' ? result : result;
+      if (kind === 'anthropic') {
+        const anth = openAIToAnthropic(out, payload.model);
+        logRequest(req, res, startedAt, info, 200, anth.usage || null);
+        return sendJSON(res, 200, anth);
+      }
+      if (kind === 'google') {
+        logRequest(req, res, startedAt, info, 200, out.usage || null);
+        return sendJSON(res, 200, openAIToGoogle(out, payload.model));
+      }
+      const usage = out.usage || {};
+      logRequest(req, res, startedAt, info, 200, {
+        input: usage.prompt_tokens || 0,
+        output: usage.completion_tokens || 0,
+        total: usage.total_tokens || 0,
+      });
+      return sendJSON(res, 200, out);
+    }
+
+    // ---- 流式：把 provider 回调桥接成等价的上游响应流 ----
+    //
+    // 三个翻译器的契约是「喂进来一个会吐 `data:` 行的上游响应，往 res 写」。
+    // 所以这里只造一个 PassThrough 冒充上游响应，**res 原样传给翻译器**——
+    // 它是真的 http.ServerResponse，writeHead/write/end 全都齐备，
+    // 比手搓一个鸭子类型的 sink 稳得多（翻译器内部还会挂 'close' 之类的监听）。
+    // 这样三套 SSE 状态机（Anthropic 的 block 顺序、Responses 的事件序列、
+    // Google 的分片）都能原样复用，不必为直连通道各重写一遍。
+    const { PassThrough } = require('stream');
+    const shim = new PassThrough();
+
+    const done = (usage, status) => {
+      logRequest(req, res, startedAt, info, status || 200, usage || null);
+    };
+
+    // OpenAI 路径专用的延迟响应头。翻译器分支各自会 writeHead，只有
+    // OpenAI 分支没有翻译器，需要我们自己发头——且**必须推迟到第一帧**：
+    // 上游错误（如 `403 Model is not available`）是在流里才暴露的，若一进来
+    // 就 writeHead(200)，等发现是错误时头已发出，改不成 4xx，客户端只能看到
+    // 一个空的 200 —— 静默失败，最难排查的那种。
+    let writeSSEHead = null;
+
+    if (kind === 'anthropic') {
+      translateStreamToAnthropic(shim, res, payload.model, done);
+    } else if (kind === 'responses') {
+      translateStreamToResponses(shim, res, payload.model, done);
+    } else if (kind === 'google') {
+      translateStreamToGoogle(shim, res, payload.model, done);
+    } else {
+      // OpenAI 路径：无翻译，把 shim 直接接到 res。
+      // pipe 不能漏——翻译器分支是「翻译器读 shim 写 res」，OpenAI 分支没有
+      // 翻译器，不 pipe 就无人转发，客户端拿到 0 字节且流永不结束。
+      writeSSEHead = () => {
+        if (res.headersSent) return;
+        res.writeHead(200, {
+          'Content-Type': 'text/event-stream',
+          'Cache-Control': 'no-cache',
+          'Connection': 'keep-alive',
+          'Access-Control-Allow-Origin': '*',
+        });
+      };
+      shim.once('data', writeSSEHead);
+      shim.pipe(res);
+    }
+
+    (async () => {
+      try {
+        await provider.send(payload, (inner) => {
+          if (inner === '[DONE]') {
+            // 按 OpenAI 规范补发结束标记再关流。千问上游本身不发
+            // `data: [DONE]`（它用 event:finish 收尾），但客户端按规范等这个
+            // 标记；只靠流关闭会让部分客户端（如 Codex）认为响应未完成。
+            writeSSEHead && writeSSEHead();
+            shim.write('data: [DONE]\n\n');
+            shim.end();
+            return;
+          }
+          shim.write(`data: ${inner}\n\n`);
+        });
+        shim.end();
+      } catch (e) {
+        // 顺序很关键：**先 unpipe 再 end**。
+        // shim 已经 pipe 到 res，若直接 shim.end()，pipe 会把 res 一并结束
+        // （发成 200 空响应），等想回 4xx JSON 时头已发出、改不回来了。
+        try { shim.unpipe(res); } catch (e2) { /* 未 pipe */ }
+        try { shim.end(); } catch (e2) { /* 已结束 */ }
+        const status = e.statusCode || 502;
+        logRequest(req, res, startedAt, info, status, null, { error: e.message });
+        if (!res.headersSent) {
+          // 首帧前就失败：回正经的 4xx JSON，客户端能看懂
+          try {
+            sendJSON(res, status, { error: { message: e.message, type: 'api_error' } });
+          } catch (e2) { /* 已结束 */ }
+        } else {
+          // 已经吐过帧了，只能在流内收尾——不能再发 JSON 错误体，
+          // 否则客户端会在同一个流里收到半截 SSE + 一段 JSON。
+          try { res.end(); } catch (e2) { /* 已结束 */ }
+        }
+      }
+    })();
+  } catch (e) {
+    const status = e.statusCode || 502;
+    logRequest(req, res, startedAt, info, status, null, { error: e.message });
+    return sendJSON(res, status, { error: { message: e.message, type: 'api_error' } });
+  }
+}
+
 // Forward request to DuMate upstream
 //
 // callback 只允许被调用一次：上游 socket 出错（含客户端主动 destroy）时
@@ -50,19 +177,32 @@ async function ensureUpstream() {
 // 客户端永久挂在半开的流上（表现为「输出突然停止」）。
 const UPSTREAM_TIMEOUT_MS = parseInt(process.env.DUMATE_UPSTREAM_TIMEOUT_MS || '600000', 10);
 
-function forwardToUpstream(port, path, method, headers, body, callback) {
+function forwardToUpstream(portOrTarget, path, method, headers, body, callback) {
   let settled = false;
   const once = (arg) => { if (!settled) { settled = true; callback(arg); } };
 
+  // 两种调用形态：
+  //   forwardToUpstream(8980, ...)                 ← 老签名，等价于搭子 target
+  //   forwardToUpstream({host,port,basePath,...})  ← 路由后的 target
+  // 保留老签名是因为 stable/ 快照与外部调用点都按数字端口写，改签名会波及
+  // 到不该动的代码。归一化放在这里，调用方不用关心。
+  const t = (typeof portOrTarget === 'object' && portOrTarget !== null)
+    ? portOrTarget
+    : { host: '127.0.0.1', port: portOrTarget, basePath: '/api/qianfanproxy/v1', authHeader: 'Bearer nokey' };
+  const basePath = t.basePath || '/api/qianfanproxy/v1';
+
   const options = {
-    host: '127.0.0.1',
-    port: port,
-    path: `/api/qianfanproxy/v1${path}`,
+    host: t.host || '127.0.0.1',
+    port: t.port,
+    path: `${basePath}${path}`,
     method: method,
     timeout: UPSTREAM_TIMEOUT_MS,
     headers: {
       'Content-Type': 'application/json',
-      'Authorization': 'Bearer nokey',
+      // 千问通道要带它自己那把 Key；搭子是固定的 Bearer nokey。
+      // authHeader 为 null 说明 key 文件缺失，此时不塞 Authorization，
+      // 让上游回 401 —— 比在这里伪造一个空 Bearer 更容易定位。
+      ...(t.authHeader ? { 'Authorization': t.authHeader } : {}),
       ...(body ? { 'Content-Length': Buffer.byteLength(body) } : {})
     }
   };
@@ -131,11 +271,23 @@ function logRequest(req, res, startedAt, info, status, usage, extra) {
   if (res._logged) return;
   res._logged = true;
   const u = usage || { input: 0, output: 0, total: 0 };
+  const h = req.headers || {};
+  const ts = Date.now();
   reqlog.record({
-    ts: Date.now(),
+    ts,
     ms: Date.now() - startedAt,
+    // 首字延迟：从收到请求到上游吐出第一个字节。总耗时无法反映这一点——
+    // 一个 30 秒的请求可能 0.5 秒就出字、也可能 20 秒才出字，
+    // 后者才是用户感知到的「卡」。
+    first_token_ms: res._firstTokenAt ? res._firstTokenAt - startedAt : null,
     path: req._logPath || '',
+    // 通道：区分请求走的是搭子还是千问办公。不加这个字段，两侧的首字延迟
+    // 会混在同一个均值里（千问首帧实测 6.7s，搭子不是），且无法归因。
+    channel: req._channel || 'dumate',
     model: info.model || '',
+    // 映射后的模型：客户端发来的名字经 modelmap 转换后实际打给上游的值。
+    // 排查「为什么 glm-5 变成了 model-text」这类问题时要看它。
+    mapped_model: req._mappedModel || '',
     stream: !!info.stream,
     messages: info.messages || 0,
     status: status || 0,
@@ -143,12 +295,27 @@ function logRequest(req, res, startedAt, info, status, usage, extra) {
     output_tokens: u.output || 0,
     total_tokens: u.total || 0,
     ip: reqlog.clientIP(req),
+    // 客户端标识：区分 Codex / Claude Code / 其它调用方，排查兼容问题时最先看这个
+    ua: String(h['user-agent'] || '').slice(0, 200),
     // 记 id 而不是名字：名字可改，改名后按名字聚合的历史会全部对不上号。
     // 名称另存一份，便于日志直接可读。
     key_id: (req._apiKey && req._apiKey.id) || 0,
     key: (req._apiKey && req._apiKey.name) || '',
     ...(extra || {}),
   });
+
+  // 余额游标：请求结束后记一次余额，与上一次的差值就是这条请求的实际扣费。
+  // 上游账单归因不可靠（实测同一请求时间窗内有 1~3 条候选，无法唯一对应），
+  // 所以改用实测余额差。不 await——采集在响应发出后进行，不占请求延迟。
+  if (status && status < 500 && (u.input || u.output || (extra && extra.account))) {
+    pointsCursor.capture(ts, (extra && extra.account) || '');
+  }
+}
+
+// 标记首字时刻。多次调用只记第一次——流式响应会持续吐字节，
+// 我们要的是「第一个」，不是最后一个。
+function markFirstToken(res) {
+  if (!res._firstTokenAt) res._firstTokenAt = Date.now();
 }
 
 // ==================== OpenAI Compatible Endpoints ====================
@@ -159,17 +326,29 @@ async function handleOpenAIModels(req, res) {
   const cfg = modelmap.load();
   const created = Math.floor(Date.now() / 1000);
   const upstream = new Set(cfg.upstream_models);
-  sendJSON(res, 200, {
-    object: 'list',
-    data: cfg.exposed.map((id) => ({
-      id,
-      object: 'model',
-      created,
-      // 区分「上游直接认识」与「靠别名转换」——后者换名字也能用，
-      // 但前者才是上游真实模型，界面与客户端据此判断
-      owned_by: upstream.has(id) ? 'dumate' : 'dumate-proxy',
-    })),
-  });
+  const data = cfg.exposed.map((id) => ({
+    id,
+    object: 'model',
+    created,
+    // 区分「上游直接认识」与「靠别名转换」——后者换名字也能用，
+    // 但前者才是上游真实模型，界面与客户端据此判断
+    owned_by: upstream.has(id) ? 'dumate' : 'dumate-proxy',
+  }));
+
+  // 千问办公的模型带 qwen/ 前缀列出来，否则客户端无从发现这个通道
+  // （它们不在 modelmap 里——那套别名是搭子专用的）。
+  // 列不出来时静默跳过：通道不可用不该让整个 /v1/models 失败。
+  if ((process.env.DUMATE_QWENWORK_AUTOSTART || 'auto') !== 'off') {
+    try {
+      const qw = require('./qwenwork');
+      const models = await qw.listModels();
+      for (const m of router.exposedFor('qwenwork', models)) {
+        data.push({ id: m, object: 'model', created, owned_by: 'qwenwork' });
+      }
+    } catch (e) { /* 通道不可用，不列 */ }
+  }
+
+  sendJSON(res, 200, { object: 'list', data });
 }
 
 async function handleOpenAIChat(req, res) {
@@ -185,18 +364,53 @@ async function handleOpenAIChat(req, res) {
   const info = reqlog.describeRequest(reqBody);
   req._logPath = '/v1/chat/completions';
 
-  // Map model name
-  reqBody.model = mapModel(reqBody.model);
+  // 通道分流：`qwen/xxx` 走千问办公，其余走搭子。
+  // 必须在 mapModel 之前——千问的模型名（pro/flash）不在搭子的别名表里，
+  // 先过 mapModel 会被兜底成 model-text，等于把请求打到错的模型上。
+  const route = router.resolve(reqBody.model);
+  if (route.error) {
+    return sendJSON(res, 400, { error: { message: route.error, type: 'invalid_request_error' } });
+  }
+  const avail = router.availability(route.channel);
+  if (!avail.ok) {
+    return sendJSON(res, 503, {
+      error: { message: `channel ${route.channel} unavailable: ${avail.reason}`, type: 'api_error' }
+    });
+  }
+  req._channel = route.channel;
+  req._mappedModel = route.model;
+
+  if (route.target.needsModelMap) {
+    reqBody.model = mapModel(route.model);
+    req._mappedModel = reqBody.model;
+  } else {
+    reqBody.model = route.model;
+  }
 
   // 预算统一由 budget.js 判定：glm 的 reasoning 与正文共用一个 max_tokens
   // 预算，小预算会让正文被 reasoning 吃光（实测 max_tokens<=1024 时正文为空，
   // finish_reason=length）。
-  reqBody.max_tokens = resolveMaxTokens(reqBody.max_tokens);
+  // 千问办公不套这一档：实测它的推理与正文分开流（reasoning 2060 字 / 正文
+  // 96 字），机制不同，套上搭子的 32768 下限只会把小请求凭空撑大。
+  if (route.target.needsBudget) {
+    reqBody.max_tokens = resolveMaxTokens(reqBody.max_tokens);
+  }
 
-  const port = await ensureUpstream();
+  const target = route.target;
+
+  // 千问办公是直连通道（没有本地端口），走 provider 而不是转发。
+  // 在 mapModel / 预算之后、转发之前分流——它的 body 构造与搭子不同，
+  // 且要经官方 wasm 封装。
+  if (target.direct) {
+    return await handleDirectChannel(req, res, reqBody, route, { startedAt, info, kind: 'openai' });
+  }
+
+  if (target.id === 'dumate') {
+    target.port = await ensureUpstream();
+  }
   const outBody = JSON.stringify(reqBody);
 
-  const upstreamReq = forwardToUpstream(port, '/chat/completions', 'POST', {}, outBody, (upstreamRes) => {
+  const upstreamReq = forwardToUpstream(target, '/chat/completions', 'POST', {}, outBody, (upstreamRes) => {
     if (upstreamRes.fakeResponse) {
       logRequest(req, res, startedAt, info, 502, null, { error: 'upstream_unavailable' });
       return sendJSON(res, 502, { error: { message: 'DuMate upstream unavailable', type: 'api_error' } });
@@ -218,6 +432,7 @@ async function handleOpenAIChat(req, res) {
       let seen = '';
       const TAIL = 32768;
       upstreamRes.on('data', (c) => {
+        markFirstToken(res);
         seen += c.toString('utf8');
         if (seen.length > TAIL) seen = seen.slice(-TAIL);
       });
@@ -250,7 +465,10 @@ async function handleOpenAIChat(req, res) {
         });
         res.end(data);
       };
-      upstreamRes.on('data', (c) => data += c);
+      upstreamRes.on('data', (c) => {
+        markFirstToken(res);
+        data += c;
+      });
       upstreamRes.on('end', finish);
       upstreamRes.on('aborted', finish);
       upstreamRes.on('error', finish);
@@ -319,10 +537,38 @@ async function handleGoogleGenerateContent(req, res, isStream, pathModel) {
   req._logPath = '/v1beta:generateContent';
 
   const openaiReq = googleToOpenAI(googleReq);
+  req._mappedModel = openaiReq.model;
 
-  const port = await ensureUpstream();
+  // 通道分流：Google 路径的模型名来自 URL，googleToOpenAI 已把它落到
+  // openaiReq.model，所以这里与 chat 路径共用同一套解析。
+  const route = router.resolve(openaiReq.model);
+  if (route.error) {
+    return sendJSON(res, 400, { error: { message: route.error, code: 400, status: 'INVALID_ARGUMENT' } });
+  }
+  const avail = router.availability(route.channel);
+  if (!avail.ok) {
+    return sendJSON(res, 503, { error: { message: `channel ${route.channel} unavailable: ${avail.reason}`, code: 503, status: 'UNAVAILABLE' } });
+  }
+  req._channel = route.channel;
+
+  if (route.target.needsModelMap) {
+    openaiReq.model = mapModel(route.model);
+    req._mappedModel = openaiReq.model;
+  } else {
+    openaiReq.model = route.model;
+    req._mappedModel = route.model;
+  }
+  if (route.target.needsBudget) {
+    openaiReq.max_tokens = resolveMaxTokens(openaiReq.max_tokens);
+  }
+  const target = route.target;
+  if (target.direct) {
+    openaiReq.stream = isStream;
+    return await handleDirectChannel(req, res, openaiReq, route, { startedAt, info, kind: 'google' });
+  }
+  if (target.id === 'dumate') target.port = await ensureUpstream();
   const outBody = JSON.stringify(openaiReq);
-  forwardToUpstream(port, '/chat/completions', 'POST', {}, outBody, (upstreamRes) => {
+  forwardToUpstream(target, '/chat/completions', 'POST', {}, outBody, (upstreamRes) => {
     if (upstreamRes.fakeResponse) {
       logRequest(req, res, startedAt, info, 502, null, { error: 'upstream_unavailable' });
       return sendJSON(res, 502, { error: { code: 502, message: 'DuMate upstream unavailable', status: 'UNAVAILABLE' } });
@@ -389,10 +635,37 @@ async function handleOpenAIResponses(req, res) {
   req._logPath = '/v1/responses';
 
   const openaiReq = responsesToOpenAI(reqBody, isStream);
+  req._mappedModel = openaiReq.model;
 
-  const port = await ensureUpstream();
+  // 通道分流：Codex 的 responses 接口同样支持 qwen/ 前缀
+  const route = router.resolve(openaiReq.model);
+  if (route.error) {
+    return sendJSON(res, 400, { error: { message: route.error, type: 'invalid_request_error' } });
+  }
+  const avail = router.availability(route.channel);
+  if (!avail.ok) {
+    return sendJSON(res, 503, { error: { message: `channel ${route.channel} unavailable: ${avail.reason}`, type: 'api_error' } });
+  }
+  req._channel = route.channel;
+
+  if (route.target.needsModelMap) {
+    openaiReq.model = mapModel(route.model);
+    req._mappedModel = openaiReq.model;
+  } else {
+    openaiReq.model = route.model;
+    req._mappedModel = route.model;
+  }
+  if (route.target.needsBudget) {
+    openaiReq.max_tokens = resolveMaxTokens(openaiReq.max_tokens);
+  }
+  const target = route.target;
+  if (target.direct) {
+    openaiReq.stream = isStream;
+    return await handleDirectChannel(req, res, openaiReq, route, { startedAt, info, kind: 'responses' });
+  }
+  if (target.id === 'dumate') target.port = await ensureUpstream();
   const outBody = JSON.stringify(openaiReq);
-  forwardToUpstream(port, '/chat/completions', 'POST', {}, outBody, (upstreamRes) => {
+  forwardToUpstream(target, '/chat/completions', 'POST', {}, outBody, (upstreamRes) => {
     if (upstreamRes.fakeResponse) {
       logRequest(req, res, startedAt, info, 502, null, { error: 'upstream_unavailable' });
       return sendJSON(res, 502, { error: { message: 'DuMate upstream unavailable', type: 'api_error' } });
@@ -442,13 +715,42 @@ async function handleAnthropicMessages(req, res) {
 
   // Convert to OpenAI format
   const openaiReq = anthropicToOpenAI(anthropicReq);
+  req._mappedModel = openaiReq.model;
+
+  // 通道分流：与 chat 路径同一套规则，且必须在转换之后——Anthropic 请求体
+  // 的模型名在这里才落到 openaiReq.model 上。
+  const route = router.resolve(openaiReq.model);
+  if (route.error) {
+    return sendJSON(res, 400, { type: 'error', error: { type: 'invalid_request_error', message: route.error } });
+  }
+  const avail = router.availability(route.channel);
+  if (!avail.ok) {
+    return sendJSON(res, 503, { type: 'error', error: { type: 'api_error', message: `channel ${route.channel} unavailable: ${avail.reason}` } });
+  }
+  req._channel = route.channel;
+
+  if (route.target.needsModelMap) {
+    openaiReq.model = mapModel(route.model);
+    req._mappedModel = openaiReq.model;
+  } else {
+    openaiReq.model = route.model;
+    req._mappedModel = route.model;
+  }
+  if (route.target.needsBudget) {
+    openaiReq.max_tokens = resolveMaxTokens(openaiReq.max_tokens);
+  }
+  const target = route.target;
+  if (target.direct) {
+    openaiReq.stream = !!anthropicReq.stream;
+    return await handleDirectChannel(req, res, openaiReq, route, { startedAt, info, kind: 'anthropic' });
+  }
+  if (target.id === 'dumate') target.port = await ensureUpstream();
   // Ask the upstream for a usage-bearing final chunk so we can report real
   // token counts instead of zeroes. Harmless if the upstream ignores it.
   if (anthropicReq.stream) openaiReq.stream_options = { include_usage: true };
-  const port = await ensureUpstream();
   const outBody = JSON.stringify(openaiReq);
 
-  forwardToUpstream(port, '/chat/completions', 'POST', {}, outBody, (upstreamRes) => {
+  forwardToUpstream(target, '/chat/completions', 'POST', {}, outBody, (upstreamRes) => {
     if (upstreamRes.fakeResponse) {
       logRequest(req, res, startedAt, info, 502, null, { error: 'upstream_unavailable' });
       return sendJSON(res, 502, { type: 'error', error: { type: 'api_error', message: 'DuMate upstream unavailable' } });
@@ -666,6 +968,17 @@ const server = http.createServer(async (req, res) => {
         status: 'ok',
         upstream_port: upstreamPort,
         upstream_managed: upstreamManaged,
+        // 通道状态：搭子是主链路，千问是可选。分开报，便于一眼看出
+        // 「qwen/ 请求会在哪一步失败」。千问是进程内直连，没有端口，
+        // 所以报的是 wasm 版本与登录态而不是 port。
+        channels: {
+          dumate: { port: upstreamPort, ready: !!upstreamPort },
+          qwenwork: {
+            direct: true,
+            ready: !!(qwenworkUp && router.availability('qwenwork').ok),
+            wasm: qwenworkUp || null,
+          },
+        },
         service: 'dumate2api',
       });
     }
@@ -684,7 +997,9 @@ const server = http.createServer(async (req, res) => {
       let model = null;
       const hasModelRule = key && Array.isArray(key.model_allowlist) && key.model_allowlist.length > 0;
       if (hasModelRule && req.method === 'POST') {
-        const gm = url.match(/^\/v1beta\/models\/([^:/?]+):/);
+        // Google 的模型名在 URL 路径里，且**可能带通道前缀**（qwen/pro），
+        // 所以不能排除 '/'——早期写成 [^:/?]+ 会把 qwen/pro 截断成匹配失败。
+        const gm = url.match(/^\/v1beta\/models\/([^:?]+):/);
         if (gm) {
           model = decodeURIComponent(gm[1]);
         } else {
@@ -732,7 +1047,7 @@ const server = http.createServer(async (req, res) => {
 
     // ==================== Google Generative Language compatible ====================
     const googleModels = url.match(/^\/v1beta\/models$/);
-    const googleGenerate = url.match(/^\/v1beta\/models\/([^:/?]+):(generateContent|streamGenerateContent)$/);
+    const googleGenerate = url.match(/^\/v1beta\/models\/([^:?]+):(generateContent|streamGenerateContent)$/);
     if (googleModels && req.method === 'GET') {
       return await handleGoogleModels(req, res);
     }
@@ -789,6 +1104,24 @@ async function start() {
     }
   } catch (e) {
     log('⚠ Initial discovery failed:', e.message);
+  }
+  // 千问办公通道：进程内直连（经官方 wasm），**不需要拉起任何外部服务**。
+  // 早期版本走 Buddy2api（8787）中转，后来发现它的 wasm_helper.mjs 本身就是
+  // 纯 Node 脚本、Python 只是一层壳，改为直连后少一个进程、少一层鉴权。
+  // 预热失败不阻断启动：搭子是主链路，千问只是可选通道。
+  if ((process.env.DUMATE_QWENWORK_AUTOSTART || 'auto') !== 'off') {
+    try {
+      const qwmod = require('./qwenwork');
+      const qw = qwmod.warmup();
+      const st = qwmod.status();
+      qwenworkUp = st.loggedIn ? 'ready' : null;
+      log(`✓ QwenWork 通道就绪（wasm ${qw.version}，登录态 ${st.loggedIn ? '已就绪' : '缺失'}）`);
+    } catch (e) {
+      log('⚠ QwenWork 通道不可用（搭子链路不受影响）:', e.message);
+      qwenworkUp = null;
+    }
+  } else {
+    log('· QwenWork 通道已关闭（DUMATE_QWENWORK_AUTOSTART=off）');
   }
 
   server.listen(PROXY_PORT, PROXY_HOST, () => {

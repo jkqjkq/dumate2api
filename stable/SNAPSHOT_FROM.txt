@@ -1,3 +1,16 @@
+工作区快照（未提交）
+base: fbede72efd7f4d633efb4983e2b8fac86ba130dd
+fbede72 feat(usage): add a today breakdown to the usage page
+Wed Sep 23 11:50:00     2026
+
+说明：本次同步时主目录工作区是**脏的**，快照内容不等于任何单个提交：
+  - 已提交但未进上一版快照：fbede72 及 4e24925→fbede72 之间的埋点改动
+    （first_token_ms / mapped_model / ua）
+  - 未提交：points-cursor 余额游标、千问办公通道（upstream-router + qwenwork/）
+所以这里记 base 提交号 + 明确的「工作区快照」标记，而不是假装对应某个 commit。
+等这些改动提交后，下次同步可恢复成纯提交号。
+
+上一版快照来源：
 4e249256f99f3648591f9709a8837c7f211f0b9a
 4e24925 fix(admin): cache PowerShell-backed reads and widen the gateway probe
 Tue Sep 22 16:01:35     2026
