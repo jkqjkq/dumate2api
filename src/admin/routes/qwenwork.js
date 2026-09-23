@@ -9,6 +9,13 @@ const { sendJSON } = require('../router');
 let cache = { at: 0, data: null };
 const CACHE_MS = 15000;
 
+/** 免费额度每天 00:00 (+08:00) 重置——重置时刻接口给了（wallet 的 valid_to） */
+function resetAt(w) {
+  const list = w && w.expiring ? w.expiring : [];
+  for (const x of list) if (x && x.valid_to) return x.valid_to;
+  return null;
+}
+
 async function credits() {
   const c = require('../../qwenwork/credits');
   if (cache.data && Date.now() - cache.at < CACHE_MS) return cache.data;
@@ -123,19 +130,28 @@ const routes = [
         return sendJSON(res, 200, {
           ok: w.ok,
           error: w.error || '',
-          // 三池分开报：daily 是免费额度（每天重置），monthly/longterm 是付费
+          // 三个池子**平级**上报，不做「免费 vs 付费」的合并——
+          // 月度与长期性质不同（订阅套餐 vs 充值赠送），界面要能分开看。
+          wallets: [
+            { id: 'daily', label: '每日额度', kind: 'free', balance: w.daily, resetAt: resetAt(w) },
+            { id: 'monthly', label: '月度积分', kind: 'paid', balance: w.monthly, resetAt: null },
+            { id: 'longterm', label: '长期积分', kind: 'paid', balance: w.longterm, resetAt: null },
+          ],
+          // 汇总：付费 = 月度 + 长期
           free: w.daily,
           paid: w.paid,
           monthly: w.monthly,
           longterm: w.longterm,
           total: w.total,
-          // 上限来自配置而非接口，前端必须标注来源
-          limit: w.limit,
-          limitSource: 'config',
-          freeUsed: w.freeUsed,
+          // 接口不返回每日上限，所以 progress（已用/上限）无法给出。
+          // 不拿配置值反推——那是个会随政策失效的数字。
+          limit: null,
+          limitSource: 'unavailable',
+          // 今日消耗 = **经本网关**的归因累计。与「当天总消耗」是两套口径：
+          // 你在客户端/网页里的对话不经网关，不会计入这里。
+          today: { ...todayUsage(), scope: 'gateway' },
           expiring: w.expiring || [],
           fetchedAt: w.fetchedAt,
-          today: todayUsage(),
         });
       } catch (e) {
         return sendJSON(res, 200, { ok: false, error: e.message });

@@ -13,41 +13,28 @@
     <!-- 千问办公：积分卡片。它是另一套账——不消耗搭子积分、不进账号池，
          所以整块替换而不是与搭子的指标卡混排。 -->
     <template v-if="isQw">
+      <!-- 三个池子平级展示：月度与长期性质不同（订阅套餐 vs 充值赠送），
+           不能合并成一张「付费额度」卡。 -->
       <a-row :gutter="[16, 16]">
-        <a-col :span="8">
+        <a-col v-for="w in qwWallets" :key="w.id" :span="6">
           <a-card :bordered="false" class="h-full">
-            <a-statistic title="免费额度" :value="qw?.free ?? '—'" :precision="2"
-              :value-style="qw && qw.free < 20 ? 'color:#fbbf24' : ''">
+            <a-statistic :title="w.label" :value="w.balance ?? '—'" :precision="2"
+              :value-style="w.kind === 'free' && (w.balance ?? 0) < 20 ? 'color:#fbbf24' : ''">
               <template #suffix><span class="text-sm text-slate-400">积分</span></template>
             </a-statistic>
-            <div class="qw-bar">
-              <div class="qw-bar-fill" :style="{ width: qwFreePct + '%' }" />
-            </div>
             <div class="text-xs text-slate-500 mt-2">
-              <template v-if="qw">
-                今日已用 {{ qw.freeUsed.toFixed(2) }} / {{ qw.limit }}
-                <span class="text-slate-400">（上限按配置 {{ qw.limit }} 计算，接口不提供）</span>
-              </template>
-              <span v-else>—</span>
+              <a-tag :color="w.kind === 'free' ? 'green' : 'orange'" class="mr-1">
+                {{ w.kind === 'free' ? '免费' : '付费' }}
+              </a-tag>
+              <template v-if="w.resetAt">每天 00:00 重置</template>
+              <template v-else>按有效期</template>
             </div>
           </a-card>
         </a-col>
 
-        <a-col :span="8">
+        <a-col :span="6">
           <a-card :bordered="false" class="h-full">
-            <a-statistic title="付费额度" :value="qw?.paid ?? '—'" :precision="2" />
-            <div class="text-xs text-slate-500 mt-2">
-              <template v-if="qw">
-                月度 {{ qw.monthly.toFixed(2) }} · 长期 {{ qw.longterm.toFixed(2) }}
-              </template>
-              <span v-else>—</span>
-            </div>
-          </a-card>
-        </a-col>
-
-        <a-col :span="8">
-          <a-card :bordered="false" class="h-full">
-            <a-statistic title="今日消耗" :value="qw?.today.total ?? '—'" :precision="4" />
+            <a-statistic title="经本网关消耗" :value="qw?.today.total ?? '—'" :precision="4" />
             <div class="text-xs text-slate-500 mt-2">
               <template v-if="qw">
                 <a-tag :color="qw.today.paid > 0 ? 'orange' : 'green'" class="mr-1">
@@ -56,6 +43,9 @@
                 免费 {{ qw.today.free.toFixed(4) }} · 付费 {{ qw.today.paid.toFixed(4) }}
               </template>
               <span v-else>—</span>
+            </div>
+            <div v-if="qw?.today.scope === 'gateway'" class="text-xs text-slate-400 mt-1">
+              仅统计经本网关的请求；客户端/网页里的对话不计入
             </div>
           </a-card>
         </a-col>
@@ -385,10 +375,9 @@ const isQw = computed(() => channelStore.current === 'qwenwork')
 const qw = ref<QwCredits | null>(null)
 const qwDaily = ref<QwDailyRow[]>([])
 const qwInfo = computed(() => channelStore.infos['qwenwork'] || null)
-const qwFreePct = computed(() => {
-  if (!qw.value || !qw.value.limit) return 0
-  return Math.max(0, Math.min(100, (qw.value.free / qw.value.limit) * 100))
-})
+// 三个池子。后端平级返回 wallets，前端不再自己合并——「月度」与「长期」
+// 一个来自订阅套餐、一个来自充值赠送，合并成一张「付费额度」卡会丢信息。
+const qwWallets = computed(() => qw.value?.wallets || [])
 
 function fmtExpire(iso?: string | null) {
   if (!iso) return '—'
@@ -647,20 +636,6 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
-/* 千问积分：余额条。宽度按「余额 / 上限」——上限来自配置，接口不给 */
-.qw-bar {
-  height: 6px;
-  margin-top: 10px;
-  border-radius: 3px;
-  background: var(--lab-surface-3);
-  overflow: hidden;
-}
-.qw-bar-fill {
-  height: 100%;
-  border-radius: 3px;
-  background: linear-gradient(90deg, #34d399, #22d3ee);
-  transition: width 0.3s ease;
-}
 .qw-chart {
   height: 260px;
   width: 100%;

@@ -84,8 +84,13 @@ async function fetchWallets({ force = false } = {}) {
   };
   out.total = out.daily + out.monthly + out.longterm;
   out.paid = out.monthly + out.longterm;
-  out.limit = dailyLimit();
-  out.freeUsed = Math.max(0, out.limit - out.daily);
+  // 「每日已用」此前用 limit − daily 反推，但那依赖配置值（默认 100），
+  // 而**接口不返回上限**（实测 /user/wallets 只有余额、无 limit/quota 字段）。
+  // 额度政策一变这个差值就是错的，且它与「经本网关消耗」是两套口径，
+  // 摆在一起会被读成同一个数。所以这里不再反推，只保留真实余额。
+  out.limit = null;
+  out.limitSource = 'unavailable';
+  out.freeUsed = null;
   cache = { at: Date.now(), data: out };
   return out;
 }
