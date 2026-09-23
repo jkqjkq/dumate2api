@@ -11,10 +11,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 | 进程 | 端口 | 入口 | 职责 |
 |---|---|---|---|
 | DuMate 后端 | 8980 | `upstream-launcher.js` 拉起 | 真实模型链路 |
-| **稳定版网关** | 9080 | **`stable/src/server.js`** | 给 cc-switch / Codex 长期用 |
-| 开发网关 | 9082 | `src/server.js` | 开发调试 |
-| 管理端 | 9081 | `src/admin/server.js` | 管理 API（`/api/admin/*`）+ 托管 `web/dist` |
+| **稳定版网关** | 9080 | **`stable/src/server.js`** | **对外提供的稳定服务**，给 cc-switch / Codex 长期用 |
+| 开发网关 | 9082 | `src/server.js` | 开发调试（**所有改动在这里做**） |
+| 管理端 | 9083 | `src/admin/server.js` | 管理 API（`/api/admin/*`）+ 托管 `web/dist`，读 9082 |
 | 多账号网关 | 9084 | `src/web-gateway.js` | 网页凭证跑模型，多账号轮询 |
+
+> **9080 是生产实例，不是本地调试实例**：它对外持续提供服务，改动或重启会直接影响使用者。
+> 除非明确要发布新版，否则**不要改 `stable/` 下的代码、不要重启 9080**。
+> 所有开发与验证一律在 9082（界面看 9083）进行。
+> 发布新版的唯一途径：主目录验证通过后覆盖 `stable/src/` + 更新 `SNAPSHOT_FROM.txt`，再重启 9080。
+> 原来另有一个 9081 管理端，与 9083 功能完全重复，已停用——不再需要它。
 
 **两个上游通道，靠模型名前缀分流**（`src/upstream-router.js`）：
 
