@@ -1,15 +1,14 @@
 <template>
-  <div>
-    <div class="flex items-center justify-between mb-4">
-      <div>
-        <h2 class="text-lg font-medium m-0">仪表盘</h2>
-        <div class="text-xs text-slate-500 mt-1">
-          账号池健康度、上游状态与今日用量总览
-          <template v-if="lastRefresh"> · 更新于 {{ lastRefresh }}</template>
-        </div>
-      </div>
-      <a-button size="small" :loading="loading" @click="refresh(true)">刷新</a-button>
-    </div>
+  <div class="page">
+    <PageHeader title="仪表盘">
+      <template #sub>
+        账号池健康度、上游状态与今日用量总览
+        <template v-if="lastRefresh"> · 更新于 {{ lastRefresh }}</template>
+      </template>
+      <template #actions>
+        <a-button size="small" class="ghost-btn" :loading="loading" @click="refresh(true)">刷新</a-button>
+      </template>
+    </PageHeader>
 
     <!-- 顶部指标卡：数据来自 /web-accounts/dashboard（账号池）+ /stats（用量） -->
     <a-row :gutter="[16, 16]">
@@ -29,7 +28,7 @@
 
       <a-col :span="5">
         <a-card :bordered="false" class="h-full">
-          <a-statistic title="有效期内" :value="dash?.summary.valid ?? '—'" value-style="color:#52c41a">
+          <a-statistic title="有效期内" :value="dash?.summary.valid ?? '—'" value-style="color:#34d399">
             <template #suffix><span class="text-sm text-slate-400">个</span></template>
           </a-statistic>
           <div class="text-xs text-slate-500 mt-2">
@@ -46,7 +45,7 @@
           <a-statistic
             title="即将过期"
             :value="dash?.summary.expiring_soon ?? '—'"
-            :value-style="dash && dash.summary.expiring_soon > 0 ? 'color:#faad14' : ''"
+            :value-style="dash && dash.summary.expiring_soon > 0 ? 'color:#fbbf24' : ''"
           >
             <template #suffix><span class="text-sm text-slate-400">个</span></template>
           </a-statistic>
@@ -73,7 +72,7 @@
 
       <a-col :span="4">
         <a-card :bordered="false" class="h-full">
-          <a-statistic title="今日 Token" :value="todayTokensText" value-style="color:#1677ff" />
+          <a-statistic title="今日 Token" :value="todayTokensText" value-style="color:#22d3ee" />
           <div class="text-xs text-slate-500 mt-2">
             <template v-if="stats">{{ stats.today.requests }} 次请求</template>
             <span v-else>—</span>
@@ -87,7 +86,19 @@
       <a-col :span="17">
         <a-card title="近 14 天调用趋势" :bordered="false" class="h-full">
           <a-empty v-if="!daily.length" description="还没有请求记录" />
-          <div v-else ref="chartEl" style="height: 220px"></div>
+          <!-- 请求数与 Token 拆成上下两张共享 X 轴的小图，而不是叠在一张图上用双 Y 轴：
+               两个量纲的刻度对齐点是任意的，共图会凭空造出「此消彼长」的相关性。
+               小倍数保留「同一时间轴上看两条趋势」的能力，又不需要读者在两套刻度间换算。 -->
+          <template v-else>
+            <div class="trend-block">
+              <div class="trend-label">请求数</div>
+              <div ref="reqChartEl" class="trend-chart" />
+            </div>
+            <div class="trend-block">
+              <div class="trend-label">Token</div>
+              <div ref="tokChartEl" class="trend-chart" />
+            </div>
+          </template>
         </a-card>
       </a-col>
 
@@ -224,10 +235,12 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
+import PageHeader from '@/components/PageHeader.vue'
 import client from '@/api/client'
 import type { SystemStatus } from '@/api/system'
 import type { PointsData, AccountsData } from '@/api/points'
 import type { StatsSummary, DailyRow } from '@/api/stats'
+import { SERIES, INK, TOOLTIP_BASE, axisStyle, compactNum, exactNum, lineSeries } from '@/utils/chartTheme'
 
 interface DashAccount {
   id: number
@@ -322,64 +335,87 @@ echarts.use([
   DataZoomComponent, CanvasRenderer,
 ])
 
-const chartEl = ref<HTMLElement | null>(null)
-let chartInst: echarts.ECharts | null = null
+const reqChartEl = ref<HTMLElement | null>(null)
+const tokChartEl = ref<HTMLElement | null>(null)
+let reqChart: echarts.ECharts | null = null
+let tokChart: echarts.ECharts | null = null
 
-// 请求数与 Token 放同一张图：两者趋势不同步时（请求少但 Token 高）
-// 单看一条线会以为流量正常，双轴才能看出真正的负载变化。
+// 两张小倍数图共享同一套 X 轴刻度与 grid，纵向对齐后可以当作一条时间轴来读。
+// 拆开而不是双 Y 轴：双轴的刻度对齐点没有依据，会让人读出并不存在的相关性。
 function renderChart() {
-  if (!chartEl.value) return
-  if (!chartInst) chartInst = echarts.init(chartEl.value)
-
   const rows = daily.value
-  chartInst.setOption({
-    grid: { left: 48, right: 48, top: 32, bottom: 28 },
-    tooltip: {
-      trigger: 'axis',
-      valueFormatter: (v: number) => (v == null ? '—' : v.toLocaleString('zh-CN')),
+  const days = rows.map((r) => r.day.slice(5))
+  // 共享的 X 轴配置：只在下面那张显示标签，避免重复占用垂直空间
+  const baseGrid = { left: 56, right: 16, top: 8, bottom: 4 }
+  const xAxisCommon = {
+    type: 'category' as const,
+    data: days,
+    boundaryGap: false,
+    axisLine: { show: true, lineStyle: { color: INK.axis } },
+    axisTick: { show: false },
+  }
+  const tooltipCommon = {
+    ...TOOLTIP_BASE,
+    trigger: 'axis' as const,
+    axisPointer: {
+      type: 'line' as const,
+      lineStyle: { color: INK.axis, width: 1 },
     },
-    legend: { data: ['请求数', 'Token'], right: 0, top: 0, itemWidth: 12, itemHeight: 8 },
-    xAxis: {
-      type: 'category',
-      data: rows.map((r) => r.day.slice(5)),
-      boundaryGap: false,
-      axisLine: { lineStyle: { color: '#e5e7eb' } },
-      axisLabel: { color: '#94a3b8', fontSize: 11 },
-    },
-    yAxis: [
-      {
-        type: 'value', name: '请求', nameTextStyle: { color: '#94a3b8', fontSize: 11 },
-        axisLabel: { color: '#94a3b8', fontSize: 11 },
-        splitLine: { lineStyle: { color: '#f3f4f6' } },
-      },
-      {
-        type: 'value', name: 'Token', nameTextStyle: { color: '#94a3b8', fontSize: 11 },
-        axisLabel: {
-          color: '#94a3b8', fontSize: 11,
-          formatter: (v: number) => (v >= 1e6 ? (v / 1e6).toFixed(1) + 'M' : v >= 1e3 ? (v / 1e3).toFixed(0) + 'K' : v),
-        },
-        splitLine: { show: false },
-      },
-    ],
-    series: [
-      {
-        name: '请求数', type: 'line', smooth: true, symbol: 'none',
-        data: rows.map((r) => r.requests),
-        lineStyle: { color: '#fa8c16', width: 2 },
-        areaStyle: {
-          color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
-            { offset: 0, color: 'rgba(250,140,22,0.25)' },
-            { offset: 1, color: 'rgba(250,140,22,0.02)' },
-          ]),
+  }
+
+  if (reqChartEl.value) {
+    if (!reqChart) reqChart = echarts.init(reqChartEl.value)
+    reqChart.setOption({
+      grid: baseGrid,
+      tooltip: {
+        ...tooltipCommon,
+        formatter: (params: any[]) => {
+          const r = rows[params[0].dataIndex]
+          return `${r.day}<br/>请求 <b>${exactNum(r.requests)}</b>`
         },
       },
-      {
-        name: 'Token', type: 'line', smooth: true, symbol: 'none', yAxisIndex: 1,
-        data: rows.map((r) => r.total_tokens),
-        lineStyle: { color: '#1677ff', width: 2 },
+      xAxis: { ...xAxisCommon, axisLabel: { show: false } },
+      yAxis: {
+        type: 'value',
+        ...axisStyle({ formatter: (v: number) => compactNum(v) }),
       },
-    ],
-  })
+      series: [
+        lineSeries({
+          name: '请求数',
+          data: rows.map((r) => r.requests),
+          color: SERIES[0],
+          area: true,
+        }),
+      ],
+    })
+  }
+
+  if (tokChartEl.value) {
+    if (!tokChart) tokChart = echarts.init(tokChartEl.value)
+    tokChart.setOption({
+      grid: { ...baseGrid, bottom: 22 },
+      tooltip: {
+        ...tooltipCommon,
+        formatter: (params: any[]) => {
+          const r = rows[params[0].dataIndex]
+          return `${r.day}<br/>Token <b>${exactNum(r.total_tokens)}</b>`
+        },
+      },
+      xAxis: { ...xAxisCommon, axisLabel: { color: INK.muted, fontSize: 11 } },
+      yAxis: {
+        type: 'value',
+        ...axisStyle({ formatter: (v: number) => compactNum(v) }),
+      },
+      series: [
+        lineSeries({
+          name: 'Token',
+          data: rows.map((r) => r.total_tokens),
+          color: SERIES[1],
+          area: true,
+        }),
+      ],
+    })
+  }
 }
 
 async function refresh(force = false) {
@@ -411,7 +447,10 @@ async function refresh(force = false) {
   }
 }
 
-function onResize() { chartInst?.resize() }
+function onResize() {
+  reqChart?.resize()
+  tokChart?.resize()
+}
 
 onMounted(() => {
   window.addEventListener('resize', onResize)
@@ -420,7 +459,26 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   window.removeEventListener('resize', onResize)
-  chartInst?.dispose()
-  chartInst = null
+  reqChart?.dispose()
+  tokChart?.dispose()
+  reqChart = null
+  tokChart = null
 })
 </script>
+
+<style scoped>
+/* 两张小倍数图：上下贴紧、共享一条时间轴，读起来仍是一条趋势带 */
+.trend-block + .trend-block {
+  margin-top: 2px;
+}
+.trend-label {
+  font-size: 11px;
+  color: var(--lab-text-mute);
+  padding-left: 2px;
+}
+/* 高度含 X 轴标签带，避免容器把轴标签裁掉后卡片里出现内嵌滚动条 */
+.trend-chart {
+  height: 112px;
+  width: 100%;
+}
+</style>

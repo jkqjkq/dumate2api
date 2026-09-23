@@ -1,6 +1,8 @@
 <template>
-  <div>
-    <a-alert type="info" show-icon class="mb-4">
+  <div class="page">
+    <PageHeader title="账号管理" sub="网页凭证账号池：签到、抽奖、积分与模型轮询" />
+
+    <a-alert type="info" show-icon>
       <template #message>百度搭子账号管理</template>
       <template #description>
         <div>签到、抽奖、积分都属于网页端（dumate.baidu.com），与本地代理网关是两套东西。</div>
@@ -468,6 +470,7 @@
 
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
+import PageHeader from '@/components/PageHeader.vue'
 import { message } from 'ant-design-vue'
 import client from '@/api/client'
 import type { WebAccount, AccountStatus, PoolData, PoolAccount } from '@/api/webaccounts'

@@ -1,9 +1,10 @@
 <template>
-  <div>
+  <div class="page">
+    <PageHeader title="API Key" sub="网关鉴权密钥与来源白名单" />
+
     <a-alert
       :type="data?.require_key ? 'success' : 'warning'"
       show-icon
-      class="mb-4"
     >
       <template #message>
         <span v-if="data?.require_key">
@@ -85,7 +86,10 @@
         </template>
       </a-table>
 
-      <a-empty v-if="!data?.keys.length" description="还没有 API Key" />
+      <!-- 空态交给表格自带的 "No data"：再叠一个 a-empty 会并排出现两个空提示 -->
+      <div v-if="!data?.keys.length" class="hint-text mt-2">
+        还没有 API Key。点右上角「新建 Key」签发第一把。
+      </div>
     </a-card>
 
     <a-modal
@@ -159,6 +163,7 @@
 
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
+import PageHeader from '@/components/PageHeader.vue'
 import { message } from 'ant-design-vue'
 import dayjs, { type Dayjs } from 'dayjs'
 import client from '@/api/client'

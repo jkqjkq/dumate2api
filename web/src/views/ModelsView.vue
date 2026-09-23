@@ -1,12 +1,11 @@
 <template>
-  <div>
+  <div class="page">
+    <PageHeader title="模型管理" sub="客户端传来的模型名 → 上游实际使用的 ID" />
+
     <a-card :bordered="false">
       <div class="flex items-center justify-between mb-3">
         <div>
-          <span class="font-medium">模型映射</span>
-          <span class="text-slate-500 text-sm ml-2">
-            客户端传来的模型名 → 上游实际使用的 ID
-          </span>
+          <span class="section-title">模型映射</span>
         </div>
         <a-space>
           <a-button size="small" :loading="probing" @click="probeAll">探测上游</a-button>
@@ -110,6 +109,7 @@
 
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
+import PageHeader from '@/components/PageHeader.vue'
 import { message } from 'ant-design-vue'
 import client from '@/api/client'
 import type { ModelMapData, ProbeResult } from '@/api/models'

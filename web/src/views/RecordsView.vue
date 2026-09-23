@@ -1,7 +1,7 @@
 <template>
-  <div>
-    <div class="flex items-center justify-between mb-4">
-      <a-space>
+  <div class="page">
+    <PageHeader title="任务记录" sub="签到、任务、抽奖与自动发放的操作流水">
+      <template #actions>
         <a-select
           v-model:value="filterType"
           size="small"
@@ -20,9 +20,9 @@
           style="width: 110px"
           :options="dayOptions"
         />
-      </a-space>
-      <a-button size="small" :loading="loading" @click="load">刷新</a-button>
-    </div>
+        <a-button size="small" class="ghost-btn" :loading="loading" @click="load">刷新</a-button>
+      </template>
+    </PageHeader>
 
     <!-- 签到日历：数据来自上游 sign_in_days，是权威的「哪天签过」 -->
     <a-card title="签到日历" :bordered="false" class="mb-4">
@@ -103,7 +103,11 @@
       >
         <template #bodyCell="{ column, record }">
           <template v-if="column.key === 'ts'">
-            <span class="text-xs">{{ new Date(record.ts).toLocaleString('zh-CN') }}</span>
+            <!-- 自动发放显示真实发放时刻（服务端 00:00 发的），
+                 不是「我们查到的时刻」——否则会看起来像点签到才发的 -->
+            <span class="text-xs">
+              {{ new Date(record.type === 'grant' && record.granted_at ? record.granted_at : record.ts).toLocaleString('zh-CN') }}
+            </span>
           </template>
           <template v-else-if="column.key === 'type'">
             <a-tag :color="typeColor(record.type)">{{ typeText(record.type) }}</a-tag>
@@ -129,6 +133,11 @@
               </template>
               <template v-else>抽了 {{ record.count || 1 }} 次</template>
             </template>
+            <template v-else-if="record.type === 'grant'">
+              登录奖励 <span class="font-medium">+{{ record.points_delta }}</span>
+              <a-tag color="blue" class="ml-1">自动</a-tag>
+              <span class="text-xs text-slate-400 ml-1">{{ record.note }}</span>
+            </template>
           </template>
           <template v-else-if="column.key === 'points'">
             <template v-if="record.points_delta !== null && record.points_delta !== undefined">
@@ -143,7 +152,12 @@
               </span>
               <div class="text-xs text-slate-400">{{ record.account }}</div>
             </template>
-            <span v-else class="text-slate-400">—</span>
+            <!-- 没有 delta 与「delta 为 0」是两回事：前者是没打发放接口（今日已签），
+                 后者才是真发了但没增加。这里如实显示 —，不折成 0。 -->
+            <span v-else class="text-slate-400">
+              —
+              <span class="text-xs">本次未发放</span>
+            </span>
           </template>
         </template>
       </a-table>
@@ -153,6 +167,7 @@
 
 <script setup lang="ts">
 import { onMounted, ref, watch } from 'vue'
+import PageHeader from '@/components/PageHeader.vue'
 import client from '@/api/client'
 import type { RecordsData, CheckinCalendarData } from '@/api/records'
 
@@ -170,6 +185,7 @@ const typeOptions = [
   { label: '签到', value: 'checkin' },
   { label: '任务', value: 'task' },
   { label: '抽奖', value: 'draw' },
+  { label: '自动发放', value: 'grant' },
 ]
 const dayOptions = [
   { label: '近 7 天', value: 7 },
@@ -194,13 +210,17 @@ const detailColumns = [
 
 const typeText = (t: string) => records.value?.types?.[t] || t
 const typeColor = (t: string) =>
-  t === 'checkin' ? 'green' : t === 'task' ? 'blue' : t === 'draw' ? 'orange' : 'default'
+  t === 'checkin' ? 'green' : t === 'task' ? 'blue' : t === 'draw' ? 'orange'
+    : t === 'grant' ? 'cyan' : 'default'
 
 const fmtNum = (n: number) => n.toLocaleString('zh-CN', { maximumFractionDigits: 2 })
 
+// 「今日已签」不等于这次发了分：签到是幂等的，已签就不再打发放接口，
+// 所以这行没有本次发放金额。当天额度通常已由服务端在 00:00 自动发过，
+// 那份属于当天早些时候的发放，不记在这次调用头上。
 function checkinText(r?: string) {
   return r === 'claimed' ? '签到成功'
-    : r === 'already' ? '今日已签'
+    : r === 'already' ? '今日已签（本次未发放）'
     : r === 'failed' ? '签到失败' : '—'
 }
 

@@ -1,24 +1,21 @@
 <template>
-  <div>
-    <div class="flex items-start justify-between mb-4">
-      <div>
-        <h2 class="text-lg font-medium m-0">用量统计</h2>
-        <div class="text-xs text-slate-500 mt-1">
-          按时间、模型与密钥维度统计 Token 消耗与请求量
-          <template v-if="lastRefresh"> · 更新于 {{ lastRefresh }}</template>
-        </div>
-      </div>
-      <a-space>
+  <div class="page">
+    <PageHeader title="用量统计">
+      <template #sub>
+        按时间、模型与密钥维度统计 Token 消耗与请求量
+        <template v-if="lastRefresh"> · 更新于 {{ lastRefresh }}</template>
+      </template>
+      <template #actions>
         <a-select v-model:value="days" size="small" style="width: 110px" :options="dayOptions" />
-        <a-button size="small" :loading="loading" @click="load">刷新</a-button>
-      </a-space>
-    </div>
+        <a-button size="small" class="ghost-btn" :loading="loading" @click="load">刷新</a-button>
+      </template>
+    </PageHeader>
 
     <!-- 顶部卡片 -->
     <a-row :gutter="[16, 16]">
       <a-col :span="6">
         <a-card :bordered="false" class="h-full">
-          <a-statistic title="今日请求" :value="data?.cards.today.requests ?? '—'" value-style="color:#1677ff" />
+          <a-statistic title="今日请求" :value="data?.cards.today.requests ?? '—'" value-style="color:#22d3ee" />
           <div class="text-xs text-slate-500 mt-2">
             <template v-if="data">{{ compact(data.cards.today.tokens) }} Token</template>
             <span v-else>—</span>
@@ -28,7 +25,7 @@
 
       <a-col :span="6">
         <a-card :bordered="false" class="h-full">
-          <a-statistic title="本周请求" :value="data?.cards.week.requests ?? '—'" value-style="color:#722ed1" />
+          <a-statistic title="本周请求" :value="data?.cards.week.requests ?? '—'" value-style="color:#fbbf24" />
           <div class="text-xs text-slate-500 mt-2">
             <template v-if="data">{{ compact(data.cards.week.tokens) }} Token</template>
             <span v-else>—</span>
@@ -50,7 +47,7 @@
 
       <a-col :span="6">
         <a-card :bordered="false" class="h-full">
-          <a-statistic title="活跃密钥" :value="data?.cards.active_keys ?? '—'" value-style="color:#52c41a" />
+          <a-statistic title="活跃密钥" :value="data?.cards.active_keys ?? '—'" value-style="color:#34d399" />
           <div class="text-xs text-slate-500 mt-2">
             <template v-if="data">
               主力模型 {{ data.cards.top_model || '—' }}
@@ -225,6 +222,7 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import PageHeader from '@/components/PageHeader.vue'
 import client from '@/api/client'
 import type { UsageOverview } from '@/api/usage'
 
@@ -233,6 +231,7 @@ import * as echarts from 'echarts/core'
 import { BarChart } from 'echarts/charts'
 import { GridComponent, TooltipComponent } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
+import { SERIES, INK, TOOLTIP_BASE, axisStyle, compactNum, exactNum, barSeries } from '@/utils/chartTheme'
 
 echarts.use([BarChart, GridComponent, TooltipComponent, CanvasRenderer])
 
@@ -287,35 +286,32 @@ function renderChart() {
 
   const rows = data.value.daily
   chartInst.setOption({
-    grid: { left: 64, right: 16, top: 16, bottom: 28 },
+    grid: { left: 60, right: 16, top: 12, bottom: 26 },
     tooltip: {
+      ...TOOLTIP_BASE,
       trigger: 'axis',
+      axisPointer: { type: 'shadow' },
       formatter: (params: any[]) => {
-        const p = params[0]
-        const row = rows[p.dataIndex]
-        return `${row.day}<br/>Token ${fmt(row.total_tokens)}<br/>请求 ${fmt(row.requests)}`
+        const row = rows[params[0].dataIndex]
+        // 数值为主、名称次之：读者已经知道看的是哪一天，要的是数字
+        return `<div style="color:${INK.muted};font-size:11px">${row.day}</div>`
+          + `<div style="margin-top:2px">Token <b>${exactNum(row.total_tokens)}</b></div>`
+          + `<div>请求 <b>${exactNum(row.requests)}</b></div>`
+          + (row.failed ? `<div style="color:#f87171">失败 <b>${exactNum(row.failed)}</b></div>` : '')
       },
     },
     xAxis: {
       type: 'category',
       data: rows.map((r) => r.day.slice(5)),
-      axisLine: { lineStyle: { color: '#e5e7eb' } },
-      axisLabel: { color: '#94a3b8', fontSize: 11 },
+      ...axisStyle({ showGrid: false }),
     },
     yAxis: {
       type: 'value',
-      axisLabel: {
-        color: '#94a3b8', fontSize: 11,
-        formatter: (v: number) => compact(v),
-      },
-      splitLine: { lineStyle: { color: '#f3f4f6' } },
+      ...axisStyle({ formatter: (v: number) => compactNum(v) }),
     },
-    series: [{
-      type: 'bar',
-      data: rows.map((r) => r.total_tokens),
-      itemStyle: { color: '#fa541c', borderRadius: [2, 2, 0, 0] },
-      barMaxWidth: 28,
-    }],
+    // 单序列用槽位 1 一种颜色即可，不做「越大越深」的值映射——
+    // 那会把长度已经表达过的信息再用色相编码一遍，白白占掉唯一的颜色通道
+    series: [barSeries({ data: rows.map((r) => r.total_tokens), color: SERIES[0] })],
   })
 }
 

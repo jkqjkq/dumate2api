@@ -1,6 +1,8 @@
 <template>
-  <div>
-    <a-alert type="info" show-icon class="mb-4" :message="data?.readonly_note || '只读页面'">
+  <div class="page">
+    <PageHeader title="登录态" sub="客户端当前状态（只读）" />
+
+    <a-alert type="info" show-icon :message="data?.readonly_note || '只读页面'">
       <template #description>
         本页只展示客户端当前状态。修改登录态请使用 DuMate 客户端本身，
         管理端不做写入，以免两侧状态不一致。
@@ -173,6 +175,7 @@
 
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
+import PageHeader from '@/components/PageHeader.vue'
 import client from '@/api/client'
 import type { AccountData } from '@/api/account'
 

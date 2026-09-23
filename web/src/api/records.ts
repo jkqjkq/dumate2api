@@ -1,6 +1,6 @@
 export interface ActivityRecord {
   ts: number
-  type: 'checkin' | 'task' | 'draw'
+  type: 'checkin' | 'task' | 'draw' | 'grant'
   account_id: number
   account: string
   ok: boolean
@@ -18,6 +18,10 @@ export interface ActivityRecord {
   prize_value?: number
   count?: number
   error?: string
+  // grant（服务端自动发放，非本系统触发）
+  source?: string
+  granted_at?: number
+  note?: string
   // 积分变化：差值 + 前后余额，三个都要——差值说明发了多少，
   // 前后值说明从多少变到多少（0 → 30 是首次发放，26 → 56 是累加）
   points_delta?: number | null

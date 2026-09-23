@@ -43,6 +43,9 @@ export interface PointsData {
   daily_grant: DailyGrantRow[]
   expired_unused: PointsPackage[]
   upstream_port: number
+  // 账号身份。本地后端固定为 'local'，用来区分于网页账号的数字 id。
+  account_id?: string
+  account_name?: string
   fetched_at: number
   cached?: boolean
 }
@@ -78,7 +81,8 @@ export interface AccountsData {
   unknown: number
 }
 
-// 多账号积分（网页凭证，各自独立）
+// 多账号积分（网页凭证，各自独立）。
+// 每个账号除余额外还带完整的派生视图，前端切换账号时不必再打上游。
 export interface AccountPoints {
   id: number
   name: string
@@ -91,6 +95,10 @@ export interface AccountPoints {
   subscribed?: boolean
   throttled?: boolean
   packages?: PointsPackage[]
+  expiring?: PointsPackage[]
+  expired_unused?: PointsPackage[]
+  sources?: SourceRow[]
+  daily_grant?: DailyGrantRow[]
   error?: string
   expired?: boolean
 }

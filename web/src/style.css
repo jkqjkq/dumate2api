@@ -2,9 +2,349 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ============================================================
+   设计基线 · 深色控制台
+   ------------------------------------------------------------
+   这套系统的本体是「模型网关的控制室」：请求量、账号池、
+   上游健康、积分流水。信息密度高、看数时间长，所以走深色
+   工程化方向——近黑分层底 + 单一青色信号色 + 等宽数字。
+
+   全站共用这一份。改这里等于全站生效，避免每个页面各写一遍
+   卡片圆角/阴影/表格样式后又各自漂移。
+   ============================================================ */
+
+:root {
+  /* 分层底色：越靠前越亮，用明度而不是边框来区分层级 */
+  --lab-bg: #0a0e14;
+  --lab-bg-2: #0d1219;
+  --lab-surface: #121824;
+  --lab-surface-2: #172030;
+  --lab-surface-3: #1c2634;
+
+  --lab-border: #1a2230;
+  --lab-border-strong: #26313f;
+
+  --lab-text: #e8eef7;
+  --lab-text-sub: #93a1b5;
+  --lab-text-mute: #5f6f86;
+
+  /* 信号色：整站唯一强调色，用在选中态、主按钮、关键数值 */
+  --lab-primary: #22d3ee;
+  --lab-primary-dim: rgba(34, 211, 238, 0.14);
+  --lab-primary-line: rgba(34, 211, 238, 0.34);
+
+  --lab-ok: #34d399;
+  --lab-warn: #fbbf24;
+  --lab-danger: #f87171;
+
+  --lab-radius: 14px;
+  --lab-shadow: 0 1px 0 rgba(255, 255, 255, 0.03) inset, 0 6px 20px rgba(0, 0, 0, 0.34);
+  --lab-shadow-hover: 0 1px 0 rgba(255, 255, 255, 0.05) inset, 0 12px 30px rgba(0, 0, 0, 0.46);
+
+  --lab-mono: 'JetBrains Mono', 'Cascadia Mono', 'SF Mono', Consolas, 'Liberation Mono', monospace;
+  --lab-display: 'Bahnschrift', 'DIN Alternate', 'Segoe UI Variable Display', sans-serif;
+}
+
 html,
 body,
 #app {
   height: 100%;
   margin: 0;
+}
+
+body {
+  background: var(--lab-bg);
+  color: var(--lab-text);
+  font-family: 'Inter Tight', -apple-system, BlinkMacSystemFont, 'Segoe UI',
+    'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Helvetica Neue', Helvetica, Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* 背景层：近黑底 + 极淡网格 + 左上角青色辉光。
+   纯色底会让整屏发闷，网格给「工程面板」的质感，
+   辉光把视觉重心压到内容区左上（阅读起点）。 */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background-image:
+    radial-gradient(1100px 520px at 8% -8%, rgba(34, 211, 238, 0.07), transparent 62%),
+    radial-gradient(900px 480px at 100% 0%, rgba(56, 189, 248, 0.045), transparent 60%),
+    linear-gradient(rgba(255, 255, 255, 0.016) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.016) 1px, transparent 1px);
+  background-size: auto, auto, 44px 44px, 44px 44px;
+}
+#app {
+  position: relative;
+  z-index: 1;
+}
+
+/* 等宽数字：表格、指标、ID 一律走这个类。
+   比例字体下数字宽度不一，逐行累加会让整列看起来在抖。 */
+.num,
+.mono {
+  font-family: var(--lab-mono);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.2px;
+}
+
+/* ---------- 卡片：靠明度分层，边框退成发丝线 ---------- */
+.ant-card {
+  border-radius: var(--lab-radius);
+  border: 1px solid var(--lab-border);
+  background: var(--lab-surface);
+  box-shadow: var(--lab-shadow);
+}
+.ant-card-bordered {
+  border: 1px solid var(--lab-border);
+}
+.ant-card-head {
+  border-bottom: 1px solid var(--lab-border);
+  min-height: 46px;
+  padding: 0 18px;
+}
+.ant-card-head-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--lab-text);
+  letter-spacing: 0.2px;
+}
+.ant-card-body {
+  padding: 18px;
+}
+.ant-card-extra {
+  color: var(--lab-text-sub);
+}
+
+/* 指标卡：悬停时轻微抬起，让「一排卡片」有反馈 */
+.ant-card.h-full:hover,
+.stat-card:hover {
+  box-shadow: var(--lab-shadow-hover);
+  border-color: var(--lab-border-strong);
+  transform: translateY(-2px);
+  transition: all 0.22s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* ---------- 统计数值：等宽、加大、收紧字距 ---------- */
+.ant-statistic-title {
+  font-size: 12px;
+  color: var(--lab-text-mute);
+  margin-bottom: 6px;
+  letter-spacing: 0.3px;
+}
+.ant-statistic-content {
+  font-family: var(--lab-mono);
+  font-size: 26px;
+  font-weight: 600;
+  letter-spacing: -0.6px;
+  font-variant-numeric: tabular-nums;
+  color: var(--lab-text);
+}
+.ant-statistic-content-suffix {
+  font-size: 12px;
+  color: var(--lab-text-mute);
+  margin-left: 4px;
+}
+
+/* ---------- 表格：表头压暗、行悬停、去掉重边框 ---------- */
+.ant-table {
+  font-size: 13px;
+  background: transparent;
+}
+.ant-table-thead > tr > th {
+  background: var(--lab-surface-2) !important;
+  color: var(--lab-text-sub) !important;
+  font-weight: 500 !important;
+  font-size: 11.5px;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  border-bottom: 1px solid var(--lab-border) !important;
+}
+.ant-table-thead > tr > th::before {
+  display: none !important;
+}
+.ant-table-tbody > tr > td {
+  border-bottom: 1px solid var(--lab-border);
+}
+.ant-table-tbody > tr:hover > td {
+  background: #18202e !important;
+}
+.ant-table-tbody > tr.row-selected > td {
+  background: var(--lab-primary-dim) !important;
+}
+/* 表格里的数字对齐：等宽 + 右对齐由列定义决定，这里只统一字形 */
+.ant-table-tbody .num {
+  font-family: var(--lab-mono);
+  font-variant-numeric: tabular-nums;
+}
+.ant-pagination {
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------- 按钮 / 输入：统一圆角与聚焦环 ---------- */
+.ant-btn {
+  border-radius: 9px;
+  font-weight: 500;
+}
+.ant-btn-primary {
+  color: #04222a;
+  font-weight: 600;
+  box-shadow: 0 4px 14px rgba(34, 211, 238, 0.24);
+}
+.ant-btn-primary:hover {
+  box-shadow: 0 6px 20px rgba(34, 211, 238, 0.34);
+}
+.ant-input,
+.ant-input-affix-wrapper,
+.ant-select-selector,
+.ant-input-number,
+.ant-picker {
+  border-radius: 9px !important;
+}
+.ant-input:focus,
+.ant-input-focused,
+.ant-input-affix-wrapper:focus-within,
+.ant-select-focused .ant-select-selector {
+  box-shadow: 0 0 0 3px var(--lab-primary-dim) !important;
+}
+
+/* ---------- 标签：去掉过重描边，走半透明底 ---------- */
+.ant-tag {
+  border-radius: 6px;
+  font-size: 11.5px;
+  font-weight: 500;
+  border: 1px solid transparent;
+}
+
+/* ---------- 空态：插图压暗，别让它在近黑底上成为最亮的东西 ---------- */
+.ant-empty-image {
+  opacity: 0.45;
+}
+.ant-empty-description {
+  color: var(--lab-text-mute);
+  font-size: 12px;
+}
+
+/* ---------- 抽屉 / 弹窗 ---------- */
+.ant-drawer-header {
+  border-bottom: 1px solid var(--lab-border);
+}
+.ant-drawer-title {
+  font-size: 15px;
+  font-weight: 600;
+}
+.ant-modal-content {
+  border: 1px solid var(--lab-border-strong);
+}
+
+/* ---------- 滚动条 ---------- */
+::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #26313f;
+  border-radius: 5px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #33404f;
+}
+
+/* ---------- 载入错峰：卡片依次浮起，一次编排好过满屏微动效 ---------- */
+@keyframes lab-rise {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .page > * {
+    animation: lab-rise 0.42s cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+  .page > *:nth-child(1) { animation-delay: 0.02s; }
+  .page > *:nth-child(2) { animation-delay: 0.07s; }
+  .page > *:nth-child(3) { animation-delay: 0.12s; }
+  .page > *:nth-child(4) { animation-delay: 0.17s; }
+  .page > *:nth-child(5) { animation-delay: 0.22s; }
+  .page > *:nth-child(6) { animation-delay: 0.27s; }
+}
+
+/* ============================================================
+   页面骨架：统一页头 + 内容间距
+   各页面用 .page / .page-head 即可得到一致的首屏结构
+   ============================================================ */
+.page {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+/* 间距由 gap 统一负责：清掉直接子元素自带的 mt/mb，
+   否则「gap + margin」会叠成双倍间距，且各页面各不相同。
+   只作用于直接子元素，卡片内部的间距不受影响。 */
+.page > * {
+  margin-top: 0 !important;
+  margin-bottom: 0 !important;
+}
+.page-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.page-head h2 {
+  margin: 0;
+  font-family: var(--lab-display);
+  font-size: 19px;
+  font-weight: 600;
+  color: var(--lab-text);
+  letter-spacing: 0.4px;
+}
+.page-head .sub {
+  margin: 5px 0 0;
+  font-size: 12px;
+  color: var(--lab-text-mute);
+}
+.page-head .actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* 卡片内的小节标题 */
+.section-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--lab-text);
+}
+
+/* 次级说明文字 */
+.hint-text {
+  font-size: 12px;
+  color: var(--lab-text-mute);
+}
+
+/* 页头右侧的浅色按钮：多个页面共用，放全局避免各组件 scoped 样式各写一遍
+   （scoped 只在声明它的组件内生效，写在某个页面里其余页面拿不到） */
+.ghost-btn {
+  border-radius: 9px;
+  color: var(--lab-text-sub);
+  background: transparent;
+  border-color: var(--lab-border-strong);
+}
+.ghost-btn:hover {
+  color: var(--lab-primary) !important;
+  border-color: var(--lab-primary-line) !important;
+  background: var(--lab-primary-dim);
 }
