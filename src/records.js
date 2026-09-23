@@ -21,6 +21,13 @@ function append(entry) {
   } catch (e) { /* 记录失败不能影响动作本身 */ }
 }
 
+// 记录对外展示的时间。自动发放是补记的：写入时刻 ts 是「我们查到的时刻」，
+// 而它对外的发生时间是 granted_at（服务端当天 00:00 发的）。排序必须用展示时间，
+// 否则会出现「显示 00:00 的那行排在最前面」——看着像顺序错乱。
+function effectiveTs(r) {
+  return r.type === 'grant' && r.granted_at ? r.granted_at : r.ts;
+}
+
 // 读记录。返回 { rows, total }，rows 按时间倒序（最新在前）。
 // 注意：文件不存在时也要返回同样的形状——早先直接 return []，
 // 调用方按 { rows } 解构就会炸（实测 "rows is not iterable"）。
@@ -38,10 +45,11 @@ function read(opts = {}) {
 
   if (account_id) rows = rows.filter((r) => Number(r.account_id) === Number(account_id));
   if (type) rows = rows.filter((r) => r.type === type);
-  if (since) rows = rows.filter((r) => r.ts >= since);
+  if (since) rows = rows.filter((r) => effectiveTs(r) >= since);
 
   const total = rows.length;
-  rows = rows.reverse();
+  // 按展示时间倒序，不再依赖文件写入顺序
+  rows = rows.sort((a, b) => effectiveTs(b) - effectiveTs(a));
   return { rows: limit > 0 ? rows.slice(0, limit) : rows, total };
 }
 
@@ -57,7 +65,9 @@ function dailySummary(days = 30) {
       byAccount[key] = { account_id: key, account: r.account || '', days: {}, counts: {} };
     }
     const a = byAccount[key];
-    const day = new Date(r.ts).toISOString().slice(0, 10);
+    // 与 read() 同口径：归到「对外展示的那天」，避免补记的发放
+    // 在跨零点的情况下被算进查询那天
+    const day = new Date(effectiveTs(r)).toISOString().slice(0, 10);
     if (!a.days[day]) a.days[day] = {};
     // 同一天同类动作可能多次（如多次抽奖），按类型累加次数
     a.days[day][r.type] = (a.days[day][r.type] || 0) + 1;

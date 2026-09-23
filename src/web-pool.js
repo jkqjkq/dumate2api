@@ -182,6 +182,68 @@ async function callModel(account, path, method, body, opts = {}) {
   return { ok: r.status >= 200 && r.status < 300, status: r.status, json: r.json, raw: r.raw, account };
 }
 
+// 流式调用：把上游的 SSE 原样透传给调用方，不缓冲。
+// 与 callModel 的区别是这里不做 JSON 解析——流式响应的价值就在于
+// 首字能尽早到达，整体缓冲会把它变成非流式。
+//
+// onChunk(text) 每收到一段就回调一次（同时用于转发和累计 usage）；
+// 返回 { ok, status, text, account }，text 是完整响应文本。
+function callModelStream(account, path, method, body, onChunk, opts = {}) {
+  return new Promise((resolve) => {
+    getToken(account, opts.forceToken).then((t) => {
+      if (!t.ok) return resolve({ ok: false, status: 401, error: t.error, expired: t.expired });
+
+      const payload = JSON.stringify(body);
+      const req = https.request(
+        {
+          hostname: GATEWAY_HOST,
+          path: GATEWAY_PREFIX + path,
+          method,
+          timeout: opts.timeout || 600000,
+          headers: {
+            'Content-Type': 'application/json',
+            Accept: 'text/event-stream',
+            Authorization: `Bearer ${t.token}`,
+            'X-Dumate-Client-Type': 'web',
+            'X-Dumate-Account-Id': 'global',
+            'Content-Length': Buffer.byteLength(payload),
+          },
+        },
+        (res) => {
+          // 响应头一到就回调：调用方要在「还没转发任何内容」时决定
+          // 是否接受这次响应（否则只能等整条流结束，那就没法做故障转移了）
+          if (typeof opts.onStatus === 'function') {
+            try { opts.onStatus(res.statusCode); } catch (e) { /* 忽略 */ }
+          }
+          let text = '';
+          res.setEncoding('utf8');
+          res.on('data', (c) => {
+            text += c;
+            try { onChunk(c); } catch (e) { /* 下游写失败不影响上游读取 */ }
+          });
+          res.on('end', () => {
+            const ok = res.statusCode >= 200 && res.statusCode < 300;
+            if (ok) markSuccess(account.id);
+            else markFailure(account.id, `HTTP ${res.statusCode}`);
+            resolve({ ok, status: res.statusCode, text, account, streamed: true });
+          });
+        },
+      );
+      req.on('error', (e) => {
+        markFailure(account.id, e.message);
+        resolve({ ok: false, status: 0, error: e.message, account });
+      });
+      req.on('timeout', () => {
+        req.destroy();
+        markFailure(account.id, 'timeout');
+        resolve({ ok: false, status: 0, error: 'timeout', account });
+      });
+      req.write(payload);
+      req.end();
+    }).catch((e) => resolve({ ok: false, status: 0, error: e.message }));
+  });
+}
+
 // 带故障转移的调用：从轮询位置起依次尝试，直到成功或全部失败。
 async function callWithFailover(path, method, body, opts = {}) {
   const tried = new Set();
@@ -260,6 +322,6 @@ function forget(id) {
 }
 
 module.exports = {
-  getToken, callWithFailover, callModel, pick, snapshot, probe, forget,
+  getToken, callWithFailover, callModel, callModelStream, pick, snapshot, probe, forget,
   GATEWAY_HOST, GATEWAY_PREFIX, stateOf,
 };

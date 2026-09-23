@@ -7,12 +7,86 @@ const webPool = require('../../web-pool');
 const taskRunner = require('../../task-runner');
 const taskScheduler = require('../../task-scheduler');
 const records = require('../../records');
+const pointsAgg = require('../../points-agg');
 const { sendJSON } = require('../router');
 
 // 登录链接。百度 SSO 的登录页，登录后 cookie 落在 .baidu.com 域，
 // 正是调 console/dumate 接口需要的。
 const LOGIN_URL = 'https://login.bce.baidu.com/?redirect=' +
   encodeURIComponent('https://www.dumate.cn/app');
+
+// 逐账号的完整明细只放在内存里缓存：额度包常有上百个，写回
+// web-accounts.json 会让账号文件无谓膨胀，而它每次账号操作都要读写。
+// 磁盘上仍只落 left/total/used 摘要（accounts.js 自己管）。
+const DETAIL_CACHE_TTL_MS = 60 * 1000;
+const detailCache = new Map();
+
+// 服务端自动发放的登录奖励，补记到操作流里。
+//
+// 为什么需要它：实测 login_bonus 的 granted_at 是当天 00:00:00，服务端按天
+// 自动发，不依赖任何签到调用。于是每次点签到都命中 already，「签到成功 +500」
+// 这条记录永远不出现——但 500 是真到账了，只是没进操作记录，于是看起来像
+// 「签到从来没给过分」。
+//
+// 数据取自 quota_overview 的额度包本身（真实发放记录），不是估算，
+// 也不冒充签到结果：type 记 'grant'、result 记 'auto_login_bonus'，
+// 与「本系统主动做的动作」区分开。
+async function recordAutoGrant(account, beforeSnapshot) {
+  try {
+    const r = await web.api.quotaOverview(account.cookie);
+    if (!r.ok) return null;
+
+    // 只认今天发的登录奖励：历史包也在 packages 里，全取会把过去每天
+    // 都补一遍，造成重复记录
+    const dayStart = new Date();
+    dayStart.setHours(0, 0, 0, 0);
+    const today = dayStart.getTime();
+    const pkg = (r.packages || []).find(
+      (p) => p.source === 'login_bonus' && p.granted_at && p.granted_at >= today,
+    );
+    if (!pkg || !(pkg.total > 0)) return null;
+
+    // 先探测再写：同一天可能被点很多次签到（实测一天点过 4 次），
+    // 每次都补会刷出一堆重复行，看不出「这天就发了一次」
+    if (alreadyRecordedGrant(account.id, pkg.granted_at)) return null;
+
+    const amount = pkg.total;
+    const before = beforeSnapshot ? beforeSnapshot.left : null;
+    // 发放前余额推不出来（发放发生在我们第一次观测之前），所以只给
+    // 发放后的真实余额和金额，不反推 before——编一个 before 出来
+    // 就是伪造数据。
+    const after = r.left;
+
+    records.append({
+      type: 'grant',
+      account_id: account.id,
+      account: account.name,
+      ok: true,
+      result: 'auto_login_bonus',
+      source: pkg.source,
+      // 发放时刻用包自己的 granted_at，不是「我们查到的时刻」：
+      // 记录要反映真实发生时间，否则会显示成「点签到才发的」
+      granted_at: pkg.granted_at,
+      points_delta: amount,
+      points_before: null,
+      points_after: after,
+      note: '服务端自动发放，非本系统触发',
+    });
+    return { amount, granted_at: pkg.granted_at };
+  } catch (e) {
+    // 补记录失败不影响签到本身
+    return null;
+  }
+}
+
+// 同一天只补一次：签到可能被点很多次（实测一天点过 4 次），
+// 每次都补会刷出一堆重复行，看不出「这天就发了一次」。
+function alreadyRecordedGrant(accountId, grantedAt) {
+  const { rows } = records.read({ limit: 0, type: 'grant' });
+  return rows.some(
+    (r) => Number(r.account_id) === Number(accountId) && r.granted_at === grantedAt,
+  );
+}
 
 // 签到结果写回账号记录。抽出来单独一个函数是因为「一键签到」和
 // 「单账号签到」两条路径都要用，且都要在失败时记下原因。
@@ -49,20 +123,31 @@ async function doCheckin(account) {
         month_points: info.month_points,
       },
     });
-    // 已签到的分支也记录，但积分变化是 0——这次确实没有发放。
-    // 记 0 而不是留空，因为「这次没发」和「没测到」是两件事。
-    // 前后值用当前余额（两者相同），让表格里这一行的格式与其他行一致。
+    // 已签到的分支：这次调用没有触发任何发放，所以不放 delta=0。
+    // 0 会被读成「测过了、这次没给分」，而真相是「压根没打发放接口、无从测量」——
+    // 与 pointsDelta 的约定一致（测不到返回 null，不返回 0）。
+    //
+    // 今日的额度通常已经由服务端在 00:00 自动发过（实测 login_bonus 的
+    // granted_at 是当天 00:00:00），那份 500 属于「当天早些时候的发放」，
+    // 不是这次调用带来的，记到这次头上会把两件事混成一件事。
     const cur = account._pointsBefore ? account._pointsBefore.left : null;
+    const ret = {
+      id: account.id, name: account.name, ok: true, already: true, info,
+      points_delta: null, points_before: cur, points_after: cur,
+    };
+
+    // 补一条服务端自动发放的记录：500 确实到账了，只是不由这次调用触发。
+    // 放在 already 分支里——签到成功时上游自己会带差额，不需要补。
+    const grant = await recordAutoGrant(account, account._pointsBefore);
+    if (grant) ret.auto_grant = grant;
+
     records.append({
       type: 'checkin', account_id: account.id, account: account.name,
       ok: true, result: 'already', total_times: info.total_times,
       total_points: info.total_points,
-      points_delta: 0, points_before: cur, points_after: cur,
+      points_delta: null, points_before: cur, points_after: cur,
     });
-    return {
-      id: account.id, name: account.name, ok: true, already: true, info,
-      points_delta: 0, points_before: cur, points_after: cur,
-    };
+    return ret;
   }
 
   const res = await web.api.claimLoginBonus(account.cookie);
@@ -392,6 +477,9 @@ const routes = [
     // 所有账号的积分明细（并发拉取）。
     // 积分明细页原先只看本地后端那一个账号，但账号管理里可以有多份网页凭证，
     // 每份都能独立查积分——只看一个会漏掉其余账号。
+    //
+    // 每个账号除余额外还要带完整的派生视图（按来源 / 每日发放 / 临期 /
+    // 逐笔），这样前端切换账号时不必再逐账号打一次上游。
     method: 'GET',
     path: '/points-all',
     handler: async ({ res, req }) => {
@@ -399,21 +487,38 @@ const routes = [
       const list = accounts.load().accounts.filter((a) => a.enabled);
 
       const results = await Promise.all(list.map(async (a) => {
-        // 不强制刷新时优先用缓存：上游一次往返 200-800ms，账号多时并发也要时间
-        if (!force && a.points && a.points_at && Date.now() - a.points_at < 60_000) {
-          return { id: a.id, name: a.name, nickname: a.nickname || '', ok: true, cached: true, ...a.points };
+        const base = { id: a.id, name: a.name, nickname: a.nickname || '' };
+        // 明细只缓存在内存里：额度包可能有上百个，写回 web-accounts.json
+        // 会让账号文件无谓膨胀。磁盘上仍然只留 left/total/used 摘要。
+        const hit = detailCache.get(a.id);
+        if (!force && hit && Date.now() - hit.at < DETAIL_CACHE_TTL_MS) {
+          return { ...base, ...hit.data, cached: true };
         }
+
         const r = await web.api.quotaOverview(a.cookie);
         if (!r.ok) {
           accounts.patchInternal(a.id, { last_error: r.error });
-          return { id: a.id, name: a.name, nickname: a.nickname || '', ok: false, error: r.error, expired: !!r.expired };
+          return { ...base, ok: false, error: r.error, expired: !!r.expired };
         }
-        const summary = { left: r.left, total: r.total, used: r.used };
-        accounts.patchInternal(a.id, { points: summary, points_at: Date.now(), last_error: '' });
-        return {
-          id: a.id, name: a.name, nickname: a.nickname || '', ok: true, cached: false,
-          ...summary, subscribed: r.subscribed, throttled: r.throttled, packages: r.packages,
+
+        const data = {
+          ...base,
+          ok: true,
+          left: r.left,
+          total: r.total,
+          used: r.used,
+          subscribed: r.subscribed,
+          throttled: r.throttled,
+          // 与本地后端共用同一份聚合，两边口径才不会分叉
+          ...pointsAgg.aggregate(r.packages),
         };
+        detailCache.set(a.id, { at: Date.now(), data });
+        accounts.patchInternal(a.id, {
+          points: { left: r.left, total: r.total, used: r.used },
+          points_at: Date.now(),
+          last_error: '',
+        });
+        return { ...data, cached: false };
       }));
 
       const ok = results.filter((r) => r.ok);
@@ -618,6 +723,8 @@ const routes = [
           checkin: '签到',
           task: '任务',
           draw: '抽奖',
+          // 服务端自动发放，不是本系统触发的动作，单独一类
+          grant: '自动发放',
         },
       });
     },

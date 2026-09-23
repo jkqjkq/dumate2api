@@ -12,6 +12,7 @@ const crypto = require('crypto');
 const pool = require('./web-pool');
 const keysvc = require('./keys');
 const reqlog = require('./reqlog');
+const pointsCursor = require('./points-cursor');
 const modelmap = require('./modelmap');
 const { anthropicToOpenAI, openAIToAnthropic, mapFinishReason } = require('./anthropic');
 const { resolveMaxTokens } = require('./budget');
@@ -48,8 +49,9 @@ function logRequest(req, res, startedAt, info, status, usage, extra) {
   if (res._logged) return;
   res._logged = true;
   const u = usage || { input: 0, output: 0, total: 0 };
+  const ts = Date.now();
   reqlog.record({
-    ts: Date.now(),
+    ts,
     ms: Date.now() - startedAt,
     path: req._logPath || '',
     model: info.model || '',
@@ -67,6 +69,11 @@ function logRequest(req, res, startedAt, info, status, usage, extra) {
     account: (extra && extra.account) || '',
     ...(extra || {}),
   });
+
+  // 余额游标：记在响应之后，差值即这条请求的实际扣费（见 points-cursor.js）
+  if (status && status < 500 && extra && extra.account) {
+    pointsCursor.capture(ts, extra.account);
+  }
 }
 
 // 云端返回的 usage 字段名与 OpenAI 一致

@@ -7,6 +7,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const discovery = require('../../discovery');
+const pointsAgg = require('../../points-agg');
 const { sendJSON } = require('../router');
 
 const CACHE_TTL_MS = 60 * 1000;
@@ -139,51 +140,10 @@ async function fetchPoints(opts = {}) {
       };
     });
 
-  // 最近到期的未用完包：这是「即将过期」提示的依据，全量 89 个包里
-  // 绝大多数已用尽，只有未用尽的才值得提醒
-  const expiring = packages
-    .filter((p) => p.left > 0 && p.expire_at)
-    .sort((a, b) => a.expire_at - b.expire_at)
-    .slice(0, 10);
-
-  // 按来源聚合。积分明细里最有信息量的一层：能看出「每天自动发的登录奖励」
-  // 和「成长计划奖励」各占多少、是否还在持续发放。
-  const bySource = {};
-  for (const p of packages) {
-    const k = p.source || '(未知来源)';
-    if (!bySource[k]) {
-      bySource[k] = { source: k, count: 0, total: 0, used: 0, left: 0, first_at: null, last_at: null, active_days: new Set() };
-    }
-    const s = bySource[k];
-    s.count++;
-    s.total += p.total;
-    s.used += p.used;
-    s.left += p.left;
-    // 用发放日期而非到期日：想知道的是「还在不在发」
-    const day = p.granted_at ? new Date(p.granted_at).toISOString().slice(0, 10) : null;
-    if (day) {
-      s.active_days.add(day);
-      if (!s.first_at || p.granted_at < s.first_at) s.first_at = p.granted_at;
-      if (!s.last_at || p.granted_at > s.last_at) s.last_at = p.granted_at;
-    }
-  }
-  const sources = Object.values(bySource).map((s) => ({
-    ...s,
-    active_days: s.active_days.size,
-    days_since_last: s.last_at ? Math.floor((Date.now() - s.last_at) / 86400000) : null,
-  })).sort((a, b) => b.total - a.total);
-
-  // 按发放日聚合，给出每日新增额度曲线（与「每日消耗」是两回事）
-  const byDay = {};
-  for (const p of packages) {
-    if (!p.granted_at) continue;
-    const k = new Date(p.granted_at).toISOString().slice(0, 10);
-    if (!byDay[k]) byDay[k] = { day: k, granted: 0, used: 0, count: 0 };
-    byDay[k].granted += p.total;
-    byDay[k].used += p.used;
-    byDay[k].count++;
-  }
-  const dailyGrant = Object.values(byDay).sort((a, b) => (a.day < b.day ? -1 : 1));
+  // 派生视图（按来源 / 按发放日 / 临期 / 已过期未用完）与网页账号走同一份
+  // 聚合实现，保证两条链路口径一致
+  const { packages: pkgs, expiring: exp, sources: srcs, daily_grant: daily, expired_unused: expUnused } =
+    pointsAgg.aggregate(packages);
 
   const result = {
     ok: true,
@@ -195,14 +155,17 @@ async function fetchPoints(opts = {}) {
       has_remaining: remaining.ok && remaining.data ? !!remaining.data.hasRemainingPoints : null,
       throttled: !!(r.modelThrottleInfo && r.modelThrottleInfo.throttled),
       throttle_reason: (r.modelThrottleInfo && r.modelThrottleInfo.reason) || '',
-      packages,
-      expiring,
-      sources,
-      daily_grant: dailyGrant,
+      packages: pkgs,
+      expiring: exp,
+      sources: srcs,
+      daily_grant: daily,
       // 已过期但还有余额的包：这部分额度实际已经用不上了，单独列出来
       // 说明「总额度」里有多少是已经失效的
-      expired_unused: packages.filter((p) => p.left > 0 && p.expire_at && p.expire_at < Date.now()),
+      expired_unused: expUnused,
       upstream_port: port,
+      // 前端用账号 ID 做切换，网页账号用数字 id，这里给个不会撞的字符串
+      account_id: 'local',
+      account_name: '本地后端（桌面凭证）',
       fetched_at: Date.now(),
     },
   };

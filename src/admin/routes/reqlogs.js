@@ -1,0 +1,150 @@
+// src/admin/routes/reqlogs.js - 请求日志（网关每条转发的原始记录）
+//
+// 数据源是 data/requests.jsonl（reqlog.record 落盘），一条请求一行：
+// 时间、路径、模型（原始/映射后）、状态码、耗时、首字延迟、token、
+// 来源 IP、UA、密钥、错误。
+//
+// 注意与用量统计（usage.js）的分工：那边做聚合（按模型/按天/按密钥），
+// 这边只做逐条明细与单条详情——聚合看趋势，明细查个案，互不替代。
+const reqlog = require('../../reqlog');
+const pointsCursor = require('../../points-cursor');
+const accounts = require('../../accounts');
+const web = require('../../dumate-web');
+const { sendJSON } = require('../router');
+
+function clampInt(raw, def, min, max) {
+  const n = parseInt(raw, 10);
+  if (!Number.isFinite(n)) return def;
+  return Math.min(max, Math.max(min, n));
+}
+
+const routes = [
+  {
+    // 分页列表。最新的在前。
+    method: 'GET',
+    path: '',
+    handler: ({ res, req }) => {
+      const q = (k) => (req.url.match(new RegExp(`[?&]${k}=([^&]*)`)) || [])[1];
+      const limit = clampInt(q('limit') && decodeURIComponent(q('limit')), 50, 1, 500);
+      const offset = clampInt(q('offset') && decodeURIComponent(q('offset')), 0, 0, 10_000_000);
+      const days = clampInt(q('days') && decodeURIComponent(q('days')), 7, 1, 90);
+      const type = q('status') ? decodeURIComponent(q('status')) : '';
+
+      // 过滤语义：all=全部；ok=仅成功（2xx/3xx）；err=仅失败（4xx/5xx/0=中断）
+      const since = Date.now() - days * 86400000;
+      const filter = (r) => {
+        if (r.ts < since) return false;
+        if (type === 'ok') return r.status >= 200 && r.status < 400;
+        if (type === 'err') return r.status >= 400 || r.status === 0;
+        return true;
+      };
+
+      const { rows, total } = reqlog.read({ limit, offset, filter });
+      // 并发判定要看窗口内全量，不能只看当前页：页外的请求同样会
+      // 与页内请求重叠，只看一页会把不准的差值标成准确
+      const { rows: allInWindow } = reqlog.read({ limit: 0, filter });
+      return sendJSON(res, 200, {
+        // 附上实测扣费（余额差）。没有游标的行如实留空——
+        // 第一条请求没有参照点，补 0 会被读成「这条没花钱」
+        rows: pointsCursor.attachCosts(rows, allInWindow),
+        total,
+        limit,
+        offset,
+        // 提示数据源滚动：日志超 32MB 会轮转，太老的记录可能已被移到 .1
+        rotated_file: `${reqlog.LOG_DIR}\\requests.jsonl.1`,
+        note: '记录由网关逐条落盘，最多保留 32MB，最老的记录可能已轮转删除。',
+      });
+    },
+  },
+  {
+    // 上游消费明细（网页端「积分消费记录」的同一份数据）。
+    //
+    // 与本地请求日志是两套账：本地按「网关转发」记，上游按「实际计费」记，
+    // 条数对不上（一次转发可能拆成多笔扣费）。所以这里只做原样呈现，
+    // 不与请求日志强行对齐——对齐就是猜。
+    //
+    // 必须注册在 '/:ts' 之前：路由是锚定整串匹配，'/:ts' 会把
+    // 'points-records' 当成 ts 吞掉。
+    method: 'GET',
+    path: '/points-records',
+    handler: async ({ res, req }) => {
+      const q = (k) => (req.url.match(new RegExp(`[?&]${k}=([^&]*)`)) || [])[1];
+      const days = clampInt(q('days') && decodeURIComponent(q('days')), 7, 1, 90);
+      const page = clampInt(q('page') && decodeURIComponent(q('page')), 1, 1, 1000);
+      const limit = clampInt(q('limit') && decodeURIComponent(q('limit')), 50, 1, 200);
+      const wantId = q('account_id') ? Number(decodeURIComponent(q('account_id'))) : null;
+
+      const now = Math.floor(Date.now() / 1000);
+      const startAt = now - days * 86400;
+      const list = accounts.load().accounts.filter((a) => a.enabled && (!wantId || a.id === wantId));
+
+      const perAccount = [];
+      let totalCount = 0;
+      let totalConsumed = 0;
+
+      for (const a of list) {
+        const r = await web.api.usageRecords(a.cookie, { startAt, endAt: now, page, limit });
+        if (!r.ok) {
+          perAccount.push({ id: a.id, name: a.name, nickname: a.nickname || '', ok: false, error: r.error, rows: [] });
+          continue;
+        }
+        totalCount += Number(r.total_count || 0);
+        totalConsumed += Number(r.consumed_points || 0);
+        perAccount.push({
+          id: a.id,
+          name: a.name,
+          nickname: a.nickname || '',
+          ok: true,
+          total_count: Number(r.total_count || 0),
+          consumed_points: Number(r.consumed_points || 0),
+          rows: (r.list || []).map((it) => ({
+            account_id: a.id,
+            account: a.nickname || a.name,
+            // 上游给的是秒级时间戳，这里统一成毫秒，前端与请求日志同口径
+            ts: Number(it.createdAt || 0) * 1000,
+            // pointsChange 是字符串且带负号（"-5.58"），转成数值便于排序与着色
+            points: Number(it.pointsChange || 0),
+            conversation: it.conversationName || '',
+            package_id: it.packageId || '',
+          })),
+        });
+      }
+
+      // 合并成一个按时间倒序的流：网页端就是一条时间线，
+      // 分账号各列一张表反而看不出「同一时刻哪几笔在一起」
+      const merged = perAccount.flatMap((x) => x.rows)
+        .sort((a, b) => b.ts - a.ts);
+
+      return sendJSON(res, 200, {
+        rows: merged,
+        total: totalCount,
+        consumed_points: Math.round(totalConsumed * 100) / 100,
+        page,
+        limit,
+        days,
+        accounts: perAccount.map(({ rows, ...rest }) => rest),
+        note: '数据来自上游计费记录，与本地请求日志不是一一对应：一次转发可能拆成多笔扣费。',
+      });
+    },
+  },
+  {
+    // 单条详情。按 ts 精确匹配（ms 级时间戳即 id）。
+    method: 'GET',
+    path: '/:ts',
+    handler: ({ res, params }) => {
+      const ts = Number(params[0]);
+      if (!Number.isFinite(ts)) return sendJSON(res, 400, { error: 'ts 非法' });
+
+      // 不加 limit 的 read 会全量载入解析，897 行没问题，
+      // 但日志是滚动的，加 days 限制更稳
+      const { rows } = reqlog.read({ limit: 0 });
+      const row = rows.find((r) => Number(r.ts) === ts);
+      if (!row) return sendJSON(res, 404, { error: '记录不存在（可能已随日志轮转删除）' });
+      // 传全量行，并发判定才准（详情页同样要标出「差值可能含别人消耗」）
+      const [withCost] = pointsCursor.attachCosts([row], rows);
+      return sendJSON(res, 200, withCost);
+    },
+  },
+];
+
+module.exports = { routes };
