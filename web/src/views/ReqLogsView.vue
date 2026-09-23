@@ -62,6 +62,13 @@
             <span class="font-mono text-xs">{{ record.path }}</span>
             <a-tag v-if="record.stream" color="blue" class="ml-1">流式</a-tag>
           </template>
+          <template v-else-if="column.key === 'channel'">
+            <!-- 历史记录没有 channel 字段（分通道之前产生的），如实显示「—」
+                 而不是默认成搭子——那会让搭子的历史数字凭空变大 -->
+            <a-tag v-if="record.channel === 'qwenwork'" color="cyan">千问</a-tag>
+            <a-tag v-else-if="record.channel === 'dumate'" color="blue">搭子</a-tag>
+            <span v-else class="text-xs text-slate-400">—</span>
+          </template>
           <template v-else-if="column.key === 'model'">
             <div class="text-xs">{{ record.model || '—' }}</div>
             <div v-if="record.mapped_model && record.mapped_model !== record.model" class="text-xs text-slate-400">
@@ -160,6 +167,13 @@
           <div class="detail-label">映射模型</div>
           <div class="detail-value font-mono text-xs">{{ detail.mapped_model || '—' }}</div>
 
+          <div class="detail-label">通道</div>
+          <div class="detail-value">
+            <a-tag v-if="detail.channel === 'qwenwork'" color="cyan">千问办公</a-tag>
+            <a-tag v-else-if="detail.channel === 'dumate'" color="blue">百度搭子</a-tag>
+            <span v-else class="text-slate-400">— （分通道前的记录）</span>
+          </div>
+
           <div class="detail-label">状态码</div>
           <div class="detail-value">
             <a-tag :color="statusColor(detail.status)">{{ detail.status || '中断' }}</a-tag>
@@ -243,7 +257,8 @@ const dayOptions = [
 const columns = [
   { title: '时间', key: 'ts', width: '15%' },
   { title: '路径', key: 'path', width: '17%' },
-  { title: '模型', key: 'model', width: '15%' },
+  { title: '通道', key: 'channel', width: '9%' },
+  { title: '模型', key: 'model', width: '13%' },
   { title: '状态', key: 'status', width: '8%' },
   { title: '耗时', key: 'ms', width: '11%' },
   { title: 'Token（总/入/出）', key: 'tokens', width: '12%' },

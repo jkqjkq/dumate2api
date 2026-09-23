@@ -11,6 +11,12 @@ const bridge = require('./bridge');
 const credentials = require('./credentials');
 const constants = require('./constants');
 const wasmPath = require('./wasm-path');
+const credits = require('./credits');
+
+// 在飞请求计数。积分归因在并发下有个本质限制：两个请求同时在飞时，
+// 「前后差值」分不清是谁消耗的——总和正确，单项归属不准。
+// 所以并发时如实标记 concurrent，而不是假装精确。
+let inFlight = 0;
 
 /** 预热：解析 wasm 路径。失败要早失败，别等到第一个请求才炸 */
 function warmup() {
@@ -47,6 +53,20 @@ async function send(payload, onChunk) {
     modelKey,
     machineId: credentials.machineId(),
   });
+
+  // 积分归因：**必须在请求完成后**调用。请求要几秒（实测 4s），
+  // 在发出前调用会在请求还没结算时就读余额，差值恒为 0。
+  // 不 await —— 采集在响应发出后进行，不占请求延迟。
+  const startedAt = Date.now();
+  const wasConcurrent = inFlight > 0;
+  inFlight++;
+  const settle = () => {
+    inFlight = Math.max(0, inFlight - 1);
+    // capture 内部已负责落盘（含并发标记由下面传入），这里只做调度
+    credits.capture({ model: modelKey, startedAt, concurrent: wasConcurrent })
+      .catch(() => { /* 采集失败绝不影响已发出的响应 */ });
+  };
+
   if (onChunk) {
     let firstErr = null;
     const res = await chat.postStream(built.url, built.body, built.headers, (inner) => {
@@ -60,6 +80,7 @@ async function send(payload, onChunk) {
       } catch (e) { /* 正常数据帧不是错误结构 */ }
       onChunk(inner);
     });
+    settle();
     if (firstErr) {
       const err = new Error(`qwenwork ${firstErr.code}: ${firstErr.message}`);
       err.statusCode = firstErr.code;
@@ -70,6 +91,7 @@ async function send(payload, onChunk) {
   const res = await chat.post(built.url, built.body, built.headers);
   const es = chat.envelopeStatus(res.raw);
   if (es && es.code >= 400) {
+    settle();
     const err = new Error(`qwenwork ${es.code}: ${es.message}`);
     err.statusCode = es.code;
     throw err;
@@ -81,6 +103,7 @@ async function send(payload, onChunk) {
     if (raw === '[DONE]') continue;
     payloads.push(...chat.unwrap(raw));
   }
+  settle();
   return chat.aggregate(payloads, modelKey);
 }
 

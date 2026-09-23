@@ -40,6 +40,18 @@ export interface UsageBucket {
   avg_ms: number
 }
 
+export interface UsageByChannel {
+  id: string
+  label: string
+  requests: number
+  total_tokens: number
+  failed: number
+  avg_ms: number
+  /** 首字延迟按通道分开算：千问首帧实测 6.7s，混进搭子均值会失真 */
+  avg_first_token_ms: number | null
+  first_token_samples: number
+}
+
 export interface UsageByModel extends UsageBucket {
   model: string
 }
@@ -62,6 +74,11 @@ export interface UsageOverview {
   cards: UsageCards
   daily: UsageDaily[]
   by_model: UsageByModel[]
+  /**
+   * 按通道聚合。id 为 'untagged' 的是 channel 字段上线前的历史记录——
+   * 不并入任一通道，否则搭子的历史数字会凭空变大。
+   */
+  by_channel: UsageByChannel[]
   by_key: UsageByKey[]
   points_by_account: UsagePointsAccount[]
   note: string

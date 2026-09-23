@@ -54,11 +54,34 @@ function probeModel(port, model, timeout = 15000) {
   });
 }
 
+// 千问办公的模型表由服务端 /api/v2/model/list 下发，**本地不可编辑**：
+// 实测 1.1.0 只有 pro/flash，旧版的 qwork-advanced 等已消失——硬编码一份
+// 必然过期。中文名也来自上游 display_name，不自己编。
+const QW_NAMES = { pro: '高级', flash: '标准', 'qwen3.8-max-preview': 'Qwen3.8-Max' };
+
+async function channelView(cfg) {
+  const out = [{
+    id: 'dumate', label: '百度搭子', editable: true, prefix: null,
+    models: cfg.exposed.map((id) => ({ id, name: id })),
+  }];
+  try {
+    const qw = require('../../qwenwork');
+    const keys = await qw.listModels();
+    out.push({
+      id: 'qwenwork', label: '千问办公', editable: false, prefix: 'qwen/',
+      models: keys.map((k) => ({ id: k, name: QW_NAMES[k] || k, prefixed: `qwen/${k}` })),
+    });
+  } catch (e) {
+    out.push({ id: 'qwenwork', label: '千问办公', editable: false, prefix: 'qwen/', models: [], error: e.message });
+  }
+  return out;
+}
+
 const routes = [
   {
     method: 'GET',
     path: '/map',
-    handler: ({ res }) => {
+    handler: async ({ res }) => {
       const cfg = modelmap.load();
       const upstream = new Set(cfg.upstream_models);
       return sendJSON(res, 200, {
@@ -78,6 +101,9 @@ const routes = [
           upstream_models: modelmap.DEFAULT_UPSTREAM,
           exposed: modelmap.DEFAULT_EXPOSED,
         },
+        // 通道视图：上面的 aliases/exposed 只描述搭子（那套别名表是搭子
+        // 专用的）。千问办公的模型由上游下发，本地改不了，所以只读展示。
+        channels: await channelView(cfg),
       });
     },
   },

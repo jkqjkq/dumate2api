@@ -179,6 +179,34 @@ const routes = [
       // 那种情况下没有「密钥」可言，如实返回 0 而不是编一个。
       const activeKeys = new Set(rows.filter((r) => r.key_id).map((r) => r.key_id)).size;
 
+      // 按通道聚合。关键点：**channel 字段上线前的历史记录归入「未标注」**，
+      // 不并入任一通道——默认成 dumate 就是在编数据，会让搭子的历史数字
+      // 凭空变大，而用户无从察觉。
+      const CH_LABEL = { dumate: '百度搭子', qwenwork: '千问办公' };
+      const chMap = {};
+      for (const r of rows) {
+        const id = r.channel || 'untagged';
+        if (!chMap[id]) chMap[id] = { id, label: CH_LABEL[id] || (id === 'untagged' ? '未标注' : id), requests: 0, total_tokens: 0, failed: 0, avg_ms: 0, _msSum: 0 };
+        const c = chMap[id];
+        c.requests++;
+        c.total_tokens += r.total_tokens || 0;
+        c._msSum += r.ms || 0;
+        if (r.status >= 400 || r.status === 0) c.failed++;
+      }
+      const byChannel = Object.values(chMap)
+        .map((c) => ({ ...c, avg_ms: c.requests ? Math.round(c._msSum / c.requests) : 0, _msSum: undefined }))
+        .sort((a, b) => b.requests - a.requests);
+
+      // 首字延迟按通道分开：千问首帧实测 6.7s，混进搭子的均值里会让
+      // 「平均首字延迟」既偏高又无法归因。
+      for (const c of byChannel) {
+        const sub = rows.filter((r) => (r.channel || 'untagged') === c.id && r.first_token_ms != null);
+        c.first_token_samples = sub.length;
+        c.avg_first_token_ms = sub.length
+          ? Math.round(sub.reduce((a, r) => a + r.first_token_ms, 0) / sub.length)
+          : null;
+      }
+
       return sendJSON(res, 200, {
         days,
         cards: {
@@ -193,6 +221,7 @@ const routes = [
         daily,
         by_model: byModel,
         by_key: byKey,
+        by_channel: byChannel,
         // 各账号的积分消耗，供「按账号」视图
         points_by_account: pointsAll.accounts,
         // 说明扣费口径，避免与本地 token 统计混淆

@@ -2,7 +2,30 @@
   <div class="page">
     <PageHeader title="模型管理" sub="客户端传来的模型名 → 上游实际使用的 ID" />
 
-    <a-card :bordered="false">
+    <!-- 通道视图：千问办公的模型表由上游下发，本地改不了，所以单独只读展示。
+         下面的「模型映射」只描述搭子——那套别名表是搭子专用的。 -->
+    <a-card v-if="qwChannel" :bordered="false">
+      <template #title>
+        <span class="section-title">{{ qwChannel.label }}</span>
+        <a-tag class="ml-2" color="cyan">只读</a-tag>
+      </template>
+      <template #extra>
+        <span class="text-xs text-slate-400">模型表由上游下发，本地不可编辑</span>
+      </template>
+      <a-empty v-if="!qwChannel.models.length" :description="qwChannel.error || '未取到模型列表'" />
+      <a-space v-else wrap :size="[8, 8]">
+        <a-tag v-for="m in qwChannel.models" :key="m.id" color="cyan" class="qw-model-tag">
+          <span class="font-medium">{{ m.name }}</span>
+          <span class="font-mono text-xs ml-2 opacity-70">{{ m.prefixed }}</span>
+        </a-tag>
+      </a-space>
+      <div class="text-xs text-slate-500 mt-3">
+        调用时用前缀名（如 <span class="font-mono">qwen/{{ qwChannel.models[0]?.id || 'pro' }}</span>）；
+        不带前缀的名字一律走搭子。
+      </div>
+    </a-card>
+
+    <a-card :bordered="false" class="mt-4">
       <div class="flex items-center justify-between mb-3">
         <div>
           <span class="section-title">模型映射</span>
@@ -121,6 +144,8 @@ interface Row {
 }
 
 const map = ref<ModelMapData | null>(null)
+// 千问办公通道（只读）。从 /models/map 的 channels 里取，不另开接口。
+const qwChannel = computed(() => map.value?.channels?.find((c) => c.id === 'qwenwork') || null)
 const rows = ref<Row[]>([])
 const saving = ref(false)
 const probing = ref(false)

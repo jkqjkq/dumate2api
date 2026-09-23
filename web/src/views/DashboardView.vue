@@ -1,8 +1,8 @@
 <template>
   <div class="page">
-    <PageHeader title="仪表盘">
+    <PageHeader :title="isQw ? '千问办公' : '仪表盘'">
       <template #sub>
-        账号池健康度、上游状态与今日用量总览
+        {{ isQw ? '积分额度、登录态与用量总览' : '账号池健康度、上游状态与今日用量总览' }}
         <template v-if="lastRefresh"> · 更新于 {{ lastRefresh }}</template>
       </template>
       <template #actions>
@@ -10,6 +10,103 @@
       </template>
     </PageHeader>
 
+    <!-- 千问办公：积分卡片。它是另一套账——不消耗搭子积分、不进账号池，
+         所以整块替换而不是与搭子的指标卡混排。 -->
+    <template v-if="isQw">
+      <a-row :gutter="[16, 16]">
+        <a-col :span="8">
+          <a-card :bordered="false" class="h-full">
+            <a-statistic title="免费额度" :value="qw?.free ?? '—'" :precision="2"
+              :value-style="qw && qw.free < 20 ? 'color:#fbbf24' : ''">
+              <template #suffix><span class="text-sm text-slate-400">积分</span></template>
+            </a-statistic>
+            <div class="qw-bar">
+              <div class="qw-bar-fill" :style="{ width: qwFreePct + '%' }" />
+            </div>
+            <div class="text-xs text-slate-500 mt-2">
+              <template v-if="qw">
+                今日已用 {{ qw.freeUsed.toFixed(2) }} / {{ qw.limit }}
+                <span class="text-slate-400">（上限按配置 {{ qw.limit }} 计算，接口不提供）</span>
+              </template>
+              <span v-else>—</span>
+            </div>
+          </a-card>
+        </a-col>
+
+        <a-col :span="8">
+          <a-card :bordered="false" class="h-full">
+            <a-statistic title="付费额度" :value="qw?.paid ?? '—'" :precision="2" />
+            <div class="text-xs text-slate-500 mt-2">
+              <template v-if="qw">
+                月度 {{ qw.monthly.toFixed(2) }} · 长期 {{ qw.longterm.toFixed(2) }}
+              </template>
+              <span v-else>—</span>
+            </div>
+          </a-card>
+        </a-col>
+
+        <a-col :span="8">
+          <a-card :bordered="false" class="h-full">
+            <a-statistic title="今日消耗" :value="qw?.today.total ?? '—'" :precision="4" />
+            <div class="text-xs text-slate-500 mt-2">
+              <template v-if="qw">
+                <a-tag :color="qw.today.paid > 0 ? 'orange' : 'green'" class="mr-1">
+                  {{ qw.today.paid > 0 ? '含付费' : '全部免费' }}
+                </a-tag>
+                免费 {{ qw.today.free.toFixed(4) }} · 付费 {{ qw.today.paid.toFixed(4) }}
+              </template>
+              <span v-else>—</span>
+            </div>
+          </a-card>
+        </a-col>
+      </a-row>
+
+      <a-row :gutter="[16, 16]" class="mt-4">
+        <a-col :span="17">
+          <a-card title="积分消耗趋势" :bordered="false" class="h-full">
+            <template #extra><span class="text-xs text-slate-400">按天聚合 · 免费与付费分开</span></template>
+            <a-empty v-if="!qwDaily.length" description="还没有归因记录" />
+            <div v-else ref="qwChartEl" class="qw-chart" />
+          </a-card>
+        </a-col>
+        <a-col :span="7">
+          <a-card title="通道状态" :bordered="false" class="h-full">
+            <a-descriptions :column="1" size="small">
+              <a-descriptions-item label="状态">
+                <a-tag :color="qwInfo?.ready ? (qwInfo.refreshExpired ? 'orange' : 'green') : 'red'">
+                  {{ qwInfo?.ready ? (qwInfo.refreshExpired ? '可用·待重登' : '正常') : '不可用' }}
+                </a-tag>
+              </a-descriptions-item>
+              <a-descriptions-item label="wasm">
+                <span class="font-mono text-xs">{{ qwInfo?.wasm || '—' }}</span>
+              </a-descriptions-item>
+              <a-descriptions-item label="账号">
+                {{ qwInfo?.account || '—' }}
+                <span v-if="qwInfo?.tier" class="text-xs text-slate-400 ml-1">{{ qwInfo.tier }}</span>
+              </a-descriptions-item>
+              <a-descriptions-item label="access token">
+                <span class="font-mono text-xs">{{ fmtExpire(qwInfo?.tokenExpiresAt) }}</span>
+              </a-descriptions-item>
+              <a-descriptions-item label="refresh token">
+                <span class="font-mono text-xs">{{ fmtExpire(qwInfo?.refreshExpiresAt) }}</span>
+                <a-tag v-if="qwInfo?.refreshExpired" color="orange" class="ml-1">已过期</a-tag>
+              </a-descriptions-item>
+            </a-descriptions>
+            <a-alert
+              v-if="qwInfo?.refreshExpired"
+              type="warning"
+              show-icon
+              class="mt-3"
+              message="refresh token 已过期"
+              description="access token 到期后需打开千问办公客户端重新登录一次，否则通道会失效。"
+            />
+          </a-card>
+        </a-col>
+      </a-row>
+    </template>
+
+    <!-- 搭子通道：账号池 + 用量 -->
+    <template v-else>
     <!-- 顶部指标卡：数据来自 /web-accounts/dashboard（账号池）+ /stats（用量） -->
     <a-row :gutter="[16, 16]">
       <a-col :span="5">
@@ -230,12 +327,15 @@
     </a-row>
 
     <a-alert v-if="error" type="warning" show-icon class="mt-4" :message="`部分数据获取失败：${error}`" />
+    </template>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import PageHeader from '@/components/PageHeader.vue'
+import { channelStore } from '@/stores/channel'
+import { qwenworkApi, type QwCredits, type QwDailyRow } from '@/api/qwenwork'
 import client from '@/api/client'
 import type { SystemStatus } from '@/api/system'
 import type { PointsData, AccountsData } from '@/api/points'
@@ -278,6 +378,24 @@ const dash = ref<DashData | null>(null)
 const loading = ref(false)
 const error = ref('')
 const lastRefresh = ref('')
+
+// 通道：千问办公是另一套账（积分/登录态），整块内容与搭子不同。
+// 用 store 的全局状态而不是本地 ref —— 顶栏切换器与这里必须一致。
+const isQw = computed(() => channelStore.current === 'qwenwork')
+const qw = ref<QwCredits | null>(null)
+const qwDaily = ref<QwDailyRow[]>([])
+const qwInfo = computed(() => channelStore.infos['qwenwork'] || null)
+const qwFreePct = computed(() => {
+  if (!qw.value || !qw.value.limit) return 0
+  return Math.max(0, Math.min(100, (qw.value.free / qw.value.limit) * 100))
+})
+
+function fmtExpire(iso?: string | null) {
+  if (!iso) return '—'
+  const t = Date.parse(iso)
+  if (!Number.isFinite(t)) return '—'
+  return new Date(t).toLocaleString('zh-CN', { hour12: false })
+}
 
 const accountColumns = [
   { title: '账号', key: 'name', dataIndex: 'name' },
@@ -418,7 +536,31 @@ function renderChart() {
   }
 }
 
+// 千问办公的数据单独拉：它走的是 /qwenwork/* 而不是搭子那套接口，
+// 两者混在一个 Promise.all 里会让任一通道故障拖垮整页。
+async function refreshQw() {
+  loading.value = true
+  error.value = ''
+  try {
+    const [c, d] = await Promise.all([
+      qwenworkApi.credits(),
+      qwenworkApi.daily(14),
+    ])
+    qw.value = c.data
+    qwDaily.value = d.data.rows
+    await channelStore.load()
+    lastRefresh.value = new Date().toLocaleTimeString('zh-CN')
+    await nextTick()
+    renderQwChart()
+  } catch (e: any) {
+    error.value = e?.response?.data?.error || e?.message || '未知错误'
+  } finally {
+    loading.value = false
+  }
+}
+
 async function refresh(force = false) {
+  if (isQw.value) return refreshQw()
   loading.value = true
   error.value = ''
   try {
@@ -447,9 +589,42 @@ async function refresh(force = false) {
   }
 }
 
+// 千问积分趋势：免费与付费堆叠。分开画是因为「消耗的是免费额度还是
+// 付费额度」是本通道最要紧的一件事——堆叠能一眼看出付费是否开始被动用。
+const qwChartEl = ref<HTMLElement | null>(null)
+let qwChart: echarts.ECharts | null = null
+
+function renderQwChart() {
+  const rows = qwDaily.value
+  if (!qwChartEl.value || !rows.length) return
+  if (!qwChart) qwChart = echarts.init(qwChartEl.value)
+  const days = rows.map((r) => r.day.slice(5))
+  qwChart.setOption({
+    grid: { left: 56, right: 16, top: 12, bottom: 24 },
+    tooltip: {
+      ...TOOLTIP_BASE,
+      trigger: 'axis',
+      formatter: (params: any[]) => {
+        const r = rows[params[0].dataIndex]
+        return `${r.day}<br/>免费 <b>${exactNum(r.free)}</b><br/>付费 <b>${exactNum(r.paid)}</b><br/>请求 ${exactNum(r.requests)} 次`
+      },
+    },
+    legend: { data: ['免费额度', '付费额度'], right: 0, top: 0, textStyle: { color: INK.secondary, fontSize: 11 }, itemWidth: 10, itemHeight: 10 },
+    xAxis: { type: 'category', data: days, boundaryGap: false, axisLine: { show: true, lineStyle: { color: INK.axis } }, axisTick: { show: false }, axisLabel: { color: INK.muted, fontSize: 11 } },
+    // 积分量级很小（单次请求 0.0025~0.02），compactNum 会把刻度全取整成
+    // 1/0，看不出差别——这里用小数位而不是紧凑格式。
+    yAxis: { type: 'value', ...axisStyle({ formatter: (v: number) => (v === 0 ? '0' : v.toFixed(2)) }) },
+    series: [
+      { ...lineSeries({ name: '免费额度', data: rows.map((r) => r.free), color: SERIES[2], area: true }), stack: 'credit' },
+      { ...lineSeries({ name: '付费额度', data: rows.map((r) => r.paid), color: SERIES[1], area: true }), stack: 'credit' },
+    ],
+  })
+}
+
 function onResize() {
   reqChart?.resize()
   tokChart?.resize()
+  qwChart?.resize()
 }
 
 onMounted(() => {
@@ -457,16 +632,39 @@ onMounted(() => {
   refresh()
 })
 
+// 切通道要重拉数据：两个通道的数据源不同，不重拉会看到上一个通道的残留
+watch(isQw, () => { refresh() })
+
 onBeforeUnmount(() => {
   window.removeEventListener('resize', onResize)
   reqChart?.dispose()
   tokChart?.dispose()
+  qwChart?.dispose()
   reqChart = null
   tokChart = null
+  qwChart = null
 })
 </script>
 
 <style scoped>
+/* 千问积分：余额条。宽度按「余额 / 上限」——上限来自配置，接口不给 */
+.qw-bar {
+  height: 6px;
+  margin-top: 10px;
+  border-radius: 3px;
+  background: var(--lab-surface-3);
+  overflow: hidden;
+}
+.qw-bar-fill {
+  height: 100%;
+  border-radius: 3px;
+  background: linear-gradient(90deg, #34d399, #22d3ee);
+  transition: width 0.3s ease;
+}
+.qw-chart {
+  height: 260px;
+  width: 100%;
+}
 /* 两张小倍数图：上下贴紧、共享一条时间轴，读起来仍是一条趋势带 */
 .trend-block + .trend-block {
   margin-top: 2px;

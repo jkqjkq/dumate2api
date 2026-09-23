@@ -111,6 +111,28 @@
             </a-tag>
           </div>
         </div>
+
+        <!-- 按通道：千问首帧实测 6.7s，与搭子混在同一均值里会让
+             「平均首字延迟」既偏高又无法归因，所以分开列 -->
+        <div v-if="data.by_channel?.length" class="mt-3">
+          <div class="text-xs text-slate-500 mb-1">按通道</div>
+          <div class="flex flex-wrap gap-2">
+            <a-tag
+              v-for="c in data.by_channel"
+              :key="c.id"
+              :color="c.id === 'qwenwork' ? 'cyan' : (c.id === 'dumate' ? 'blue' : 'default')"
+            >
+              {{ c.label }} · {{ compact(c.total_tokens) }} · {{ c.requests }} 次
+              <span v-if="c.avg_first_token_ms != null" class="opacity-70">
+                · 首字 {{ fmtMs(c.avg_first_token_ms) }}
+              </span>
+              <span v-if="c.failed" class="text-red-500 ml-1">失败 {{ c.failed }}</span>
+            </a-tag>
+          </div>
+          <div v-if="hasUntagged" class="text-xs text-slate-400 mt-1">
+            「未标注」是分通道埋点上线前的历史记录，不并入任一通道。
+          </div>
+        </div>
       </template>
     </a-card>
 
@@ -239,6 +261,16 @@ const data = ref<UsageOverview | null>(null)
 const loading = ref(false)
 const lastRefresh = ref('')
 const days = ref(30)
+
+// 「未标注」= channel 字段上线前的历史记录。不并入任一通道——那会让
+// 搭子的历史数字凭空变大，而用户无从察觉。
+// 首字延迟的展示格式：与请求日志页保持一致（秒/毫秒自动切换）
+function fmtMs(ms?: number | null) {
+  if (ms == null) return '—'
+  return ms >= 1000 ? `${(ms / 1000).toFixed(2)}s` : `${ms}ms`
+}
+
+const hasUntagged = computed(() => (data.value?.by_channel || []).some((c) => c.id === 'untagged'))
 
 const dayOptions = [
   { label: '近 7 天', value: 7 },

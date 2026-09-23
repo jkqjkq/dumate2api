@@ -113,6 +113,44 @@ const routes = [
         install,
         account: profile ? { name: profile.name, user_id: profile.userId } : null,
         versions: { node: process.version, admin: 'module-2' },
+        // 两个上游通道并列报出。搭子是本地 HTTP 上游（有端口），
+        // 千问办公是进程内直连（无端口，靠 wasm + 登录态）。
+        // 分开报是为了让界面能回答「qwen/ 请求会在哪一步失败」。
+        channels: (() => {
+          const out = {
+            dumate: {
+              id: 'dumate', label: '百度搭子', kind: 'http',
+              port: upstreamPort, ready: !!upstreamPort, managed: upstreamManaged,
+            },
+          };
+          try {
+            const qw = require('../../qwenwork');
+            const st = qw.status();
+            let acct = {};
+            try {
+              const doc = require('../../qwenwork/credentials').decryptAuth();
+              const u = doc.user || {};
+              acct = {
+                account: u.name || '', tier: u.tier || '',
+                tokenExpiresAt: doc.expiresAt || null,
+                refreshExpiresAt: doc.refreshTokenExpiresAt || null,
+                refreshExpired: (() => {
+                  const t = Date.parse(doc.refreshTokenExpiresAt || '');
+                  return Number.isFinite(t) ? Date.now() >= t : false;
+                })(),
+              };
+            } catch (e) { /* 登录态读不到就只报通道状态 */ }
+            out.qwenwork = {
+              id: 'qwenwork', label: '千问办公', kind: 'direct',
+              ready: st.ready, wasm: st.wasm ? st.wasm.version : null,
+              loggedIn: !!st.loggedIn, error: st.error || '',
+              ...acct,
+            };
+          } catch (e) {
+            out.qwenwork = { id: 'qwenwork', label: '千问办公', kind: 'direct', ready: false, error: e.message };
+          }
+          return out;
+        })(),
       });
     },
   },

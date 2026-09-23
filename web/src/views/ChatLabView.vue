@@ -105,6 +105,14 @@
 
         <div class="composer-bar">
           <div class="bar-left">
+            <!-- 通道选择器：不选的话用户得手打 qwen/ 前缀才知道走哪条通道 -->
+            <a-select
+              v-model:value="labChannel"
+              size="small"
+              style="width: 122px"
+              :options="channelOptions"
+              @change="onChannelChange"
+            />
             <a-select
               v-model:value="model"
               class="model-select"
@@ -151,6 +159,8 @@ import {
   ExclamationCircleOutlined, CommentOutlined,
 } from '@ant-design/icons-vue'
 import client from '@/api/client'
+import { channelStore, CHANNELS } from '@/stores/channel'
+import { qwenworkApi as qwenApi } from '@/api/qwenwork'
 import type { ChatLabModels } from '@/api/chatlab'
 
 interface ChatMessage {
@@ -181,9 +191,33 @@ const streamOptions = [
   { label: '非流式', value: 'plain' },
 ]
 
+// 通道选择：测试台原本只能靠手打 `qwen/` 前缀走千问，这里给个下拉。
+// 选项与全局切换器同源（stores/channel），避免两处各维护一份通道表。
+const labChannel = ref(channelStore.current)
+const channelOptions = CHANNELS.map((c) => ({ label: c.label, value: c.id }))
+
+// 千问模型：从管理端接口拿（含中文名），选中的值带上 `qwen/` 前缀
+const qwModels = ref<Array<{ id: string; name: string; prefixed: string }>>([])
+async function onChannelChange(id: string) {
+  model.value = ''
+  if (id === 'qwenwork' && !qwModels.value.length) {
+    try {
+      const { data } = await qwenApi.models()
+      qwModels.value = data.models || []
+    } catch { /* 拿不到就空列表，不阻断 */ }
+  }
+}
+
 // 上游模型与别名都列出来：别名能不能用恰恰是要试的东西
 const modelOptions = computed(() => {
   const out: Array<{ label: string; value: string }> = []
+  if (labChannel.value === 'qwenwork') {
+    for (const m of qwModels.value) {
+      // value 带前缀：网关靠前缀分流，不带就跑到搭子上去了
+      out.push({ label: `${m.name} (${m.prefixed})`, value: m.prefixed })
+    }
+    return out
+  }
   for (const m of models.value?.exposed ?? []) {
     out.push({ label: `${m.id}（上游）`, value: m.id })
   }
