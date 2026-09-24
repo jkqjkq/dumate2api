@@ -20,9 +20,24 @@
 // 环境变量：
 //   DUMATE_MIN_MAX_TOKENS  预算下限，默认 32768（0 = 关闭抬升/压制，只对非法入参兜底）
 //   DUMATE_MAX_MAX_TOKENS  预算上限，默认 131072（0 表示不设上限）
+//   DUMATE_QWENWORK_MIN_MAX_TOKENS  千问办公专用下限，默认 4096
 
 const FLOOR = parseInt(process.env.DUMATE_MIN_MAX_TOKENS || '32768', 10);
 const CEIL = parseInt(process.env.DUMATE_MAX_MAX_TOKENS || '131072', 10);
+
+// 千问办公的下限**远低于**搭子，这是实测得出的，不是为了省：
+//   千问的 reasoning 与正文分开流，但**它同样吃 max_tokens**，
+//   而且峰值远超早期估计。实测同一「继续写 3 章小说」任务：
+//     max_tokens=4096  → reasoning 约 46000 字符，工具参数只剩 216 字符（写不出内容）
+//     max_tokens=32000 → reasoning 收敛到 3700 字符，工具参数 8681 字符（正常写作）
+//   reasoning 被预算卡住时，模型会陷入反复推演（纠结章节对应哪一天之类），
+//   最后只吐一句话就结束——表现为「几秒就停、不按要求做」。
+//   所以下限不能太小：4096 对写作类任务远远不够，取 16384 留足思考空间，
+//   同时仍明显低于搭子的 32768（避免小请求被撑得过大）。
+const QW_FLOOR = (() => {
+  const n = parseInt(process.env.DUMATE_QWENWORK_MIN_MAX_TOKENS || '16384', 10);
+  return Number.isFinite(n) && n >= 0 ? n : 16384;
+})();
 
 const DEFAULT_BUDGET = 32768;
 
@@ -36,4 +51,24 @@ function resolveMaxTokens(requested) {
   return out;
 }
 
-module.exports = { resolveMaxTokens, FLOOR, CEIL, DEFAULT_BUDGET };
+/**
+ * 千问办公的预算。与搭子分开的原因见 QW_FLOOR 的注释：
+ * 千问也要兜底（否则小预算直接截断正文），但下限低得多。
+ * 传 0 表示完全不干预（保留逃生口）。
+ */
+function resolveQwenMaxTokens(requested) {
+  const n = Number(requested);
+  let out = Number.isFinite(n) && n > 0 ? n : DEFAULT_BUDGET;
+  if (QW_FLOOR > 0) out = Math.max(out, QW_FLOOR);
+  if (CEIL > 0) out = Math.min(out, CEIL);
+  return out;
+}
+
+module.exports = {
+  resolveMaxTokens,
+  resolveQwenMaxTokens,
+  FLOOR,
+  QW_FLOOR,
+  CEIL,
+  DEFAULT_BUDGET,
+};
