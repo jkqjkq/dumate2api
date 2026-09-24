@@ -1,0 +1,156 @@
+// src/traework/login.js - 独立 OAuth 登录（不依赖 TRAE 客户端）
+//
+// 这是与千问最大的不同：千问只能读客户端加密文件，而 TRAE Work 的
+// 凭证是我们自己走 OAuth 换来的 —— 只要浏览器登录一次即可。
+//
+// 流程（参考 traework2api 的 login.sh，改成纯 Node）：
+//   1. 生成 machine_id / device_id（32 位 hex）
+//   2. 拼登录 URL（带 127.0.0.1 回调 + 两个设备标识）
+//   3. 用户浏览器打开 → 登录 → 复制回调地址
+//   4. 解析回调里的 refreshToken → ExchangeToken 换 access token
+//   5. 落盘
+//
+// 为什么设备标识要在登录时就带上：TRAE 按设备限流（同机多账号会互相顶掉），
+// 而这两个 id 一旦参与登录就与账号绑定。**登录后不要再改**，
+// 否则会被判成换设备，需要重新登录。
+const crypto = require('crypto');
+const c = require('./constants');
+const { oauthHeaders } = require('./headers');
+const authStore = require('./auth');
+
+// 回调固定走本机端口，由用户手动把地址粘回来（不做本地 http server：
+// 客户端机器不一定允许监听，且手动粘贴更透明、少一个失败点）
+const REDIRECT = 'http://127.0.0.1:18080/authorize';
+
+/** 生成一次登录所需的随机标识（device/machine 各 32 hex） */
+function newDeviceIds() {
+  return { deviceId: authStore.genId(), machineId: authStore.genId() };
+}
+
+/**
+ * 拼授权 URL。
+ *
+ * **参数表是逆向出来的，不是标准 OAuth**：用 redirect_uri/scope/state 那套
+ * 标准参数会被 Trae 判为非法客户端，页面永远卡在「认证中…」。
+ * 必须带 x_device_* / x_app_* 这组前缀参数，且 auth_callback_url 才是回调字段。
+ *
+ * @param {{deviceId:string, machineId:string}} ids
+ */
+function buildAuthUrl(ids) {
+  const params = {
+    login_version: '1',
+    auth_from: 'solo',
+    login_channel: 'native_ide',
+    plugin_version: '2.3.62834',
+    auth_type: 'local',
+    client_id: c.CLIENT_ID,
+    redirect: '0',
+    login_trace_id: crypto.randomBytes(8).toString('hex'),
+    auth_callback_url: REDIRECT,
+    machine_id: ids.machineId,
+    device_id: ids.deviceId,
+    x_device_id: ids.deviceId,
+    x_machine_id: ids.machineId,
+    x_device_brand: 'PC',
+    x_device_type: 'PC',
+    x_os_version: '1.0',
+    x_app_version: c.IDE_VERSION,
+    x_app_type: 'stable',
+  };
+  return `${c.CONSOLE_HOST}/authorization?${new URLSearchParams(params).toString()}`;
+}
+
+/**
+ * 从用户粘贴的回调地址里取 refreshToken 与用户信息。
+ * 回调形如 http://127.0.0.1:18080/authorize?refreshToken=xxx&userInfo={...}&userJwt={...}
+ *
+ * 字段名是逆向出来的：userInfo 里 uid 叫 UserID、昵称叫 ScreenName。
+ * refreshToken 缺失时回落到 userJwt.RefreshToken（参考实现也这么做）。
+ */
+function parseCallback(text) {
+  const s = String(text || '').trim();
+  const qIdx = s.indexOf('?');
+  const qs = new URLSearchParams(qIdx >= 0 ? s.slice(qIdx + 1) : s);
+
+  const parseJson = (v) => {
+    if (!v) return null;
+    try { return JSON.parse(decodeURIComponent(v)); } catch (e) { return null; }
+  };
+
+  const userInfo = parseJson(qs.get('userInfo')) || {};
+  const userJwt = parseJson(qs.get('userJwt')) || {};
+
+  let refreshToken = qs.get('refreshToken') || qs.get('refresh_token') || '';
+  if (!refreshToken) refreshToken = String(userJwt.RefreshToken || '');
+
+  return {
+    refreshToken,
+    uid: String(userInfo.UserID || ''),
+    nickname: String(userInfo.ScreenName || ''),
+    tenantId: String(userInfo.TenantID || ''),
+    // 回调里有时直接带 access token，省一次 ExchangeToken（但我们仍会换，
+    // 因为 refreshToken 轮换后必须落盘新的，不能只存回调给的这个）
+    jwtToken: String(userJwt.Token || ''),
+  };
+}
+
+/**
+ * 用 refreshToken 换 access token 并落盘。
+ * @param {{refreshToken:string, deviceId:string, machineId:string, nickname?:string, uid?:string, apiHost?:string}} opts
+ */
+async function exchangeAndSave(opts) {
+  const { refreshToken, deviceId, machineId } = opts || {};
+  if (!refreshToken) return { ok: false, error: '缺少 refreshToken' };
+
+  const host = opts.apiHost || c.OAUTH_HOST;
+  // body 形状是逆向出来的：ClientSecret 必须是 "-"，UserID 空串
+  const body = {
+    ClientID: c.CLIENT_ID,
+    RefreshToken: refreshToken,
+    ClientSecret: '-',
+    UserID: '',
+  };
+  const r = await c.request(host, c.EP_EXCHANGE, {
+    method: 'POST', body, headers: oauthHeaders(),
+  });
+  if (r.status !== 200 || !r.data) {
+    return { ok: false, error: `换票失败 HTTP ${r.status} ${String(r.raw).slice(0, 160)}` };
+  }
+  const res = (r.data && r.data.Result) || r.data || {};
+  const accessToken = res.Token || res.token;
+  if (!accessToken) return { ok: false, error: '换票响应里没有 Token' };
+
+  const expiresAt = authStore.jwtExp(accessToken) || (res.ExpiresAt ? Number(res.ExpiresAt) : null);
+  const newRefresh = res.RefreshToken || refreshToken;
+
+  const rec = {
+    accessToken,
+    refreshToken: newRefresh,
+    expiresAt,
+    refreshExpiresAt: res.RefreshExpireAt ? Number(res.RefreshExpireAt) : null,
+    deviceId,
+    machineId,
+    apiHost: host,
+    // 回调里已经带了 uid / 昵称，直接落盘（GetUserInfo 只作补充）
+    uid: opts.uid || '',
+    nickname: opts.nickname || '',
+    lastError: '',
+  };
+
+  // 补用户信息（失败不阻断：uid 缺失时用 deviceId 兜底做标识）
+  if (!rec.uid) {
+    try {
+      const u = await authStore.fetchUserInfo({ accessToken, apiHost: host });
+      if (u) {
+        if (u.uid) rec.uid = u.uid;
+        if (u.nickname) rec.nickname = rec.nickname || u.nickname;
+        if (u.email) rec.email = u.email;
+      }
+    } catch (e) { /* 忽略 */ }
+  }
+
+  const saved = authStore.upsert(rec);
+  return { ok: true, account: authStore.list().find((a) => a.id === saved.id) };
+}
+
+module.exports = { REDIRECT, newDeviceIds, buildAuthUrl, parseCallback, exchangeAndSave };

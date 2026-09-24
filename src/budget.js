@@ -39,6 +39,14 @@ const QW_FLOOR = (() => {
   return Number.isFinite(n) && n >= 0 ? n : 16384;
 })();
 
+// TRAE Work 的下限：与千问同理（reasoning 与正文抢预算），
+// 但它实测 reasoning 峰值更高（单次 138~195 token 级别，长任务可到千级），
+// 取 16384 与千问一致——低于这个值长任务会被 reasoning 吃光正文。
+const TW_FLOOR = (() => {
+  const n = parseInt(process.env.DUMATE_TRAEWORK_MIN_MAX_TOKENS || '16384', 10);
+  return Number.isFinite(n) && n >= 0 ? n : 16384;
+})();
+
 const DEFAULT_BUDGET = 32768;
 
 function resolveMaxTokens(requested) {
@@ -64,11 +72,22 @@ function resolveQwenMaxTokens(requested) {
   return out;
 }
 
+/** TRAE Work 的预算。与千问同一套逻辑，下限独立可配 */
+function resolveTraeworkMaxTokens(requested) {
+  const n = Number(requested);
+  let out = Number.isFinite(n) && n > 0 ? n : DEFAULT_BUDGET;
+  if (TW_FLOOR > 0) out = Math.max(out, TW_FLOOR);
+  if (CEIL > 0) out = Math.min(out, CEIL);
+  return out;
+}
+
 module.exports = {
   resolveMaxTokens,
   resolveQwenMaxTokens,
+  resolveTraeworkMaxTokens,
   FLOOR,
   QW_FLOOR,
+  TW_FLOOR,
   CEIL,
   DEFAULT_BUDGET,
 };

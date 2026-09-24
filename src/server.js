@@ -4,15 +4,17 @@ const { discoverPort, verifyPort } = require('./discovery');
 const { mapModel, anthropicToOpenAI, openAIToAnthropic, mapFinishReason } = require('./anthropic');
 const { googleToOpenAI, openAIToGoogle, translateStreamToGoogle } = require('./google');
 const { responsesToOpenAI, openAIToResponse, translateStreamToResponses } = require('./responses');
-const { resolveMaxTokens, resolveQwenMaxTokens } = require('./budget');
+const { resolveMaxTokens, resolveQwenMaxTokens, resolveTraeworkMaxTokens } = require('./budget');
 
 // 按通道选用预算策略。收敛在这里而不是在四个调用点各写一遍 if——
 // 分开写必然漂移（曾经就漏了千问，导致小预算直接截断正文）。
-// 千问的下限远低于搭子（4096 vs 32768），因为它的 reasoning 峰值只有百级。
+// 千问与 TRAE 的下限都远低于搭子（16384 vs 32768），因为它们的
+// reasoning 峰值比搭子小一个量级。
 function resolveBudget(target, requested) {
-  return target && target.budgetKind === 'qwenwork'
-    ? resolveQwenMaxTokens(requested)
-    : resolveMaxTokens(requested);
+  const kind = target && target.budgetKind;
+  if (kind === 'qwenwork') return resolveQwenMaxTokens(requested);
+  if (kind === 'traework') return resolveTraeworkMaxTokens(requested);
+  return resolveMaxTokens(requested);
 }
 const reqlog = require('./reqlog');
 const pointsCursor = require('./points-cursor');
@@ -67,7 +69,10 @@ async function ensureUpstream() {
  */
 async function handleDirectChannel(req, res, payload, route, ctx) {
   const { startedAt, info, kind } = ctx;
-  const provider = require('./qwenwork');
+  // 按通道选 provider：两者都是 direct，但一个走 wasm 封装、一个走自持凭证
+  const provider = route.channel === 'traework'
+    ? require('./traework')
+    : require('./qwenwork');
   const wantStream = !!payload.stream;
 
   // 请求 id 在这里就定下来：埋点与积分归因两边都要用同一个值才能配对。
@@ -77,6 +82,7 @@ async function handleDirectChannel(req, res, payload, route, ctx) {
 
   try {
     if (!wantStream) {
+      // traework 的 send 第二参是 onChunk；不传即为非流式聚合
       const result = await provider.send(payload, undefined, { reqId });
       const out = kind === 'openai' ? result : result;
       if (kind === 'anthropic') {
@@ -87,6 +93,13 @@ async function handleDirectChannel(req, res, payload, route, ctx) {
       if (kind === 'google') {
         logRequest(req, res, startedAt, info, 200, out.usage || null);
         return sendJSON(res, 200, openAIToGoogle(out, payload.model));
+      }
+      // responses 路径：provider 返回的是 OpenAI chat 形状，
+      // 必须再翻成 Responses 对象，否则 Codex 拿到 chat.completion 会解析失败。
+      // （漏了这条分支时表现为「返回体字段全不认识」）
+      if (kind === 'responses') {
+        logRequest(req, res, startedAt, info, 200, out.usage || null);
+        return sendJSON(res, 200, openAIToResponse(out, payload.model));
       }
       const usage = out.usage || {};
       logRequest(req, res, startedAt, info, 200, {
@@ -174,6 +187,14 @@ async function handleDirectChannel(req, res, payload, route, ctx) {
           if (seen.length > TAIL) seen = seen.slice(-TAIL);
           shim.write(`data: ${inner}\n\n`);
         }, { reqId });
+        // traework 的 provider 回调不发 [DONE]（事件流用 event:done 收尾，
+        // 已在 readStream 里吃掉），所以这里补一个再关流。
+        // **顺序关键**：先补 [DONE]、再 end——直接 end 会让翻译器在
+        // 没有收到任何帧的情况下看到流结束，报 upstream stream error。
+        if (route.channel === 'traework') {
+          writeSSEHead && writeSSEHead();
+          shim.write('data: [DONE]\n\n');
+        }
         shim.end();
         // OpenAI 路径的收尾埋点。翻译器分支各自在 done 里记，
         // 只有这里没有——不补上，千问的流式请求就不进请求日志。
@@ -385,6 +406,19 @@ async function handleOpenAIModels(req, res) {
       const models = await qw.listModels();
       for (const m of router.exposedFor('qwenwork', models)) {
         data.push({ id: m, object: 'model', created, owned_by: 'qwenwork' });
+      }
+    } catch (e) { /* 通道不可用，不列 */ }
+  }
+
+  // TRAE Work 同理：模型名带 traework/ 前缀。凭证是我们自持的，
+  // 没有账号时 listModels 仍返回静态表，但通道不可用就不列。
+  if ((process.env.DUMATE_TRAEWORK_AUTOSTART || 'auto') !== 'off') {
+    try {
+      const tw = require('./traework');
+      if (tw.status().ready) {
+        for (const m of router.exposedFor('traework', tw.listModels())) {
+          data.push({ id: m, object: 'model', created, owned_by: 'traework' });
+        }
       }
     } catch (e) { /* 通道不可用，不列 */ }
   }
@@ -1024,6 +1058,16 @@ const server = http.createServer(async (req, res) => {
             ready: !!(qwenworkUp && router.availability('qwenwork').ok),
             wasm: qwenworkUp || null,
           },
+          // TRAE Work：凭证自持（OAuth 换取），没有 wasm 依赖。
+          // ready 取决于「有没有可用账号」——与千问的 wasm+登录态判定不同。
+          traework: (() => {
+            try {
+              const st = require('./traework').status();
+              return { direct: true, ready: st.ready, accounts: st.accounts, error: st.error || '' };
+            } catch (e) {
+              return { direct: true, ready: false, accounts: 0, error: e.message };
+            }
+          })(),
         },
         service: 'dumate2api',
       });

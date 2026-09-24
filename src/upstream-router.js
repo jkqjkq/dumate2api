@@ -20,6 +20,8 @@
 // 看起来成功但完全不是想要的结果，比直接 400 难查得多。
 /** 千问办公通道的前缀。`qwen/pro` → 上游模型 `pro` */
 const QWEN_PREFIX = 'qwen';
+/** TRAE Work 通道的前缀。`traework/glm-5.2` → 上游模型 `glm-5.2` */
+const TRAEWORK_PREFIX = 'traework';
 
 const UPSTREAMS = {
   dumate: {
@@ -59,6 +61,25 @@ const UPSTREAMS = {
     // 套搭子的下限会把每个小请求凭空撑大。
     needsBudget: true,
     budgetKind: 'qwenwork',
+  },
+  // TRAE Work（SOLO CN）：同样是进程内直连，凭证由我们自己走 OAuth 换取
+  // （见 src/traework/login.js），**不依赖 TRAE 客户端**。
+  // 与千问的区别：千问只能读客户端的加密文件，而这里的账号是我们自己持有的。
+  traework: {
+    id: 'traework',
+    label: 'TRAE Work',
+    host: null,
+    portEnv: null,
+    defaultPort: null,
+    prefix: TRAEWORK_PREFIX,
+    direct: true,
+    basePath: null,
+    auth: () => null,
+    // 模型名就是上游名（glm-5.2 等），不过搭子的别名表
+    needsModelMap: false,
+    // 与千问同理：reasoning 与正文抢预算，小 max_tokens 会截断正文
+    needsBudget: true,
+    budgetKind: 'traework',
   },
 };
 
@@ -119,17 +140,27 @@ function availability(channel) {
       return { ok: false, reason: e.message };
     }
   }
+  if (channel === 'traework') {
+    try {
+      const st = require('./traework').status();
+      return st.ready ? { ok: true } : { ok: false, reason: st.error || 'not_ready' };
+    } catch (e) {
+      return { ok: false, reason: e.message };
+    }
+  }
   return { ok: true };
 }
 
-/** 对外暴露的模型名列表：千问的加前缀，避免与搭子撞名 */
+/** 对外暴露的模型名列表：千问/TRAE 的加前缀，避免与搭子撞名 */
 function exposedFor(channel, models) {
   if (channel === 'qwenwork') return models.map((m) => `${QWEN_PREFIX}/${m}`);
+  if (channel === 'traework') return models.map((m) => `${TRAEWORK_PREFIX}/${m}`);
   return models.slice();
 }
 
 module.exports = {
   QWEN_PREFIX,
+  TRAEWORK_PREFIX,
   UPSTREAMS,
   resolve,
   availability,
