@@ -207,6 +207,10 @@ function translateStreamToGoogle(upstreamRes, res, originalModel, onDone) {
 
   const send = (obj) => res.write(`data: ${JSON.stringify(obj)}\n\n`);
   let buffer = '';
+  // StringDecoder：TCP chunk 不按字符边界切，直接 toString('utf8') 会让
+  // 跨 chunk 的汉字变成 U+FFFD（流式输出里随机出现「�」）
+  const { StringDecoder } = require('string_decoder');
+  const decoder = new StringDecoder('utf8');
   let inputTokens = 0;
   let outputTokens = 0;
   let finishReason = null;
@@ -222,7 +226,7 @@ function translateStreamToGoogle(upstreamRes, res, originalModel, onDone) {
   };
 
   upstreamRes.on('data', (chunk) => {
-    buffer += chunk.toString('utf8');
+    buffer += decoder.write(chunk);
     const lines = buffer.split('\n');
     buffer = lines.pop();
 

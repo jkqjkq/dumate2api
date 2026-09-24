@@ -52,7 +52,13 @@ const UPSTREAMS = {
     basePath: null,
     auth: () => null,
     needsModelMap: false,
-    needsBudget: false,
+    // 千问**也要**走预算兜底：实测 max_tokens=100 时 reasoning 吃掉 88，
+    // 正文直接为 0（finish_reason=length）。Codex 默认就传小值，
+    // 症状是「几秒就停、只走了开头」。
+    // 但下限是独立的（4096 而非搭子的 32768）——它的 reasoning 峰值只有百级，
+    // 套搭子的下限会把每个小请求凭空撑大。
+    needsBudget: true,
+    budgetKind: 'qwenwork',
   },
 };
 
@@ -73,6 +79,7 @@ function targetOf(up) {
     direct: !!up.direct,
     needsModelMap: up.needsModelMap,
     needsBudget: up.needsBudget,
+    budgetKind: up.budgetKind || (up.needsBudget ? 'dumate' : ''),
     authHeader: up.auth(),
   };
 }

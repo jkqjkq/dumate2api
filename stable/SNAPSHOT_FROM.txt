@@ -1,22 +1,26 @@
-585d9b14e222685f362c858829a07b6407bc0153
-585d9b1 docs: 补充千问通道与任务执行的约定，去掉重复的硬约束段落
-Wed Sep 24 00:47:09     2026
+ee648d0d9df88cd3b8a01299c6c321c30630f904
+ee648d0 fix(qwenwork): 修 Codex 工具调用全链路失效与流式崩溃
+Thu Sep 24 22:21:51     2026
 
 本次同步覆盖的改动（均在主目录已提交，快照与对应提交一致）：
-  - 3200458 千问办公通道完整接入管理端并按通道隔离数据
-    · req_id 贯穿埋点与千问积分归因（异步结算，按时间配对会串账）
-    · 修千问流式请求在 OpenAI 路径上不落埋点、token 恒为 0
-    · API Key 可绑定通道（keys.js 的 channel 字段 + validate 校验）
-  - 2a58e4e 修复跑任务必崩（task-runner 未引入 records 模块）
-  - 585d9b1 文档约定补充
+  - ee648d0 千问通道在 Codex 下工具调用全链路修复
+    · tools 未过滤 → Codex 的 namespace/web_search 触发整轮 400
+    · system 被摘出 messages → 系统提示词全部丢失
+    · SSE 事件顺序错误 → Codex 报 failed to parse function arguments
+    · responses 路径提前 mapModel → qwen/ 前缀失效、路由落到搭子
+    · 流式结束后仍写入 → ERR_STREAM_WRITE_AFTER_END 打挂网关进程
+    · SSE 跨 chunk 汉字截断 → 四个解析点改用 StringDecoder
+    · 千问预算兜底（resolveQwenMaxTokens，下限 16384）
+    · max_input_tokens 按实测修正为 1024000
 
-快照范围说明：stable/ 只含网关依赖闭包（src/*.js 14 个 + qwenwork/），
+  补充：本版快照新含 qwenwork/credits.js。上一版同步时漏了它，
+  导致 9080 启动即报 `Cannot find module './credits'`、千问通道不可用。
+
+快照范围说明：stable/ 只含网关依赖闭包（src/*.js 14 个 + qwenwork/ 8 个），
 不含管理端（admin/）、网页端（web/）、账号池与任务调度模块——
 那些不是 9080 网关运行所必需，且更新频繁，放进快照只会让稳定版跟着开发节奏漂移。
 
 上一版快照来源：
-工作区快照（未提交），base fbede72efd7f4d633efb4983e2b8fac86ba130dd
-fbede72 feat(usage): add a today breakdown to the usage page
-Wed Sep 23 11:50:00     2026
-（上一版记的是「工作区快照」而非纯提交号，因为当时主目录工作区是脏的；
- 本版已恢复为纯提交号。）
+585d9b14e222685f362c858829a07b6407bc0153
+585d9b1 docs: 补充千问通道与任务执行的约定，去掉重复的硬约束段落
+Wed Sep 24 00:47:09     2026

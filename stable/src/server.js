@@ -4,7 +4,16 @@ const { discoverPort, verifyPort } = require('./discovery');
 const { mapModel, anthropicToOpenAI, openAIToAnthropic, mapFinishReason } = require('./anthropic');
 const { googleToOpenAI, openAIToGoogle, translateStreamToGoogle } = require('./google');
 const { responsesToOpenAI, openAIToResponse, translateStreamToResponses } = require('./responses');
-const { resolveMaxTokens } = require('./budget');
+const { resolveMaxTokens, resolveQwenMaxTokens } = require('./budget');
+
+// 按通道选用预算策略。收敛在这里而不是在四个调用点各写一遍 if——
+// 分开写必然漂移（曾经就漏了千问，导致小预算直接截断正文）。
+// 千问的下限远低于搭子（4096 vs 32768），因为它的 reasoning 峰值只有百级。
+function resolveBudget(target, requested) {
+  return target && target.budgetKind === 'qwenwork'
+    ? resolveQwenMaxTokens(requested)
+    : resolveMaxTokens(requested);
+}
 const reqlog = require('./reqlog');
 const pointsCursor = require('./points-cursor');
 const modelmap = require('./modelmap');
@@ -425,7 +434,7 @@ async function handleOpenAIChat(req, res) {
   // 千问办公不套这一档：实测它的推理与正文分开流（reasoning 2060 字 / 正文
   // 96 字），机制不同，套上搭子的 32768 下限只会把小请求凭空撑大。
   if (route.target.needsBudget) {
-    reqBody.max_tokens = resolveMaxTokens(reqBody.max_tokens);
+    reqBody.max_tokens = resolveBudget(route.target, reqBody.max_tokens);
   }
 
   const target = route.target;
@@ -463,9 +472,12 @@ async function handleOpenAIChat(req, res) {
       // 到 200KB 且从不截断，而流可以活 55 秒以上，并发流就是 N×200KB。
       let seen = '';
       const TAIL = 32768;
+      // StringDecoder：跨 chunk 的汉字不能逐块解码（会变 U+FFFD），
+      // 而这里要扫的是 SSE 文本里的 usage，乱码会让匹配失准
+      const seenDec = new (require('string_decoder').StringDecoder)('utf8');
       upstreamRes.on('data', (c) => {
         markFirstToken(res);
-        seen += c.toString('utf8');
+        seen += seenDec.write(c);
         if (seen.length > TAIL) seen = seen.slice(-TAIL);
       });
       const finishStream = () => {
@@ -591,7 +603,7 @@ async function handleGoogleGenerateContent(req, res, isStream, pathModel) {
     req._mappedModel = route.model;
   }
   if (route.target.needsBudget) {
-    openaiReq.max_tokens = resolveMaxTokens(openaiReq.max_tokens);
+    openaiReq.max_tokens = resolveBudget(route.target, openaiReq.max_tokens);
   }
   const target = route.target;
   if (target.direct) {
@@ -688,7 +700,7 @@ async function handleOpenAIResponses(req, res) {
     req._mappedModel = route.model;
   }
   if (route.target.needsBudget) {
-    openaiReq.max_tokens = resolveMaxTokens(openaiReq.max_tokens);
+    openaiReq.max_tokens = resolveBudget(route.target, openaiReq.max_tokens);
   }
   const target = route.target;
   if (target.direct) {
@@ -769,7 +781,7 @@ async function handleAnthropicMessages(req, res) {
     req._mappedModel = route.model;
   }
   if (route.target.needsBudget) {
-    openaiReq.max_tokens = resolveMaxTokens(openaiReq.max_tokens);
+    openaiReq.max_tokens = resolveBudget(route.target, openaiReq.max_tokens);
   }
   const target = route.target;
   if (target.direct) {
@@ -845,6 +857,8 @@ function translateStreamToAnthropic(upstreamRes, res, originalModel, onDone) {
   });
 
   let buffer = '';
+  // StringDecoder：跨 chunk 的多字节汉字不能逐块解码，否则出现 U+FFFD
+  const decoder = new (require('string_decoder').StringDecoder)('utf8');
   let blockIndex = -1;
   let currentBlockType = null; // 'thinking' or 'text'
   let hasText = false;
@@ -853,7 +867,7 @@ function translateStreamToAnthropic(upstreamRes, res, originalModel, onDone) {
   let lastFinishReason = null;
 
   upstreamRes.on('data', (chunk) => {
-    buffer += chunk.toString('utf8');
+    buffer += decoder.write(chunk);
     const lines = buffer.split('\n');
     buffer = lines.pop(); // keep incomplete line
 

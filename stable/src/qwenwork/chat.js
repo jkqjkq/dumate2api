@@ -42,7 +42,11 @@ function buildBody(modelKey, payload) {
   if (payload && typeof payload.system === 'string') system = payload.system;
   const sysMsg = messages.find((m) => m && m.role === 'system');
   if (!system && sysMsg) system = String(sysMsg.content || '');
-  const turns = sysMsg ? messages.filter((m) => m !== sysMsg) : messages;
+  // **不要把 system 从 messages 里摘出去**：实测上游只认 messages 里的
+  // system 角色，顶层的 `system` 字段它根本不读。摘出去会让系统提示词
+  // 整体丢失——模型收不到任何指令，表现为「不按要求做事、随口答两句就停」。
+  // 顶层字段仍然带上（兼容），但权威来源是 messages。
+  const turns = messages;
   const lastUser = [...turns].reverse().find((m) => m && m.role === 'user');
   const text = lastUser ? String(lastUser.content || '') : '';
 
@@ -51,6 +55,21 @@ function buildBody(modelKey, payload) {
     if (payload && payload[k] != null) parameters[k] = payload[k];
   }
   if (parameters.max_tokens == null) parameters.max_tokens = 32000;
+
+  // 工具定义必须透传：硬编码空数组会让模型看不到工具，
+  // 于是把工具调用当**文本**输出（Codex 里表现为 `<tool_call>` 原样打印、不执行）。
+  //
+  // 但**必须过滤上游不认识的结构**：实测千问上游只接受标准 OpenAI 形状
+  // （`{type:"function", function:{...}}`）。Codex 会额外发送：
+  //   - `namespace`（multi_agent_v1 / mcp__cua_repl 等工具组）
+  //   - `web_search`（内置搜索）
+  // 只要带上其中任何一个，**整个请求直接 400**（Error in upstream response），
+  // 不是丢弃那个工具而是整轮失败——表现为 Codex 里模型反复重试、任务卡死。
+  // 所以这里只保留 function 类型，其余静默丢弃（Codex 侧有 fallback）。
+  const rawTools = Array.isArray(payload && payload.tools) ? payload.tools : [];
+  const tools = rawTools.filter((t) => t && t.type === 'function' && t.function && t.function.name);
+  // tool_choice 只在确实还有工具时才带；没有工具时带上会被上游拒
+  const toolChoice = tools.length ? (payload && payload.tool_choice) : null;
 
   return JSON.stringify({
     request_id: requestId,
@@ -89,7 +108,13 @@ function buildBody(modelKey, payload) {
       api_key: '',
       url: '',
       source: 'system',
-      max_input_tokens: 1000000,
+      // 实测得出的上下文上限（2026-09-24，中文输入，逐档上探 + 二分定位）：
+      //   1250K 汉字 → 1,022,745 token  通过
+      //   1262K 汉字 → 502；1300K 汉字 → 400
+      // pro 与 flash 边界一致。原来写 1000000 是拍脑袋的值，实际能到 ~1.02M，
+      // 且超过 1M 之后不是"截断"而是直接整轮失败（400/502），
+      // 所以这里如实填实测值，别让上游按一个错误的声明去硬拒。
+      max_input_tokens: 1024000,
     },
     // 没有这个字段服务端一律 503 Model catalog unavailable，
     // 且它与签名无关——抓到的桌面流量总是带它。
@@ -104,7 +129,8 @@ function buildBody(modelKey, payload) {
     },
     system,
     messages: turns,
-    tools: [],
+    tools,
+    ...(toolChoice != null ? { tool_choice: toolChoice } : {}),
     parameters,
   });
 }
@@ -202,8 +228,12 @@ function post(url, body, headers) {
       timeout: TIMEOUT_MS,
     }, (res) => {
       let buf = '';
-      res.on('data', (c) => { buf += c.toString('utf8'); });
-      res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, raw: buf }));
+      // 同 postStream：必须用 StringDecoder 保持跨 chunk 的解码状态，
+      // 否则非流式响应里的汉字也会在 chunk 边界处变成 U+FFFD
+      const { StringDecoder } = require('string_decoder');
+      const dec = new StringDecoder('utf8');
+      res.on('data', (c) => { buf += dec.write(c); });
+      res.on('end', () => { buf += dec.end(); resolve({ status: res.statusCode, headers: res.headers, raw: buf }); });
       res.on('error', reject);
     });
     req.on('error', reject);
@@ -225,6 +255,11 @@ function postStream(url, body, headers, onChunk) {
       timeout: TIMEOUT_MS,
     }, (res) => {
       let buf = '';
+      // **必须用 StringDecoder**：TCP chunk 不按字符边界切，
+      // 直接 `c.toString('utf8')` 会让跨 chunk 的多字节汉字被截成 U+FFFD，
+      // 表现为流式输出里随机出现「�」。StringDecoder 会缓存半个字符等下一块。
+      const { StringDecoder } = require('string_decoder');
+      const dec = new StringDecoder('utf8');
       const flushLine = (line) => {
         const t = line.trim();
         if (!t.startsWith('data:')) return;
@@ -233,7 +268,7 @@ function postStream(url, body, headers, onChunk) {
         for (const inner of unwrap(raw)) onChunk(inner);
       };
       res.on('data', (c) => {
-        buf += c.toString('utf8');
+        buf += dec.write(c);
         let idx;
         while ((idx = buf.indexOf('\n')) >= 0) {
           const line = buf.slice(0, idx);
@@ -242,6 +277,7 @@ function postStream(url, body, headers, onChunk) {
         }
       });
       res.on('end', () => {
+        buf += dec.end();
         // 两个收尾细节，都实测自千问办公的流：
         //  1. 最后一帧常不带换行，只按 \n 切会把它留在 buf 里直到流关闭；
         //  2. 它**不发** `data: [DONE]`，而是用 `event:finish` + 统计帧收尾。
@@ -268,6 +304,10 @@ function aggregate(payloads, model) {
   let usage = {};
   let id = 'qwenwork';
   const created = Math.floor(Date.now() / 1000);
+  // tool_calls 按 index 增量到达：第一帧带 id/name，后续帧只追加 arguments 片段。
+  // 不合并就会丢掉工具调用（表现为 finish_reason=tool_calls 但 tool_calls 为 null，
+  // 非流式客户端拿到一个空回答）。
+  const calls = new Map();
   for (const p of payloads) {
     try {
       const o = JSON.parse(p);
@@ -278,10 +318,28 @@ function aggregate(payloads, model) {
       const d = c.delta || c.message || {};
       if (d.content) content += d.content;
       if (d.reasoning_content) reasoning += d.reasoning_content;
+      if (Array.isArray(d.tool_calls)) {
+        for (const tc of d.tool_calls) {
+          const idx = tc.index != null ? tc.index : 0;
+          const cur = calls.get(idx) || { id: '', type: 'function', function: { name: '', arguments: '' } };
+          if (tc.id) cur.id = tc.id;
+          if (tc.type) cur.type = tc.type;
+          if (tc.function) {
+            if (tc.function.name) cur.function.name = tc.function.name;
+            if (tc.function.arguments) cur.function.arguments += tc.function.arguments;
+          }
+          calls.set(idx, cur);
+        }
+      }
     } catch (e) { /* 非 JSON 帧跳过 */ }
   }
   const message = { role: 'assistant', content };
   if (reasoning) message.reasoning_content = reasoning;
+  if (calls.size) {
+    message.tool_calls = [...calls.entries()].sort((a, b) => a[0] - b[0]).map(([, v]) => v);
+    // 有工具调用时 content 常为空串，OpenAI 规范允许 content 为 null
+    if (!content) message.content = null;
+  }
   return {
     id, object: 'chat.completion', created, model,
     choices: [{ index: 0, message, finish_reason: finish }],

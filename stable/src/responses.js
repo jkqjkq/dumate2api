@@ -14,9 +14,9 @@
 // 明确不支持的字段（静默忽略并记一条日志）：
 //   - previous_response_id / store（上游无状态，靠 Codex 自己回传完整 input）
 //   - reasoning 配置、include、text.format(json_schema) 等
-
-const { resolveMaxTokens } = require('./budget');
-const { mapModel } = require('./anthropic');
+//
+// 注意：本模块**不做**模型映射与预算兜底——两者都要按通道决定，
+// 由 server.js 在 router.resolve 之后处理（见 responsesToOpenAI 的注释）。
 
 // ---------- 请求侧 ----------
 
@@ -134,9 +134,17 @@ function responsesToOpenAI(body, stream) {
   const tools = convertTools(body.tools);
 
   const req = {
-    model: mapModel(body.model || 'model-text'),
+    // **不要在这里 mapModel**：模型名要先经 upstream-router 按前缀分流，
+    // 分流之后再按通道决定是否映射。曾经在这里先映射，`qwen/flash` 被
+    // 兜底成 `model-text`，前缀被抹掉，路由只能落到搭子——
+    // 表现为「cc-switch 切到千问，实际跑的是搭子模型」。
+    // 与 chat/completions 路径保持同一顺序：先 resolve，后 map。
+    model: body.model || 'model-text',
     messages,
-    max_tokens: resolveMaxTokens(body.max_output_tokens),
+    // 预算同理：不在这里兜底，交给 server.js 按通道决定下限
+    // （千问 4096 / 搭子 32768）。这里先应用会按搭子的下限抬高，
+    // 之后千问再走自己的下限就失效了。
+    max_tokens: body.max_output_tokens,
     stream: !!stream,
   };
   if (body.temperature != null) req.temperature = body.temperature;
@@ -254,8 +262,16 @@ function translateStreamToResponses(upstreamRes, res, model, onDone) {
 
   const responseId = newResponseId();
   const createdAt = Math.floor(Date.now() / 1000);
+  // 流一旦结束就不能再写：实测响应发完 response.completed 并 res.end() 后，
+  // 收尾逻辑仍尝试补发 reasoning 的 done，触发 ERR_STREAM_WRITE_AFTER_END
+  // ——这是**未捕获的 error 事件，会直接把网关进程打挂**（9082 整个退出）。
+  // 所以 send 必须自带守卫，写不动就静默跳过。
+  let ended = false;
   const send = (type, payload) => {
-    res.write(`event: ${type}\ndata: ${JSON.stringify(payload)}\n\n`);
+    if (ended || res.writableEnded || res.destroyed) return;
+    try {
+      res.write(`event: ${type}\ndata: ${JSON.stringify(payload)}\n\n`);
+    } catch (e) { /* 写失败不打断收尾 */ }
   };
   const baseResponse = (status, output) => ({
     id: responseId,
@@ -278,6 +294,9 @@ function translateStreamToResponses(upstreamRes, res, model, onDone) {
   });
 
   let buffer = '';
+  // StringDecoder：跨 chunk 的多字节汉字不能逐块解码，否则出现 U+FFFD
+  const { StringDecoder } = require('string_decoder');
+  const decoder = new StringDecoder('utf8');
   let seq = 0;
   let textItemId = null;
   let textOutputIndex = -1;
@@ -309,7 +328,7 @@ function translateStreamToResponses(upstreamRes, res, model, onDone) {
   };
 
   upstreamRes.on('data', (chunk) => {
-    buffer += chunk.toString('utf8');
+    buffer += decoder.write(chunk);
     const lines = buffer.split('\n');
     buffer = lines.pop();
 
@@ -352,6 +371,12 @@ function translateStreamToResponses(upstreamRes, res, model, onDone) {
           const idx = tc.index != null ? tc.index : 0;
           let entry = callItems.get(idx);
           if (!entry) {
+            // **先关掉 reasoning item 再开 function_call**。两者是并列的
+            // output item，reasoning 的 done 若拖到流末尾才发，Codex 会看到
+            // 「function_call 的 arguments.done 之前先来了一个 output_item.done」，
+            // 于是报 `failed to parse function arguments: trailing characters`
+            // ——工具调用直接失败，表现为模型反复重试、任务卡死。
+            closeReasoningLater();
             entry = { id: tc.id || ('call_' + Math.random().toString(36).slice(2, 10)),
               itemId: 'fc_' + Math.random().toString(36).slice(2, 10),
               name: (tc.function && tc.function.name) || '', args: '', outputIndex: nextOutputIndex++ };
@@ -431,7 +456,13 @@ function translateStreamToResponses(upstreamRes, res, model, onDone) {
       });
     }
 
-    const incomplete = finishReason === 'length';
+    // 截断判定：`length` 是上游说「预算用完了」。但实测还见过另一种——
+    // 正文为空、reasoning 吃光预算，此时若仍报 completed，Codex 会认为
+    // 任务成功结束并停止等待，用户看到的是「完成了但没内容」，
+    // 比明说 incomplete 更难排查。所以两种都标 incomplete。
+    const hitLength = finishReason === 'length';
+    const emptyButTruncated = !fullText && !!finishReason && finishReason !== 'stop';
+    const incomplete = hitLength || emptyButTruncated;
     send('response.completed', {
       type: 'response.completed',
       sequence_number: seq++,
@@ -442,6 +473,7 @@ function translateStreamToResponses(upstreamRes, res, model, onDone) {
         incomplete_details: incomplete ? { reason: 'max_output_tokens' } : null,
       },
     });
+    ended = true;
     res.end();
     finish(200);
   });
@@ -451,6 +483,7 @@ function translateStreamToResponses(upstreamRes, res, model, onDone) {
       type: 'response.failed', sequence_number: seq++,
       response: { ...baseResponse('failed'), error: { code: 'upstream_error', message: 'upstream stream error' } },
     });
+    ended = true;
     res.end();
     finish(502);
   });
