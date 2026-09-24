@@ -336,7 +336,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import PageHeader from '@/components/PageHeader.vue'
 import client from '@/api/client'
-import { channelStore, CHANNELS } from '@/stores/channel'
+import { channelStore, CHANNELS, isDirectChannel } from '@/stores/channel'
 import { qwenworkApi } from '@/api/qwenwork'
 import type { QwCredits } from '@/api/qwenwork'
 import type { UsageOverview } from '@/api/usage'
@@ -358,7 +358,8 @@ const days = ref(30)
 // 当前通道。**服务端按通道过滤**而不是前端筛已聚合的数字——
 // 卡片、折线、按模型表都建立在同一批行上，前端筛只能筛掉表里的行，
 // 顶部卡片的数字仍是全通道的，两者会对不上。
-const isQw = computed(() => channelStore.current === 'qwenwork')
+// 直连通道（千问办公 / TRAE Work）：账单模型与搭子不同，用统一判定
+const isQw = computed(() => isDirectChannel())
 const chLabel = computed(() => CHANNELS.find((c) => c.id === channelStore.current)?.label || channelStore.current)
 
 // 千问积分。它是**另一套账**：搭子的扣费在上游账单里（pointsUsage），

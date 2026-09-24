@@ -149,6 +149,17 @@ const routes = [
           } catch (e) {
             out.qwenwork = { id: 'qwenwork', label: '千问办公', kind: 'direct', ready: false, error: e.message };
           }
+          try {
+            const tw = require('../../traework');
+            const st = tw.status();
+            out.traework = {
+              id: 'traework', label: 'TRAE Work', kind: 'direct',
+              ready: st.ready, loggedIn: !!st.loggedIn,
+              accounts: st.accounts || 0, error: st.error || '',
+            };
+          } catch (e) {
+            out.traework = { id: 'traework', label: 'TRAE Work', kind: 'direct', ready: false, error: e.message };
+          }
           return out;
         })(),
       });

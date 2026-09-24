@@ -46,7 +46,30 @@ export const CHANNELS = [
     // 账号管理先只读展示当前账号，后续接入多账号再开放写入。
     menuKeys: ['dashboard', 'chatlab', 'usage', 'reqlogs', 'models', 'keys', 'account', 'points', 'web-accounts'],
   },
+  {
+    id: 'traework',
+    label: 'TRAE Work',
+    // TRAE Work：凭证自持（OAuth 换取），有签到体系，但积分结构与搭子不同
+    // （是 credits 而非额度包），所以不显示搭子的「任务记录」。
+    menuKeys: ['dashboard', 'chatlab', 'usage', 'reqlogs', 'models', 'keys', 'account', 'points', 'web-accounts'],
+  },
 ] as const
+
+export function channelLabel(id: string): string {
+  const c = CHANNELS.find((x) => x.id === id)
+  return c ? c.label : id
+}
+
+/**
+ * 当前通道是不是「直连型」（千问办公 / TRAE Work）。
+ *
+ * 这两个通道与搭子的账单模型完全不同（搭子用上游账单+余额游标，
+ * 直连通道用各自的积分池），所以界面上凡是要区分「看哪套账」的地方，
+ * 都用这个判定而不是逐个比对 id——否则加一条通道就要改八个页面。
+ */
+export function isDirectChannel(id: string = channelStore.current): boolean {
+  return id === 'qwenwork' || id === 'traework'
+}
 
 function initial(): string {
   try {

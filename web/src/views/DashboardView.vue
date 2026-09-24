@@ -332,7 +332,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import PageHeader from '@/components/PageHeader.vue'
-import { channelStore } from '@/stores/channel'
+import { channelStore, isDirectChannel } from '@/stores/channel'
 import { qwenworkApi, type QwCredits, type QwDailyRow } from '@/api/qwenwork'
 import client from '@/api/client'
 import type { SystemStatus } from '@/api/system'
@@ -379,7 +379,8 @@ const lastRefresh = ref('')
 
 // 通道：千问办公是另一套账（积分/登录态），整块内容与搭子不同。
 // 用 store 的全局状态而不是本地 ref —— 顶栏切换器与这里必须一致。
-const isQw = computed(() => channelStore.current === 'qwenwork')
+// 直连通道（千问办公 / TRAE Work）：账单模型与搭子不同，用统一判定
+const isQw = computed(() => isDirectChannel())
 const qw = ref<QwCredits | null>(null)
 const qwDaily = ref<QwDailyRow[]>([])
 const qwInfo = computed(() => channelStore.infos['qwenwork'] || null)

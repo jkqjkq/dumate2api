@@ -340,7 +340,7 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import PageHeader from '@/components/PageHeader.vue'
 import client from '@/api/client'
-import { channelStore } from '@/stores/channel'
+import { channelStore, isDirectChannel } from '@/stores/channel'
 import { qwenworkApi } from '@/api/qwenwork'
 import type { QwLogin } from '@/api/qwenwork'
 import type { AccountData } from '@/api/account'
@@ -349,7 +349,8 @@ const data = ref<AccountData | null>(null)
 // 千问办公的登录态：来自官方客户端 auth-v2.dat，只读
 const qw = ref<QwLogin | null>(null)
 
-const isQw = computed(() => channelStore.current === 'qwenwork')
+// 直连通道（千问办公 / TRAE Work）：账单模型与搭子不同，用统一判定
+const isQw = computed(() => isDirectChannel())
 
 const accountColumns = [
   { title: '账号', key: 'name' },

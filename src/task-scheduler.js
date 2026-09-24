@@ -98,6 +98,32 @@ async function runOnce(trigger) {
       }
     }
 
+    // TRAE Work 的签到跑同一轮。与搭子串行而非并发：
+    // 两边都往上打折同一批上游，并发只会把瞬时请求量翻倍。
+    // 通道不可用时静默跳过——不该让任务轮询因为一条可选通道失败。
+    try {
+      const traework = require('./traework');
+      if (traework.status().ready) {
+        const authStore = require('./traework/auth');
+        const checkin = require('./traework/checkin');
+        for (const a of authStore.findUsable()) {
+          const r = await checkin.checkinAndSave(a, authStore);
+          results.push({
+            name: `TRAE:${a.nickname || a.uid || a.id}`,
+            ok: r.ok,
+            // done 记「本次真正领到」的，already 记「已签跳过」的
+            done: r.ok && !r.already ? 1 : 0,
+            already: r.already ? 1 : 0,
+            fail: r.ok ? 0 : 1,
+            error: r.error || '',
+          });
+          await sleep(PER_ACCOUNT_DELAY_MS);
+        }
+      }
+    } catch (e) {
+      results.push({ name: 'TRAE Work', ok: false, error: e.message });
+    }
+
     const done = results.reduce((s, r) => s + (r.done || 0), 0);
     state.last_run_at = Date.now();
     state.last_result = { trigger, total: results.length, done_count: done, results };

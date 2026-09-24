@@ -242,7 +242,7 @@ import { computed, onMounted, ref, watch } from 'vue'
 import PageHeader from '@/components/PageHeader.vue'
 import { message } from 'ant-design-vue'
 import client from '@/api/client'
-import { channelStore } from '@/stores/channel'
+import { channelStore, isDirectChannel } from '@/stores/channel'
 import { qwenworkApi } from '@/api/qwenwork'
 import type { QwCredits } from '@/api/qwenwork'
 import type { ModelMapData, ProbeResult } from '@/api/models'
@@ -256,7 +256,8 @@ interface Row {
 const map = ref<ModelMapData | null>(null)
 // 当前通道。千问办公的模型表由上游下发（只读），搭子的别名映射是另一套——
 // 两者互不适用，同页并列只会让人以为改别名能影响千问路由。
-const isQw = computed(() => channelStore.current === 'qwenwork')
+// 直连通道（千问办公 / TRAE Work）：账单模型与搭子不同，用统一判定
+const isQw = computed(() => isDirectChannel())
 // 千问模型：直接问 /qwenwork/models，不再从 /models/map 的 channels 里蹭
 const qwModels = ref<Array<{ id: string; name: string; prefixed: string }>>([])
 const qwError = ref('')

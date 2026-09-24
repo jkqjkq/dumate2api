@@ -201,7 +201,7 @@ import PageHeader from '@/components/PageHeader.vue'
 import { message } from 'ant-design-vue'
 import dayjs, { type Dayjs } from 'dayjs'
 import client from '@/api/client'
-import { channelStore } from '@/stores/channel'
+import { channelStore, isDirectChannel } from '@/stores/channel'
 import type { ApiKey, KeysData } from '@/api/keys'
 
 const data = ref<KeysData | null>(null)
@@ -220,7 +220,8 @@ const channelOptions = [
   { label: '仅千问办公', value: 'qwenwork' },
 ]
 
-const isQw = computed(() => channelStore.current === 'qwenwork')
+// 直连通道（千问办公 / TRAE Work）：账单模型与搭子不同，用统一判定
+const isQw = computed(() => isDirectChannel())
 
 const form = reactive({
   name: '',

@@ -396,7 +396,7 @@ import { GridComponent, TooltipComponent, LegendComponent } from 'echarts/compon
 import { CanvasRenderer } from 'echarts/renderers'
 import PageHeader from '@/components/PageHeader.vue'
 import client from '@/api/client'
-import { channelStore } from '@/stores/channel'
+import { channelStore, isDirectChannel } from '@/stores/channel'
 import { qwenworkApi } from '@/api/qwenwork'
 import type { QwCredits, QwCreditRecord } from '@/api/qwenwork'
 import type { PointsData, PointsPackage, AllPointsData, AccountPoints } from '@/api/points'
@@ -424,7 +424,8 @@ const error = ref('')
 const selectedId = ref<string>('local')
 
 // ---- 千问办公积分（与搭子的多账号积分是两套账）----
-const isQw = computed(() => channelStore.current === 'qwenwork')
+// 直连通道（千问办公 / TRAE Work）：账单模型与搭子不同，用统一判定
+const isQw = computed(() => isDirectChannel())
 const qwCredits = ref<QwCredits | null>(null)
 const qwRecords = ref<QwCreditRecord[]>([])
 const qwWindow = ref({ free: 0, paid: 0, total: 0, requests: 0 })

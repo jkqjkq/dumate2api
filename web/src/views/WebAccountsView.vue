@@ -648,13 +648,14 @@ import { computed, onMounted, reactive, ref, watch } from 'vue'
 import PageHeader from '@/components/PageHeader.vue'
 import { message } from 'ant-design-vue'
 import client from '@/api/client'
-import { channelStore } from '@/stores/channel'
+import { channelStore, isDirectChannel } from '@/stores/channel'
 import { qwenworkApi } from '@/api/qwenwork'
 import type { QwAccount } from '@/api/qwenwork'
 import type { WebAccount, AccountStatus, PoolData, PoolAccount, TaskRunRow } from '@/api/webaccounts'
 
 // 千问办公：单账号直连，没有账号池。这里只读展示当前账号。
-const isQw = computed(() => channelStore.current === 'qwenwork')
+// 直连通道（千问办公 / TRAE Work）：账单模型与搭子不同，用统一判定
+const isQw = computed(() => isDirectChannel())
 const qwAccounts = ref<{ mode: string; modeNote: string; count: number; accounts: QwAccount[]; error: string } | null>(null)
 
 async function loadQw() {

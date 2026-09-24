@@ -281,7 +281,7 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import PageHeader from '@/components/PageHeader.vue'
 import client from '@/api/client'
-import { channelStore, CHANNELS } from '@/stores/channel'
+import { channelStore, CHANNELS, isDirectChannel } from '@/stores/channel'
 import type { ReqLogRow, ReqLogsData, PointsRecord, PointsRecordsData } from '@/api/reqlogs'
 
 const data = ref<ReqLogsData | null>(null)
@@ -303,7 +303,8 @@ const detailOpen = ref(false)
 
 // 当前通道。网关请求按通道在服务端过滤；「积分消费明细」是搭子上游的账单，
 // 千问没有这份数据，所以整页签在千问下隐藏。
-const isQw = computed(() => channelStore.current === 'qwenwork')
+// 直连通道（千问办公 / TRAE Work）：账单模型与搭子不同，用统一判定
+const isQw = computed(() => isDirectChannel())
 const chLabel = computed(() => CHANNELS.find((c) => c.id === channelStore.current)?.label || channelStore.current)
 
 const statusOptions = [
