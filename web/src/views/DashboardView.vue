@@ -691,15 +691,20 @@
       <a-col :span="5">
         <a-card :bordered="false" class="h-full">
           <a-statistic
-            title="即将过期"
-            :value="dash?.summary.expiring_soon ?? '—'"
-            :value-style="dash && dash.summary.expiring_soon > 0 ? 'color:#fbbf24' : ''"
-          >
-            <template #suffix><span class="text-sm text-slate-400">个</span></template>
-          </a-statistic>
+            title="即将过期积分"
+            :value="dash?.summary.expiring_points ?? '—'"
+            :precision="2"
+            :value-style="(dash?.summary.expiring_points ?? 0) > 0 ? 'color:#fbbf24' : ''"
+          />
           <div class="text-xs text-slate-500 mt-2">
-            {{ dash && dash.summary.expiring_soon > 0 ? '7 天内到期' : '暂无风险' }}
+            <template v-if="dashExpiringRows.length">
+              {{ dashExpiringRows.length }} 笔 · {{ dash?.summary.expiring_days }} 天内作废
+            </template>
+            <template v-else-if="dash">{{ dash.summary.expiring_days }} 天内无到期积分</template>
+            <span v-else>—</span>
           </div>
+          <!-- 与上面「有效期内」的账号订阅到期是两回事：那个是会员要续费，
+               这个是积分要作废。同一个「即将过期」的说法容易混，这里分开写。 -->
         </a-card>
       </a-col>
 
@@ -728,6 +733,53 @@
         </a-card>
       </a-col>
     </a-row>
+
+    <!-- 即将过期的积分明细。只在真有风险时出现——空的时候整块不显示，
+         免得每次进仪表盘都看到一张「暂无」的卡。
+         按「账号 × 到期日」聚合而不是逐个包：实测单账号 105 个包、32 个
+         同一天到期，逐包列出来是一屏噪音，而真正要回答的是「哪天损失多少」。 -->
+    <a-card
+      v-if="dashExpiringRows.length"
+      title="即将过期的积分"
+      :bordered="false"
+      class="mt-4"
+    >
+      <template #extra>
+        <span class="text-xs text-slate-400">
+          {{ dash?.summary.expiring_days }} 天内到期 · 合计 {{ fmt(dash?.summary.expiring_points ?? 0) }}
+        </span>
+      </template>
+      <a-table
+        size="small"
+        :pagination="false"
+        :data-source="dashExpiringRows"
+        :columns="dashExpiringColumns"
+        row-key="key"
+      >
+        <template #bodyCell="{ column, record }">
+          <template v-if="column.key === 'account'">
+            <span class="text-xs">{{ record.account }}</span>
+          </template>
+          <template v-else-if="column.key === 'date'">
+            <span class="text-xs">{{ record.date }}</span>
+          </template>
+          <template v-else-if="column.key === 'points'">
+            <span class="font-medium text-amber-500">{{ fmt(record.points) }}</span>
+            <span class="text-xs text-slate-400 ml-1">（{{ record.count }} 个包）</span>
+          </template>
+          <template v-else-if="column.key === 'sources'">
+            <a-tag v-for="s in record.sources" :key="s" class="mr-1">{{ sourceText(s) }}</a-tag>
+          </template>
+          <template v-else-if="column.key === 'daysLeft'">
+            <a-tag :color="record.daysLeft <= 3 ? 'red' : 'orange'">还剩 {{ record.daysLeft }} 天</a-tag>
+          </template>
+        </template>
+      </a-table>
+      <div class="text-xs text-slate-400 mt-2">
+        这些积分包到期即作废（签到赠送、成长计划奖励按各自有效期，不累积）。
+        已用完的包不计入——到期不构成损失。
+      </div>
+    </a-card>
 
     <!-- 趋势 + 上游状态 -->
     <a-row :gutter="[16, 16]" class="mt-4">
@@ -907,17 +959,33 @@ interface DashAccount {
   last_error: string
 }
 
+/** 即将过期的积分（按账号 × 到期日聚合，见后端 aggregateExpiring） */
+interface DashExpiringRow {
+  account: string
+  accountId: number
+  date: string
+  points: number
+  count: number
+  sources: string[]
+  daysLeft: number
+}
+
 interface DashData {
   summary: {
     total: number; enabled: number; disabled: number; valid: number
     expiring_soon: number; low_points: number
     points_left: number; points_total: number
+    /** 30 天内会作废的积分合计。与 expiring_soon（账号订阅数）不是一回事 */
+    expiring_points: number
+    expiring_days: number
   }
   upstream: {
     gateway_online: boolean; gateway_port: number
     accounts_total: number | null; accounts_ready: number | null; cooling: number | null
   }
   accounts: DashAccount[]
+  /** 即将过期的积分明细（账号 × 到期日）。空数组 = 窗口内无损失 */
+  expiring_points_rows: DashExpiringRow[]
 }
 
 const status = ref<SystemStatus | null>(null)
@@ -962,6 +1030,35 @@ const expiringColumns = [
   { title: '到期时间', key: 'expireAt', width: '24%' },
   { title: '剩余天数', key: 'daysLeft', width: '14%' },
 ]
+
+// 搭子的到期表列不同——它是按「账号 × 到期日」聚合的（一个日期一行、
+// 含该日的包数与来源），而不是逐包一行。所以不复用上面那份。
+const dashExpiringColumns = [
+  { title: '账号', key: 'account', width: '22%' },
+  { title: '到期日', key: 'date', width: '18%' },
+  { title: '将作废', key: 'points', width: '26%' },
+  { title: '来源', key: 'sources', width: '22%' },
+  { title: '剩余天数', key: 'daysLeft', width: '12%' },
+]
+
+// 搭子到期明细（摊平成行）。key 用「账号-日期」——同一天多账号会有多行。
+const dashExpiringRows = computed(() => {
+  const rows = dash.value?.expiring_points_rows || []
+  return rows.map((r) => ({ ...r, key: `${r.accountId}-${r.date}` }))
+})
+
+// 上游的来源标识转中文。保留原标识在 title 里——排查时要知道它对应哪个
+// 接口字段，而界面上给中文是为了可读。
+const SOURCE_LABELS: Record<string, string> = {
+  login_bonus: '登录奖励',
+  growth_plan_2026_bonus: '成长计划',
+  event_bonus: '活动赠送',
+  grant_point: '发放积分',
+  plan_pro: '订阅套餐',
+}
+function sourceText(s: string) {
+  return SOURCE_LABELS[s] || s
+}
 const twRecords = ref<TraeworkCreditRecord[]>([])
 const twWindow = ref<{ cost: number; requests: number; exact: number }>({ cost: 0, requests: 0, exact: 0 })
 const twAccounts = computed(() => twDash.value?.accounts || [])

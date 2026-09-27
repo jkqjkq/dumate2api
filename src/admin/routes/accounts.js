@@ -184,6 +184,54 @@ async function doCheckin(account) {
   };
 }
 
+/**
+ * 把积分包按到期日聚合成「哪天会损失多少」。
+ *
+ * 为什么按天而不是逐包：
+ *   实测单账号 105 个包、其中 32 个同一天到期。逐包列出来是一屏噪音，
+ *   而用户真正要回答的问题是「我哪天会损失多少积分」——按天合并就是那个答案。
+ *
+ * 窗口取 30 天而不是 7 天：搭子的包**最早也要 25 天后才到期**（实测 47 个包
+ * 全落在 15-30 天区间，7 天内一个都没有），照抄 TRAE 的 7 天窗口这里会恒为空。
+ * 两个通道的到期节奏不同（TRAE 是签到奖励天天有、搭子是月度包批量发），
+ * 窗口必须按各自的分布取，不能共用。
+ *
+ * 只算 left > 0 的包：已用完的包到期不构成损失，报出来只是噪音。
+ *
+ * @returns {Array<{date:string, points:number, count:number, sources:string[]}>}
+ *   按到期日升序。date 是本地日期 YYYY-MM-DD。
+ */
+function aggregateExpiring(packages, accountId, days = 30) {
+  const now = Date.now();
+  const limit = now + days * 86400000;
+  const byDay = new Map();
+  for (const p of (packages || [])) {
+    if (!p || !p.expire_at || !(p.left > 0)) continue;
+    if (p.expire_at > limit) continue;
+    const d = new Date(p.expire_at);
+    const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    const cur = byDay.get(key) || { date: key, points: 0, count: 0, sources: new Set(), latest: 0 };
+    cur.points += p.left;
+    cur.count += 1;
+    // 记下这一天的**最晚**到期时刻，用它算「还剩几天」——按当天末尾算会
+    // 出现「30 天窗口里显示还剩 31 天」这种自相矛盾的行。
+    if (p.expire_at > cur.latest) cur.latest = p.expire_at;
+    // 来源名保留原样（login_bonus / growth_plan_2026_bonus 等）——它是判断
+    // 「这笔是签到送的还是成长计划发的」的唯一线索
+    cur.sources.add(String(p.source || p.package_type || ''));
+    byDay.set(key, cur);
+  }
+  return [...byDay.values()]
+    .sort((a, b) => (a.date < b.date ? -1 : 1))
+    .map((x) => ({
+      date: x.date,
+      points: Number(x.points.toFixed(4)),
+      count: x.count,
+      sources: [...x.sources].filter(Boolean),
+      daysLeft: Math.max(0, Math.ceil((x.latest - now) / 86400000)),
+    }));
+}
+
 const routes = [
   {
     // 登录器：打开一个受控浏览器窗口，登录后自动抓 cookie。
@@ -801,21 +849,39 @@ const routes = [
 
       // 每个账号的积分与订阅到期，用于健康快照。
       // 用缓存优先：仪表盘是高频页面，不必每次都为每个账号打一次上游。
+      //
+      // 顺路把**积分包的到期分布**算出来（顶部「即将过期」卡与明细表要用）。
+      // 上游 packages 里每个包都带 left 与 expire_at，但原实现只挑了
+      // subscription 的到期日，包维度整个丢了——于是答不出「哪些积分快作废」。
+      //
+      // **按天聚合而不是逐包列**：实测搭子单账号有 105 个包、其中 32 个同一天
+      // 到期，逐包列出来是一屏噪音；按天合并后是几行，一眼看得出「哪天要损失多少」。
       const detail = await Promise.all(list.map(async (a) => {
         const cachedFresh = a.points && a.points_at && Date.now() - a.points_at < 60_000;
         if (cachedFresh && a.points.expire_at) {
-          return { id: a.id, points: a.points, expire_at: a.points.expire_at, cached: true };
+          return {
+            id: a.id, points: a.points, expire_at: a.points.expire_at,
+            expiring: a.points.expiring || [], cached: true,
+          };
         }
         const r = await web.api.quotaOverview(a.cookie);
-        if (!r.ok) return { id: a.id, points: a.points || null, expire_at: a.points ? a.points.expire_at : null, error: r.error };
+        if (!r.ok) {
+          return {
+            id: a.id, points: a.points || null,
+            expire_at: a.points ? a.points.expire_at : null,
+            expiring: (a.points && a.points.expiring) || [],
+            error: r.error,
+          };
+        }
         const sub = (r.packages || []).find((p) => p.kind === 'subscription' && p.expire_at);
         const summary = {
           left: r.left, total: r.total, used: r.used,
           expire_at: sub ? sub.expire_at : null,
           subscribed: r.subscribed,
+          expiring: aggregateExpiring(r.packages, a.id),
         };
         accounts.patchInternal(a.id, { points: summary, points_at: Date.now(), last_error: '' });
-        return { id: a.id, points: summary, expire_at: summary.expire_at };
+        return { id: a.id, points: summary, expire_at: summary.expire_at, expiring: summary.expiring };
       }));
 
       const byId = new Map(detail.map((d) => [d.id, d]));
@@ -850,6 +916,27 @@ const routes = [
       const lowPoints = withPoints.filter((a) => a.points < 200).length;
       const expiringSoon = enabled.filter((a) => a.days_left !== null && a.days_left <= 7).length;
 
+      // 即将过期的积分（按账号 × 到期日摊平，供仪表盘明细表）。
+      // 与上面的 expiring_soon 不是一回事：那个数的是**账号订阅**快到期，
+      // 这个是**积分包**快作废。两者都叫「即将过期」但含义不同，
+      // 界面上要分开写，否则会把「订阅要续费」误读成「积分要没了」。
+      const expiringPoints = [];
+      for (const a of enriched) {
+        const d = byId.get(a.id) || {};
+        for (const x of (d.expiring || [])) {
+          expiringPoints.push({
+            account: a.name || a.nickname || `账号 ${a.id}`,
+            accountId: a.id,
+            date: x.date,
+            points: x.points,
+            count: x.count,
+            sources: x.sources,
+            daysLeft: x.daysLeft,
+          });
+        }
+      }
+      expiringPoints.sort((x, y) => (x.date < y.date ? -1 : 1));
+
       return sendJSON(res, 200, {
         // 顶部卡片
         summary: {
@@ -862,7 +949,12 @@ const routes = [
           low_points: lowPoints,
           points_left: withPoints.reduce((s, a) => s + (a.points || 0), 0),
           points_total: withPoints.reduce((s, a) => s + (a.points_total || 0), 0),
+          // 30 天内会作废的积分合计（与 expiring_soon 的账号数分开报）
+          expiring_points: Number(expiringPoints.reduce((s, x) => s + x.points, 0).toFixed(4)),
+          expiring_days: 30,
         },
+        // 即将过期的积分明细（账号 × 到期日）。空数组 = 30 天内无损失
+        expiring_points_rows: expiringPoints,
         // 上游/池状态
         upstream: {
           gateway_online: !!gw,
