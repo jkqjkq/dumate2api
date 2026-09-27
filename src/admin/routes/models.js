@@ -59,6 +59,11 @@ function probeModel(port, model, timeout = 15000) {
 // 必然过期。中文名也来自上游 display_name，不自己编。
 const QW_NAMES = { pro: '高级', flash: '标准', 'qwen3.8-max-preview': 'Qwen3.8-Max' };
 
+// TRAE Work 的模型表同样是上游下发的，本地改不了。当前只有静态表里那一
+// 个（src/traework/constants.js 的 DEFAULT_MODEL 实测可用），留空表名由
+// 上游后续扩展——硬编码一批「应该存在」的名字等于编数据。
+const TW_NAMES = { 'glm-5.2': 'GLM-5.2' };
+
 async function channelView(cfg) {
   const out = [{
     id: 'dumate', label: '百度搭子', editable: true, prefix: null,
@@ -73,6 +78,17 @@ async function channelView(cfg) {
     });
   } catch (e) {
     out.push({ id: 'qwenwork', label: '千问办公', editable: false, prefix: 'qwen/', models: [], error: e.message });
+  }
+  try {
+    const tw = require('../../traework');
+    out.push({
+      id: 'traework', label: 'TRAE Work', editable: false, prefix: 'traework/',
+      models: tw.listModels().map((k) => ({
+        id: k, name: TW_NAMES[k] || k, prefixed: `traework/${k}`,
+      })),
+    });
+  } catch (e) {
+    out.push({ id: 'traework', label: 'TRAE Work', editable: false, prefix: 'traework/', models: [], error: e.message });
   }
   return out;
 }
@@ -152,6 +168,29 @@ const routes = [
       const cfg = modelmap.reset();
       require('../../admin/auth').audit('admin', 'model_map_reset');
       return sendJSON(res, 200, { ok: true, ...cfg });
+    },
+  },
+  {
+    // 三条通道的模型一览（统一形状，每个字段带来源）。
+    // ?channel=dumate|qwenwork|traework 只看一条；缺省返回全部。
+    // 与 /map 的区别：/map 只描述搭子（别名映射，可编辑）；这里描述
+    // 「每个模型是什么、花多少、能吃多长上下文」，跨通道统一。
+    method: 'GET',
+    path: '/info',
+    handler: async ({ res, req }) => {
+      const chRaw = decodeURIComponent((req.url.match(/[?&]channel=([^&]*)/) || [])[1] || '');
+      const ch = require('../../channels').normalize(chRaw);
+      const force = /[?&]refresh=1/.test(req.url || '');
+      try {
+        if (ch) {
+          const r = await require('../../model-info').rowsFor(ch, { force });
+          return sendJSON(res, 200, { channel: ch, rows: r.rows, error: r.error });
+        }
+        const r = await require('../../model-info').allRows({ force });
+        return sendJSON(res, 200, { channel: '', rows: r.rows, errors: r.errors });
+      } catch (e) {
+        return sendJSON(res, 200, { channel: ch, rows: [], error: e.message });
+      }
     },
   },
   {

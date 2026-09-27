@@ -117,6 +117,17 @@ async function runOnce(trigger) {
             fail: r.ok ? 0 : 1,
             error: r.error || '',
           });
+          // 9074 若出现，说明设备指纹或活动侧校验仍有问题（不是限流——
+          // 2026-09-25 查清 9074 的真因是设备指纹不匹配，已修）。
+          // 保留这个短路：真出现时不必把每个账号都试一遍。
+          if (!r.ok && /9074/.test(String(r.error || ''))) {
+            results.push({
+              name: 'TRAE Work',
+              ok: false,
+              error: '9074：设备指纹或活动侧校验未通过，本轮剩余账号跳过',
+            });
+            break;
+          }
           await sleep(PER_ACCOUNT_DELAY_MS);
         }
       }

@@ -835,6 +835,9 @@ const routes = [
           subscribed: !!p.subscribed,
           // 会员剩余天数：参考图的健康条用它当「寿命」
           days_left: daysLeft,
+          // 账号存活天数（从 created_at 算到今天）。与 days_left 是两回事——
+          // 那个是订阅有效期，这是账号用了多久。没有 created_at 就 null
+          days_alive: a.created_at ? Math.floor((now - a.created_at) / 86400000) : null,
           expire_at: d.expire_at || null,
           checkin_result: (a.checkin && a.checkin.last_result) || '',
           last_error: a.last_error || '',

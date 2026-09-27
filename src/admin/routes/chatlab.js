@@ -27,6 +27,17 @@ function availableModels() {
   return { exposed, aliases, fallback: cfg.fallback || '' };
 }
 
+// TRAE Work 的模型表（只读，来自上游常量）。试调台要能选它，否则在
+// TRAE 通道下只能手打前缀——而手打错就会静默跑到搭子上去。
+function traeworkModels() {
+  try {
+    const tw = require('../../traework');
+    return tw.listModels().map((k) => ({ id: k, name: k, prefixed: `traework/${k}` }));
+  } catch (e) {
+    return [];
+  }
+}
+
 // 每个会话的游标起点，用于算「本次对话消耗了多少」。
 // 放在内存里，不落盘——这是界面上的一次试调，重启后重新开始即可。
 const sessionStart = new Map();
@@ -83,6 +94,13 @@ const routes = [
     method: 'GET',
     path: '/models',
     handler: ({ res }) => sendJSON(res, 200, availableModels()),
+  },
+  {
+    // TRAE Work 的模型清单（只读）。与搭子分开一个接口：那份映射表描述的是
+    // 搭子的别名，混进来会让人以为改它能影响 TRAE 路由。
+    method: 'GET',
+    path: '/traework-models',
+    handler: ({ res }) => sendJSON(res, 200, { models: traeworkModels() }),
   },
   {
     // 本次会话已消耗的积分（相对打开页面时的余额）
@@ -161,7 +179,12 @@ const routes = [
           status: r.status || 0,
           input_tokens: u.input, output_tokens: u.output, total_tokens: u.total,
           ip: reqlog.clientIP(req), ua: 'admin-chatlab',
-          key_id: 0, key: '', upstream: 'web', account: acct ? acct.name : '',
+          key_id: 0, key: '', upstream: 'web',
+          // 通道标搭子：chatlab 走的仍是搭子上游（模型名与计费都是搭子的），
+          // 只是凭证来自网页 cookie。不标会让这条行在界面上被归成
+          // 「分通道前的历史记录」——而它其实不是历史，是当下跑的
+          channel: 'dumate',
+          account: acct ? acct.name : '',
           error: r.ok ? '' : (r.error || 'upstream_error'),
         });
         if (!r.ok) {
@@ -299,7 +322,10 @@ const routes = [
         status: upstreamStatus || 0,
         input_tokens: usage.input, output_tokens: usage.output, total_tokens: usage.total,
         ip: reqlog.clientIP(req), ua: 'admin-chatlab',
-        key_id: 0, key: '', upstream: 'web', account: account.name,
+        key_id: 0, key: '', upstream: 'web',
+        // 同非流式分支：走的是搭子上游，凭证来自网页 cookie
+        channel: 'dumate',
+        account: account.name,
         error: upstreamErr,
       });
       // 与请求日志同一条余额游标链：「本次消耗」和日志里的实测值才能对上
