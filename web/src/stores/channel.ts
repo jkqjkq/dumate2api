@@ -26,6 +26,8 @@ export interface ChannelInfo {
   tokenExpiresAt?: string | null
   refreshExpiresAt?: string | null
   refreshExpired?: boolean
+  /** 账号数。TRAE Work 是多账号自持凭证，徽标与仪表盘要显示「可用几个」 */
+  accounts?: number
 }
 
 const STORAGE_KEY = 'lab-channel'
@@ -69,6 +71,30 @@ export function channelLabel(id: string): string {
  */
 export function isDirectChannel(id: string = channelStore.current): boolean {
   return id === 'qwenwork' || id === 'traework'
+}
+
+/**
+ * 当前是不是 TRAE Work。
+ *
+ * 千问与 TRAE 都是直连通道（账单与搭子不同，用 isDirectChannel 判定），
+ * 但两者**彼此也不同**：千问是单账号只读、三个积分池；TRAE 是多账号自持
+ * 凭证、单一 credits + 签到。所以页面在「非搭子」的骨架里还要再分一次。
+ */
+export function isTraework(id: string = channelStore.current): boolean {
+  return id === 'traework'
+}
+
+export function isQwenwork(id: string = channelStore.current): boolean {
+  return id === 'qwenwork'
+}
+
+/**
+ * 服务端通道筛选参数。usage / reqlogs / keys 三个接口都按它过滤，
+ * 默认搭子——不传就返回全通道，卡片与表格会对不上。
+ */
+export function channelParam(): 'dumate' | 'qwenwork' | 'traework' {
+  const id = channelStore.current
+  return id === 'qwenwork' ? 'qwenwork' : id === 'traework' ? 'traework' : 'dumate'
 }
 
 function initial(): string {

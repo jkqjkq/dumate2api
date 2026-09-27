@@ -8,7 +8,7 @@ export interface ReqLogRow {
   mapped_model?: string
   // 上游通道。**历史记录没有这个字段**（分通道之前产生的），
   // 所以是可选的——界面遇到 undefined 显示「—」而不是默认成搭子。
-  channel?: 'dumate' | 'qwenwork'
+  channel?: 'dumate' | 'qwenwork' | 'traework'
   stream: boolean
   messages: number
   status: number
@@ -21,6 +21,9 @@ export interface ReqLogRow {
   key: string
   error?: string
   upstream?: string
+  // 这条请求实际用了哪个上游账号。
+  // **权威来源是 provider 上报**（多账号轮询下只有它知道选中的是哪一个），
+  // 没有则按通道读当前凭证兜底。两者都拿不到时缺省——界面显示「—」。
   account?: string
   // 实际扣费：由「请求后余额 - 上一条请求后余额」实测得出，非估算。
   // points_exact=false 表示这条与相邻请求并发，差值里可能混了别人的消耗。
@@ -39,6 +42,19 @@ export interface ReqLogRow {
   qw_balance?: { daily: number; monthly: number; longterm: number } | null
   /** 消耗的是哪个千问账号（单账号直连，但留接口以便以后多账号扩展） */
   qw_account?: { id: string; name: string; tier: string; planId: string } | null
+  // ---- TRAE Work 通道的积分明细（第三套账，与上面两套都不同）----
+  // TRAE 是多账号自持凭证，所以这里带的是**本次实际使用**的账号，
+  // 而不是「池里的第一个」——多账号下两者不是一回事。
+  /** 本次实际使用的账号（昵称，取不到则 uid 或「账号 N」） */
+  tw_account?: string
+  /** 这条请求的真实消耗 = 同账号上一条与本条的累计消耗之差 */
+  tw_cost?: number
+  /** false = 与同账号相邻请求并发，差值可能含对方的消耗 */
+  tw_exact?: boolean
+  /** 请求后的累计已消耗 / 剩余 / 额度上限 */
+  tw_consumed?: number | null
+  tw_remain?: number | null
+  tw_limit?: number | null
 }
 
 export interface ReqLogsData {

@@ -1,91 +1,10 @@
 <template>
   <div class="page">
-    <!-- ============ 千问办公：单账号直连，没有账号池 ============ -->
-    <template v-if="isQw">
-      <PageHeader title="账号管理" sub="千问办公账号（只读）" />
-      <a-alert type="info" show-icon>
-        <template #message>千问办公为单账号直连</template>
-        <template #description>
-          <div>{{ qwAccounts?.modeNote || '千问办公的登录态由官方客户端维护，不是网页凭证账号池。' }}</div>
-          <div class="mt-1">
-            这里的账号不能在本页增删——需要换账号请打开千问办公客户端登录。
-            多账号支持待接入后，本页会开放添加功能。
-          </div>
-        </template>
-      </a-alert>
+    <!-- ============ TRAE Work：凭证自持，多账号可增删 ============ -->
+    <TraeworkAccounts v-if="isTw" />
 
-      <a-alert
-        v-if="qwAccounts && !qwAccounts.count"
-        type="warning"
-        show-icon
-        class="mt-4"
-        :message="qwAccounts.error || '没有读到千问账号，请确认客户端已登录'"
-      />
-
-      <a-row v-else-if="qwAccounts" :gutter="[16, 16]" class="mt-4">
-        <a-col v-for="a in qwAccounts.accounts" :key="a.id" :span="12">
-          <a-card :bordered="false" class="h-full">
-            <div class="flex items-start justify-between">
-              <div>
-                <div class="font-medium">
-                  {{ a.name || '未命名' }}
-                  <a-tag color="cyan" class="ml-1">千问办公</a-tag>
-                  <a-tag v-if="a.active" color="blue" class="ml-1">当前</a-tag>
-                </div>
-                <div class="text-xs text-slate-400 mt-1">
-                  <template v-if="a.username">ID {{ a.username }} · </template>
-                  {{ a.tier || '—' }}
-                </div>
-              </div>
-              <a-tag :color="a.usable ? 'green' : 'red'">
-                {{ a.usable ? '可用' : '需重新登录' }}
-              </a-tag>
-            </div>
-
-            <a-descriptions :column="1" size="small" bordered class="mt-3">
-              <a-descriptions-item label="邮箱">
-                <span class="break-all text-xs">{{ a.email || '—' }}</span>
-              </a-descriptions-item>
-              <a-descriptions-item label="套餐">
-                {{ a.planName || '—' }}
-              </a-descriptions-item>
-              <a-descriptions-item label="access token 到期">
-                {{ a.tokenExpiresAt ? dateText(a.tokenExpiresAt) : '—' }}
-              </a-descriptions-item>
-              <a-descriptions-item label="refresh token 到期">
-                <span :class="a.refreshExpired ? 'text-red-500' : ''">
-                  {{ a.refreshExpiresAt ? dateText(a.refreshExpiresAt) : '—' }}
-                </span>
-              </a-descriptions-item>
-            </a-descriptions>
-
-            <div v-if="a.wallets" class="mt-3 grid grid-cols-3 gap-2">
-              <div class="qw-pool">
-                <div class="qw-pool-label">每日免费</div>
-                <div class="qw-pool-value num text-cyan-400">{{ fmt(a.wallets.daily) }}</div>
-              </div>
-              <div class="qw-pool">
-                <div class="qw-pool-label">月度积分</div>
-                <div class="qw-pool-value num">{{ fmt(a.wallets.monthly) }}</div>
-              </div>
-              <div class="qw-pool">
-                <div class="qw-pool-label">长期积分</div>
-                <div class="qw-pool-value num">{{ fmt(a.wallets.longterm) }}</div>
-              </div>
-            </div>
-
-            <a-alert
-              v-if="a.refreshExpired"
-              type="warning"
-              show-icon
-              class="mt-3"
-              message="refresh token 已过期"
-              description="access token 到期后将无法自动续期，请重开千问办公客户端重新登录。"
-            />
-          </a-card>
-        </a-col>
-      </a-row>
-    </template>
+    <!-- ============ 千问办公：多账号池，凭证自持（可增删、可设主账号） ============ -->
+    <QwenworkAccounts v-else-if="isQw" />
 
     <!-- ============ 百度搭子：原有页面 ============ -->
     <template v-else>
@@ -648,27 +567,15 @@ import { computed, onMounted, reactive, ref, watch } from 'vue'
 import PageHeader from '@/components/PageHeader.vue'
 import { message } from 'ant-design-vue'
 import client from '@/api/client'
-import { channelStore, isDirectChannel } from '@/stores/channel'
-import { qwenworkApi } from '@/api/qwenwork'
-import type { QwAccount } from '@/api/qwenwork'
+import { channelStore, isTraework, isQwenwork } from '@/stores/channel'
+import TraeworkAccounts from '@/components/traework/TraeworkAccounts.vue'
+import QwenworkAccounts from '@/components/qwenwork/QwenworkAccounts.vue'
 import type { WebAccount, AccountStatus, PoolData, PoolAccount, TaskRunRow } from '@/api/webaccounts'
 
-// 千问办公：单账号直连，没有账号池。这里只读展示当前账号。
-// 直连通道（千问办公 / TRAE Work）：账单模型与搭子不同，用统一判定
-const isQw = computed(() => isDirectChannel())
-const qwAccounts = ref<{ mode: string; modeNote: string; count: number; accounts: QwAccount[]; error: string } | null>(null)
-
-async function loadQw() {
-  try {
-    const { data } = await qwenworkApi.accounts()
-    qwAccounts.value = data
-  } catch (e: any) {
-    qwAccounts.value = {
-      mode: 'single', modeNote: '', count: 0, accounts: [],
-      error: e?.message || '读取千问账号失败',
-    }
-  }
-}
+// 三条通道三种账号形态：搭子是网页凭证池、千问与 TRAE 都是凭证自持可增删。
+// 后两者的数据由各自的子组件自己拉（字段与搭子不同），这里只做分支。
+const isTw = computed(() => isTraework())
+const isQw = computed(() => isQwenwork())
 
 const dateText = (ts: number) => new Date(ts).toLocaleString('zh-CN')
 
@@ -1104,14 +1011,15 @@ async function openDetail(a: WebAccount) {
 }
 
 onMounted(async () => {
-  // 按当前通道初始化：顶栏已切到千问时不该去拉搭子的网页账号
-  if (isQw.value) { await loadQw(); return }
+  // 按当前通道初始化：顶栏已切到千问时不该去拉搭子的网页账号。
+  // 千问与 TRAE 的数据由各自子组件自己拉（它们走自己的接口，与搭子的池子无关）
+  if (isTw.value || isQw.value) return
   await Promise.all([load(), loadLoginInfo()])
 })
 
 // 切通道重拉
 watch(() => channelStore.current, async () => {
-  if (isQw.value) { await loadQw(); return }
+  if (isTw.value || isQw.value) return
   await Promise.all([load(), loadLoginInfo()])
 })
 </script>

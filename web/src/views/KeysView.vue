@@ -31,17 +31,20 @@
           <span class="font-medium">API Key</span>
           <span class="text-slate-500 text-sm ml-2">近 {{ data?.days ?? 30 }} 天用量</span>
           <a-tag v-if="isQw" color="cyan" class="ml-2">千问办公</a-tag>
+          <a-tag v-else-if="isTw" color="purple" class="ml-2">TRAE Work</a-tag>
         </div>
         <a-button type="primary" size="small" @click="openCreate">新建 Key</a-button>
       </div>
 
-      <!-- 千问通道下说明「key 与通道的关系」，否则用户会以为这里的 key 是千问专用的 -->
-      <a-alert v-if="isQw" type="info" show-icon class="mb-3">
-        <template #message>当前显示可用于千问办公的 Key</template>
+      <!-- 直连通道下说明「key 与通道的关系」，否则用户会以为这里的 key 是通道专用的 -->
+      <a-alert v-if="isQw || isTw" type="info" show-icon class="mb-3">
+        <template #message>当前显示可用于{{ channelLabel(channelStore.current) }}的 Key</template>
         <template #description>
-          网关按**模型名前缀**分流（<code>qwen/</code> → 千问办公，无前缀 → 搭子），
-          而不是按 key 分流。所以这里的 key 只要能调 <code>qwen/*</code> 模型就可用。
-          若把 key 的「通道绑定」设为「仅千问办公」，它就只能调千问的模型。
+          网关按**模型名前缀**分流（<code>qwen/</code> → 千问办公、
+          <code>traework/</code> → TRAE Work，无前缀 → 搭子），而不是按 key 分流。
+          所以这里的 key 只要能调对应前缀的模型就可用。
+          若把 key 的「通道绑定」设为「仅{{ channelLabel(channelStore.current) }}」，
+          它就只能调该通道的模型。
         </template>
       </a-alert>
 
@@ -59,6 +62,7 @@
           </template>
           <template v-else-if="column.key === 'channel'">
             <a-tag v-if="record.channel === 'qwenwork'" color="cyan">仅千问</a-tag>
+            <a-tag v-else-if="record.channel === 'traework'" color="purple">仅 TRAE</a-tag>
             <a-tag v-else-if="record.channel === 'dumate'" color="blue">仅搭子</a-tag>
             <a-tag v-else color="default">不限</a-tag>
           </template>
@@ -201,7 +205,7 @@ import PageHeader from '@/components/PageHeader.vue'
 import { message } from 'ant-design-vue'
 import dayjs, { type Dayjs } from 'dayjs'
 import client from '@/api/client'
-import { channelStore, isDirectChannel } from '@/stores/channel'
+import { channelStore, isTraework, isQwenwork, channelLabel } from '@/stores/channel'
 import type { ApiKey, KeysData } from '@/api/keys'
 
 const data = ref<KeysData | null>(null)
@@ -218,16 +222,19 @@ const channelOptions = [
   { label: '不限通道', value: '' },
   { label: '仅百度搭子', value: 'dumate' },
   { label: '仅千问办公', value: 'qwenwork' },
+  { label: '仅 TRAE Work', value: 'traework' },
 ]
 
-// 直连通道（千问办公 / TRAE Work）：账单模型与搭子不同，用统一判定
-const isQw = computed(() => isDirectChannel())
+// 千问与 TRAE 分开判定：两者都是直连，但前缀与额度体系不同，
+// 页面上的说明文案与默认绑定值都要各自对应
+const isTw = computed(() => isTraework())
+const isQw = computed(() => isQwenwork())
 
 const form = reactive({
   name: '',
   ipText: '',
   models: [] as string[],
-  channel: '' as '' | 'dumate' | 'qwenwork',
+  channel: '' as '' | 'dumate' | 'qwenwork' | 'traework',
   expiresAt: null as Dayjs | null,
   note: '',
 })
@@ -262,8 +269,9 @@ const ipList = computed(() =>
 )
 
 async function load() {
-  // 按通道过滤：切到千问时只看与千问相关的 key（channel=qwenwork 或未限定的）
-  const q = isQw.value ? '?channel=qwenwork' : ''
+  // 按通道过滤：切到千问/TRAE 时只看与该通道相关的 key
+  // （channel 绑定为该通道，或未限定通道的通用 key）
+  const q = isQw.value ? '?channel=qwenwork' : isTw.value ? '?channel=traework' : ''
   const { data: d } = await client.get('/keys' + q)
   data.value = d
   try {
@@ -277,9 +285,9 @@ function openCreate() {
   form.name = ''
   form.ipText = ''
   form.models = []
-  // 在千问通道下新建，默认绑定到千问——用户在千问页面点「新建」，
-  // 想要的显然是能调千问模型的 key
-  form.channel = isQw.value ? 'qwenwork' : ''
+  // 在千问/TRAE 通道下新建，默认绑定到该通道——用户在这一页点「新建」，
+  // 想要的显然是能调该通道模型的 key
+  form.channel = isQw.value ? 'qwenwork' : isTw.value ? 'traework' : ''
   form.expiresAt = null
   form.note = ''
   ipError.value = ''
@@ -291,7 +299,7 @@ function openEdit(k: ApiKey) {
   form.name = k.name
   form.ipText = k.ip_allowlist.join('\n')
   form.models = [...k.model_allowlist]
-  form.channel = (k.channel || '') as '' | 'dumate' | 'qwenwork'
+  form.channel = (k.channel || '') as '' | 'dumate' | 'qwenwork' | 'traework'
   form.expiresAt = k.expires_at ? dayjs(k.expires_at) : null
   form.note = k.note || ''
   ipError.value = ''

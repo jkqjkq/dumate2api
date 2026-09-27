@@ -38,19 +38,30 @@
 
       <a-col :span="6">
         <a-card :bordered="false" class="h-full">
-          <!-- 千问的积分在它自己的池子里（每日免费 / 月度 / 长期），
-               不能复用搭子的「今日实付」——那是上游账单，千问没有 -->
+          <!-- 三条通道三种账：搭子是上游账单（今日实付）、千问是免费额度余额、
+               TRAE 是按账号独立的剩余额度。同一张卡按通道换语义，
+               但都要标出数字来源，否则额度政策一变没人知道数字错在哪 -->
           <a-statistic
-            :title="isQw ? '免费额度余额' : '今日实付'"
-            :value="isQw
-              ? (qw?.ok ? fmtQw(qw.free) : '—')
-              : (data?.cards.today.consumed_points ?? '—')"
-            :precision="isQw || data?.cards.today.consumed_points == null ? undefined : 2"
+            :title="isTw ? '剩余额度' : isQw ? '免费额度余额' : '今日实付'"
+            :value="isTw
+              ? (twTotals.remain ?? '—')
+              : isQw
+                ? (qw?.ok ? fmtQw(qw.free) : '—')
+                : (data?.cards.today.consumed_points ?? '—')"
+            :precision="isQw || isTw || data?.cards.today.consumed_points == null ? undefined : 2"
             :suffix="isQw && qw?.ok ? `/ ${qw.dailyCap}` : ''"
-            :value-style="isQw ? 'color:#22d3ee' : undefined"
+            :value-style="isQw || isTw ? 'color:#22d3ee' : undefined"
           />
           <div class="text-xs text-slate-500 mt-2">
-            <template v-if="isQw">
+            <template v-if="isTw">
+              <template v-if="twTotals.remain != null">
+                按账号独立计算<template v-if="twTotals.limit">
+                  · 上限合计 {{ twTotals.limit.toLocaleString('zh-CN') }}
+                </template>
+              </template>
+              <span v-else>取不到 TRAE 额度</span>
+            </template>
+            <template v-else-if="isQw">
               <template v-if="qw?.ok">
                 <a-tag :color="qw.calibrated ? 'cyan' : 'default'" class="qw-mini">
                   {{ qw.calibrated ? '实测' : '配置兜底' }}
@@ -300,9 +311,51 @@
       </template>
     </a-card>
 
-    <!-- 按账号积分消耗：只有搭子有上游计费账单。千问办公的积分在它自己的
-         池子里，挂一张空表出来只会让人以为「千问没消耗」 -->
-    <a-card v-if="!isQw" title="按账号积分消耗" :bordered="false" class="mt-4">
+    <!-- TRAE Work 的额度。与千问的三个池子、搭子的上游账单是三套账，
+         不合并成一个「积分」区块——合并出来的数字没有任何一处对得上 -->
+    <a-card v-if="isTw" title="TRAE Work 额度" :bordered="false" class="mt-4">
+      <a-empty v-if="!twRows.length" description="还没有 TRAE Work 账号" />
+      <template v-else>
+        <a-table
+          size="small"
+          :pagination="false"
+          :data-source="twRows"
+          :columns="twColumns"
+          row-key="id"
+        >
+          <template #bodyCell="{ column, record }">
+            <template v-if="column.key === 'name'">
+              {{ record.nickname || record.uid || '未命名' }}
+              <div v-if="record.error" class="text-xs text-red-500">{{ record.error }}</div>
+            </template>
+            <template v-else-if="column.key === 'remain'">
+              <span v-if="record.remain != null" class="font-medium num">
+                {{ record.remain.toLocaleString('zh-CN') }}
+              </span>
+              <span v-else class="text-slate-400">—</span>
+            </template>
+            <template v-else-if="column.key === 'limit'">
+              <span v-if="record.limit" class="num">{{ record.limit.toLocaleString('zh-CN') }}</span>
+              <span v-else class="text-slate-400">—</span>
+            </template>
+            <template v-else-if="column.key === 'checkin'">
+              <a-tag v-if="record.checkedIn == null" color="default">—</a-tag>
+              <a-tag v-else :color="record.checkedIn ? 'green' : 'orange'">
+                {{ record.checkedIn ? '已签到' : '未签到' }}
+              </a-tag>
+            </template>
+          </template>
+        </a-table>
+        <div class="text-xs text-slate-400 mt-2">
+          额度按账号独立，不共享；取不到时显示 —，不补 0。
+          签到每日一次且幂等，重复执行不会多领。
+        </div>
+      </template>
+    </a-card>
+
+    <!-- 按账号积分消耗：只有搭子有上游计费账单。直连通道的账在各自的
+         池子里，挂一张空表出来只会让人以为「这条通道没消耗」 -->
+    <a-card v-if="!isQw && !isTw" title="按账号积分消耗" :bordered="false" class="mt-4">
       <div class="text-xs text-slate-500 mb-2">
         来自上游计费记录（近 {{ data?.days ?? days }} 天）——本地日志算不出扣费，单价在上游。
       </div>
@@ -336,8 +389,10 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import PageHeader from '@/components/PageHeader.vue'
 import client from '@/api/client'
-import { channelStore, CHANNELS, isDirectChannel } from '@/stores/channel'
+import { channelStore, CHANNELS, isTraework, isQwenwork, channelParam } from '@/stores/channel'
 import { qwenworkApi } from '@/api/qwenwork'
+import { traeworkApi } from '@/api/traework'
+import type { TraeworkCreditRow } from '@/api/traework'
 import type { QwCredits } from '@/api/qwenwork'
 import type { UsageOverview } from '@/api/usage'
 
@@ -358,14 +413,29 @@ const days = ref(30)
 // 当前通道。**服务端按通道过滤**而不是前端筛已聚合的数字——
 // 卡片、折线、按模型表都建立在同一批行上，前端筛只能筛掉表里的行，
 // 顶部卡片的数字仍是全通道的，两者会对不上。
-// 直连通道（千问办公 / TRAE Work）：账单模型与搭子不同，用统一判定
-const isQw = computed(() => isDirectChannel())
+// 三条通道：搭子的扣费在上游账单里（pointsUsage）；千问的在 qwenwork.cn
+// 的三个池子里；TRAE 的是每个账号独立的 credits。三套账互不相干，
+// 不能合并显示——合并出来的数字没有任何一处对得上。
+const isTw = computed(() => isTraework())
+const isQw = computed(() => isQwenwork())
 const chLabel = computed(() => CHANNELS.find((c) => c.id === channelStore.current)?.label || channelStore.current)
 
 // 千问积分。它是**另一套账**：搭子的扣费在上游账单里（pointsUsage），
 // 千问的在 qwenwork.cn 的三个池子里，两边互不相干，不能合并显示。
 // 拉取在 load() 里与用量并行做。
 const qw = ref<QwCredits | null>(null)
+
+// TRAE 的额度：按账号独立。与千问的三个池子不同，这里只看「剩余多少」。
+const twRows = ref<TraeworkCreditRow[]>([])
+const twTotals = computed(() => {
+  let remain: number | null = null
+  let limit: number | null = null
+  for (const r of twRows.value) {
+    if (r.remain != null) remain = (remain ?? 0) + r.remain
+    if (r.limit != null) limit = (limit ?? 0) + r.limit
+  }
+  return { remain, limit }
+})
 
 // 积分保留 2~4 位：实测单次消耗 0.0025，按 2 位显示会变成 0
 const fmtQw = (n: number | null | undefined) =>
@@ -411,6 +481,14 @@ const accountColumns = [
   { title: '账号', key: 'name' },
   { title: '消耗积分', key: 'consumed', width: '24%' },
   { title: '计费记录', key: 'count', width: '20%' },
+]
+// TRAE 的额度表：剩余 / 上限 / 签到。没有「消耗积分」列——上游不给
+// 逐笔账单，只有存量快照
+const twColumns = [
+  { title: '账号', key: 'name' },
+  { title: '剩余额度', key: 'remain', width: '24%' },
+  { title: '额度上限', key: 'limit', width: '24%' },
+  { title: '今日签到', key: 'checkin', width: '20%' },
 ]
 
 const fmt = (n: number) => n.toLocaleString('zh-CN', { maximumFractionDigits: 2 })
@@ -469,14 +547,18 @@ function renderChart() {
 async function load() {
   loading.value = true
   try {
-    const ch = isQw.value ? 'qwenwork' : 'dumate'
-    // 积分与用量并行拉：两者互不依赖，串行只会白等一个来回
-    const [usage, _qw] = await Promise.all([
+    // 服务端按通道过滤。TRAE 走 channelParam() 而不是硬编码——
+    // 加第四条通道时不该再来改这里
+    const ch = channelParam()
+    // 额度与用量并行拉：两者互不依赖，串行只会白等一个来回
+    const [usage, credits] = await Promise.all([
       client.get(`/usage/overview?days=${days.value}&channel=${ch}`),
-      isQw.value ? qwenworkApi.credits() : Promise.resolve(null),
+      isTw.value ? traeworkApi.credits().catch(() => ({ data: { count: 0, rows: [] } }))
+        : isQw.value ? qwenworkApi.credits() : Promise.resolve(null),
     ])
     data.value = usage.data
-    if (isQw.value) qw.value = _qw!.data
+    if (isTw.value) twRows.value = (credits as any)?.data?.rows || []
+    else if (isQw.value) qw.value = (credits as any).data
     lastRefresh.value = new Date().toLocaleTimeString('zh-CN')
     await nextTick()
     renderChart()

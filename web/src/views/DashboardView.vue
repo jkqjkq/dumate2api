@@ -1,8 +1,9 @@
 <template>
   <div class="page">
-    <PageHeader :title="isQw ? '千问办公' : '仪表盘'">
+    <PageHeader :title="isTw ? 'TRAE Work' : isQw ? '千问办公' : '仪表盘'">
       <template #sub>
-        {{ isQw ? '积分额度、登录态与用量总览' : '账号池健康度、上游状态与今日用量总览' }}
+        {{ isTw ? '额度、签到与用量总览'
+          : isQw ? '积分额度、登录态与用量总览' : '账号池健康度、上游状态与今日用量总览' }}
         <template v-if="lastRefresh"> · 更新于 {{ lastRefresh }}</template>
       </template>
       <template #actions>
@@ -10,9 +11,88 @@
       </template>
     </PageHeader>
 
-    <!-- 千问办公：积分卡片。它是另一套账——不消耗搭子积分、不进账号池，
-         所以整块替换而不是与搭子的指标卡混排。 -->
-    <template v-if="isQw">
+    <!-- ============ TRAE Work：额度 + 签到 + 账号，与千问三池不同 ============ -->
+    <template v-if="isTw">
+      <a-row :gutter="[16, 16]">
+        <a-col :span="6">
+          <a-card :bordered="false" class="h-full">
+            <a-statistic title="剩余额度" :value="twTotals.remain ?? '—'" />
+            <div class="text-xs text-slate-500 mt-2">
+              <template v-if="twTotals.limit">上限合计 {{ twTotals.limit.toLocaleString('zh-CN') }}</template>
+              <span v-else>上游未给出额度上限</span>
+            </div>
+          </a-card>
+        </a-col>
+        <a-col :span="6">
+          <a-card :bordered="false" class="h-full">
+            <a-statistic title="今日已签到" :value="`${twTotals.checked} / ${twRows.length}`" />
+            <div class="text-xs text-slate-500 mt-2">签到每日一次，幂等</div>
+          </a-card>
+        </a-col>
+        <a-col :span="6">
+          <a-card :bordered="false" class="h-full">
+            <a-statistic title="今日请求" :value="usage?.cards.today.requests ?? '—'" value-style="color:#22d3ee" />
+            <div class="text-xs text-slate-500 mt-2">
+              <template v-if="usage">{{ compact(usage.cards.today.tokens) }} Token</template>
+              <span v-else>—</span>
+            </div>
+          </a-card>
+        </a-col>
+        <a-col :span="6">
+          <a-card :bordered="false" class="h-full">
+            <a-statistic
+              title="通道状态"
+              :value="twInfo?.ready ? '就绪' : '不可用'"
+              :value-style="twInfo?.ready ? 'color:#34d399' : 'color:#f87171'"
+            />
+            <div class="text-xs text-slate-500 mt-2">
+              {{ twInfo?.ready ? `可用账号 ${twInfo.accounts ?? 0} 个` : (twInfo?.error || '—') }}
+            </div>
+          </a-card>
+        </a-col>
+      </a-row>
+
+      <a-row :gutter="[16, 16]" class="mt-4">
+        <a-col :span="17">
+          <a-card title="请求量趋势" :bordered="false" class="h-full">
+            <template #extra><span class="text-xs text-slate-400">按天聚合</span></template>
+            <a-empty v-if="!(usage?.daily || []).length" description="还没有 TRAE Work 请求记录" />
+            <div v-else ref="tokChartEl" class="dash-chart" />
+          </a-card>
+        </a-col>
+        <a-col :span="7">
+          <a-card title="通道状态" :bordered="false" class="h-full">
+            <a-descriptions :column="1" size="small">
+              <a-descriptions-item label="账号">
+                {{ twInfo?.account || '—' }}
+                <span v-if="(twInfo?.accounts ?? 0) > 1" class="text-xs text-slate-400 ml-1">
+                  等 {{ twInfo?.accounts }} 个
+                </span>
+              </a-descriptions-item>
+              <a-descriptions-item label="access token">
+                <span class="font-mono text-xs">{{ fmtExpire(twInfo?.tokenExpiresAt) }}</span>
+              </a-descriptions-item>
+              <a-descriptions-item label="refresh token">
+                <span class="font-mono text-xs">{{ fmtExpire(twInfo?.refreshExpiresAt) }}</span>
+                <a-tag v-if="twInfo?.refreshExpired" color="orange" class="ml-1">已过期</a-tag>
+              </a-descriptions-item>
+            </a-descriptions>
+            <!-- 与千问的关键差异：TRAE 的凭证是我们自己换的，token 到期能自动续 -->
+            <a-alert
+              type="info"
+              show-icon
+              class="mt-3"
+              message="凭证自持，可自动续期"
+              description="access token 到期时网关用 refresh token 自动换新，不需要打开 TRAE 客户端。只有 refresh token 过期才需要重新登录。"
+            />
+          </a-card>
+        </a-col>
+      </a-row>
+    </template>
+
+    <!-- ============ 千问办公：积分卡片。它是另一套账——不消耗搭子积分、不进账号池，
+         所以整块替换而不是与搭子的指标卡混排。 ============ -->
+    <template v-else-if="isQw">
       <!-- 三个池子平级展示：月度与长期性质不同（订阅套餐 vs 充值赠送），
            不能合并成一张「付费额度」卡。 -->
       <a-row :gutter="[16, 16]">
@@ -78,9 +158,12 @@
               <a-descriptions-item label="wasm">
                 <span class="font-mono text-xs">{{ qwInfo?.wasm || '—' }}</span>
               </a-descriptions-item>
-              <a-descriptions-item label="账号">
+              <a-descriptions-item label="主账号">
                 {{ qwInfo?.account || '—' }}
                 <span v-if="qwInfo?.tier" class="text-xs text-slate-400 ml-1">{{ qwInfo.tier }}</span>
+                <a-tag v-if="qwAccounts.filter(a => a.active).length === 0" color="default" class="ml-1">
+                  未设
+                </a-tag>
               </a-descriptions-item>
               <a-descriptions-item label="access token">
                 <span class="font-mono text-xs">{{ fmtExpire(qwInfo?.tokenExpiresAt) }}</span>
@@ -96,11 +179,61 @@
               show-icon
               class="mt-3"
               message="refresh token 已过期"
-              description="access token 到期后需打开千问办公客户端重新登录一次，否则通道会失效。"
+              description="access token 到期后需在管理端「账号管理」删除该账号并重新登录，不要去打开千问客户端——客户端的登录态已经不再被这条通道使用。"
             />
           </a-card>
         </a-col>
       </a-row>
+
+      <!-- 账号健康快照（多账号）：每账号一张卡，仿搭子仪表盘。
+           千与搭子的「会员剩余天数」语义不同——这里用「账号存活天数」
+           （从 createdAt 算到今天）。 -->
+      <a-card :bordered="false" class="mt-4">
+        <template #title>
+          <span>账号健康快照</span>
+          <a-tag v-if="qwAccounts.length" color="green" class="ml-2">
+            在线 {{ qwAccounts.filter(a => a.enabled && a.usable).length }}
+          </a-tag>
+        </template>
+        <a-empty v-if="!qwAccounts.length" description="还没有添加千问账号，到「账号管理」加一个" />
+        <a-row v-else :gutter="[16, 16]">
+          <a-col v-for="a in qwAccounts" :key="a.id" :span="8">
+            <div class="p-3 border border-slate-200 rounded">
+              <div class="flex items-center justify-between mb-2">
+                <span class="font-medium truncate">
+                  {{ a.name || a.username || '未命名' }}
+                  <a-tag v-if="a.active" color="blue" class="ml-1">主账号</a-tag>
+                </span>
+                <a-tag :color="a.lastError ? 'red' : a.refreshExpired ? 'orange' : a.enabled && a.usable ? 'green' : 'default'">
+                  {{ a.lastError ? '异常' : a.refreshExpired ? '待重登' : a.enabled && a.usable ? '在线' : '停用' }}
+                </a-tag>
+              </div>
+              <div v-if="a.phone" class="text-xs text-slate-400 font-mono mb-2">
+                {{ a.phone }}
+              </div>
+              <!-- 健康条：长度按账号存活天数，365 天为满。
+                   与搭子的「会员剩余天数」不同——这是账号用了多久的客观度量，
+                   满了不代表「过期」，只是看不到更老的。 -->
+              <div class="h-1.5 bg-slate-100 rounded overflow-hidden mb-2">
+                <div
+                  class="h-full rounded transition-all"
+                  :class="healthColorQw(a)"
+                  :style="{ width: healthWidthQw(a) }"
+                />
+              </div>
+              <div class="flex items-center justify-between text-xs">
+                <span class="text-slate-500">
+                  {{ a.daysAlive !== null ? a.daysAlive + ' 天' : '天数未知' }}
+                </span>
+                <span :class="a.points !== null && a.points < 0 ? 'text-red-500' : a.points !== null && a.points < 20 ? 'text-orange-500' : 'text-slate-600'">
+                  {{ a.points !== null ? fmt(a.points) + ' 积分' : '积分未知' }}
+                </span>
+              </div>
+              <div v-if="a.lastError" class="text-xs text-red-500 mt-1">{{ a.lastError }}</div>
+            </div>
+          </a-col>
+        </a-row>
+      </a-card>
     </template>
 
     <!-- 搭子通道：账号池 + 用量 -->
@@ -260,6 +393,9 @@
             <div class="flex items-center justify-between text-xs">
               <span class="text-slate-500">
                 {{ a.days_left !== null ? a.days_left + ' 天' : '到期未知' }}
+                <span v-if="a.days_alive !== null" class="text-slate-400 ml-1">
+                  · 已用 {{ a.days_alive }} 天
+                </span>
               </span>
               <span :class="a.points !== null && a.points < 200 ? 'text-orange-500' : 'text-slate-600'">
                 {{ a.points !== null ? fmt(a.points) + ' 积分' : '积分未知' }}
@@ -332,12 +468,15 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import PageHeader from '@/components/PageHeader.vue'
-import { channelStore, isDirectChannel } from '@/stores/channel'
-import { qwenworkApi, type QwCredits, type QwDailyRow } from '@/api/qwenwork'
+import { channelStore, isTraework, isQwenwork } from '@/stores/channel'
+import { qwenworkApi, type QwCredits, type QwDailyRow, type QwAccount } from '@/api/qwenwork'
+import { traeworkApi } from '@/api/traework'
+import type { TraeworkCreditRow } from '@/api/traework'
 import client from '@/api/client'
 import type { SystemStatus } from '@/api/system'
 import type { PointsData, AccountsData } from '@/api/points'
 import type { StatsSummary, DailyRow } from '@/api/stats'
+import type { UsageOverview } from '@/api/usage'
 import { SERIES, INK, TOOLTIP_BASE, axisStyle, compactNum, exactNum, lineSeries } from '@/utils/chartTheme'
 
 interface DashAccount {
@@ -349,6 +488,8 @@ interface DashAccount {
   points_total: number | null
   subscribed: boolean
   days_left: number | null
+  /** 账号存活天数（从 created_at 算到今天），与 days_left 是两回事 */
+  days_alive: number | null
   expire_at: number | null
   checkin_result: string
   last_error: string
@@ -379,10 +520,30 @@ const lastRefresh = ref('')
 
 // 通道：千问办公是另一套账（积分/登录态），整块内容与搭子不同。
 // 用 store 的全局状态而不是本地 ref —— 顶栏切换器与这里必须一致。
-// 直连通道（千问办公 / TRAE Work）：账单模型与搭子不同，用统一判定
-const isQw = computed(() => isDirectChannel())
+// 通道：千问与 TRAE 都是直连、账单与搭子不同（isDirectChannel），
+// 但两者**彼此也不同**：千问是三个积分池、单账号只读；TRAE 是单一
+// credits、多账号自持。所以页面在「非搭子」的骨架里还要再分一次。
+const isTw = computed(() => isTraework())
+const isQw = computed(() => isQwenwork())
+const twInfo = computed(() => channelStore.infos['traework'] || null)
+// TRAE 的额度（按账号独立）与经网关的用量（/usage 按通道过滤）是两个数据源
+const twRows = ref<TraeworkCreditRow[]>([])
+const usage = ref<UsageOverview | null>(null)
+const twTotals = computed(() => {
+  let remain: number | null = null
+  let limit: number | null = null
+  let checked = 0
+  for (const r of twRows.value) {
+    if (r.remain != null) remain = (remain ?? 0) + r.remain
+    if (r.limit != null) limit = (limit ?? 0) + r.limit
+    if (r.checkedIn) checked++
+  }
+  return { remain, limit, checked }
+})
 const qw = ref<QwCredits | null>(null)
 const qwDaily = ref<QwDailyRow[]>([])
+// 账号健康快照用——千问现在也是多账号池，每个账号一张卡
+const qwAccounts = ref<QwAccount[]>([])
 const qwInfo = computed(() => channelStore.infos['qwenwork'] || null)
 // 三个池子。后端平级返回 wallets，前端不再自己合并——「月度」与「长期」
 // 一个来自订阅套餐、一个来自充值赠送，合并成一张「付费额度」卡会丢信息。
@@ -434,6 +595,22 @@ function healthColor(a: DashAccount) {
   if (a.last_error) return 'bg-red-400'
   if (a.days_left === null) return 'bg-slate-300'
   if (a.days_left <= 7) return 'bg-orange-400'
+  return 'bg-green-500'
+}
+
+// 千问版：按账号存活天数（从 createdAt 算到今天），365 天为满格。
+// 与搭子的语义不同——「剩余」vs「已活」，但视觉规则一致：0 用灰、
+// 离线/异常用红/橙、在线用绿。「待重登」也算异常色——这条通道的
+// refresh token 是池里这个号自己持有的，不该再走客户端。
+function healthWidthQw(a: QwAccount) {
+  if (a.daysAlive === null) return '0%'
+  const pct = Math.max(0, Math.min(100, (a.daysAlive / 365) * 100))
+  return pct + '%'
+}
+function healthColorQw(a: QwAccount) {
+  if (a.lastError) return 'bg-red-400'
+  if (a.refreshExpired) return 'bg-orange-400'
+  if (!a.enabled || !a.usable) return 'bg-slate-300'
   return 'bg-green-500'
 }
 
@@ -540,12 +717,15 @@ async function refreshQw() {
   loading.value = true
   error.value = ''
   try {
-    const [c, d] = await Promise.all([
+    const [c, d, a] = await Promise.all([
       qwenworkApi.credits(),
       qwenworkApi.daily(14),
+      // 账号健康快照用——不取的话下面那块只是空骨架
+      qwenworkApi.accounts(),
     ])
     qw.value = c.data
     qwDaily.value = d.data.rows
+    qwAccounts.value = (a.data && a.data.accounts) || []
     await channelStore.load()
     lastRefresh.value = new Date().toLocaleTimeString('zh-CN')
     await nextTick()
@@ -557,7 +737,54 @@ async function refreshQw() {
   }
 }
 
+// TRAE Work 的数据分三路拉：额度（/traework/credits）、用量（/usage 按通道
+// 过滤）、通道元信息（system/status）。与千问分开是因为两者的账完全不同，
+// 混在一个 Promise.all 里会让任一通道故障拖垮整页。
+async function refreshTw() {
+  loading.value = true
+  error.value = ''
+  try {
+    const [c, u] = await Promise.all([
+      traeworkApi.credits().catch(() => ({ data: { count: 0, rows: [] } })),
+      client.get(`/usage/overview?days=14&channel=traework`).catch(() => ({ data: null })),
+    ])
+    twRows.value = c.data.rows || []
+    usage.value = u.data
+    await channelStore.load()
+    lastRefresh.value = new Date().toLocaleTimeString('zh-CN')
+    await nextTick()
+    renderTokChart()
+  } catch (e: any) {
+    error.value = e?.response?.data?.error || e?.message || '未知错误'
+  } finally {
+    loading.value = false
+  }
+}
+
+// TRAE 的趋势图复用搭子 token 那张的容器：只画请求量一条线就够回答
+// 「这条通道用得多不多」，额度是存量（不是时间序列），不该画成折线。
+function renderTokChart() {
+  const rows = usage.value?.daily || []
+  if (!tokChartEl.value || !rows.length) return
+  if (!tokChart) tokChart = echarts.init(tokChartEl.value)
+  tokChart.setOption({
+    grid: { left: 56, right: 16, top: 12, bottom: 22 },
+    tooltip: {
+      ...TOOLTIP_BASE,
+      trigger: 'axis',
+      formatter: (params: any[]) => {
+        const r = rows[params[0].dataIndex]
+        return `${r.day}<br/>请求 <b>${exactNum(r.requests)}</b><br/>Token <b>${exactNum(r.total_tokens)}</b>`
+      },
+    },
+    xAxis: { type: 'category', data: rows.map((r) => r.day.slice(5)), ...axisStyle({ showGrid: false }) },
+    yAxis: { type: 'value', ...axisStyle({ formatter: (v: number) => compactNum(v) }) },
+    series: [lineSeries({ name: '请求数', data: rows.map((r) => r.requests), color: SERIES[0], area: true })],
+  })
+}
+
 async function refresh(force = false) {
+  if (isTw.value) return refreshTw()
   if (isQw.value) return refreshQw()
   loading.value = true
   error.value = ''
@@ -630,8 +857,9 @@ onMounted(() => {
   refresh()
 })
 
-// 切通道要重拉数据：两个通道的数据源不同，不重拉会看到上一个通道的残留
-watch(isQw, () => { refresh() })
+// 切通道要重拉数据：三条通道的数据源不同，不重拉会看到上一个通道的残留。
+// 两个 computed 都要 watch——只盯 isQw 的话从搭子切到 TRAE 不触发。
+watch([isQw, isTw], () => { refresh() })
 
 onBeforeUnmount(() => {
   window.removeEventListener('resize', onResize)
@@ -645,6 +873,12 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
+/* TRAE 的趋势图：单张，比搭子的两联图高一些——它只画一条线，
+   给足高度才能看出起伏 */
+.dash-chart {
+  height: 260px;
+  width: 100%;
+}
 .qw-chart {
   height: 260px;
   width: 100%;

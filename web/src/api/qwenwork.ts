@@ -122,20 +122,55 @@ export interface QwCreditRecord {
   account: QwAccountInfo | null
 }
 
-/** 千问账号（当前为单账号，结构留多账号扩展） */
+/**
+ * 千问办公账号。
+ *
+ * 2026-09-25 起是多账号池：凭证由本项目通过 device flow 自行换取，
+ * 存 data/qwenwork-accounts.json，可增删、可停用、可指定主账号。
+ */
 export interface QwAccount {
   id: string
   name: string
   username: string
   email: string
+  /** 脱敏手机号（如 157****1251）。完整号码是 PII，接口不外传 */
+  phone: string
   tier: string
   planName: string
+  /** 主账号（当前在用）。故障时会自动转移到下一个可用账号 */
   active: boolean
+  enabled: boolean
   usable: boolean
+  /** 账号存活天数（仪表盘账号健康快照用，从 createdAt 算） */
+  daysAlive: number | null
+  /** 三池积分合计（仪表盘账号健康快照用） */
+  points: number | null
   tokenExpiresAt: number | null
   refreshExpiresAt: number | null
   refreshExpired: boolean
+  machineId: string
+  lastError: string
+  /** refresh token 尾 6 位，供人工核对是哪个账号。全量不外传 */
+  refreshTail: string
   wallets: { daily: number; monthly: number; longterm: number; total: number } | null
+}
+
+/** device flow 登录：一次登录会话 */
+export interface QwLoginSession {
+  ok: boolean
+  url: string
+  nonce: string
+  machineId: string
+  hint: string
+}
+
+/** 轮询取票的返回 */
+export interface QwLoginPoll {
+  status: 'pending' | 'ok' | 'error'
+  /** pending 时是已等待毫秒数 */
+  waited?: number
+  account?: QwAccount
+  error?: string
 }
 
 export const qwenworkApi = {
@@ -159,7 +194,7 @@ export const qwenworkApi = {
       rows: QwCreditRecord[]
       window: { free: number; paid: number; total: number; requests: number }
     }>(`/qwenwork/credits/records?limit=${limit}`),
-  // 账号列表（当前单账号，mode='single'）
+  // 账号列表（多账号池，mode='multi'）
   accounts: () => client.get<{
     mode: 'single' | 'multi'
     modeNote: string
@@ -167,4 +202,18 @@ export const qwenworkApi = {
     accounts: QwAccount[]
     error: string
   }>('/qwenwork/accounts'),
+  // ---- 以下为多账号后的写接口 ----
+  loginStart: () => client.post<QwLoginSession>('/qwenwork/login/start'),
+  loginPoll: (nonce: string) =>
+    client.post<QwLoginPoll>('/qwenwork/login/poll', { nonce }),
+  loginCancel: (nonce: string) =>
+    client.post<{ ok: boolean }>('/qwenwork/login/cancel', { nonce }),
+  removeAccount: (id: string | number) => client.delete(`/qwenwork/accounts/${id}`),
+  patchAccount: (id: string | number, fields: { enabled?: boolean; preferred?: boolean }) =>
+    client.patch<{ ok: boolean; account?: QwAccount }>(`/qwenwork/accounts/${id}`, fields),
+  /** 回填手机号（对加这个字段之前登录的账号补一次） */
+  refreshPhone: () =>
+    client.post<{ ok: boolean; results: Array<{ id: number; name: string; ok: boolean; phone?: string; error?: string }> }>(
+      '/qwenwork/accounts/refresh-phone',
+    ),
 }

@@ -161,6 +161,7 @@ import {
 import client from '@/api/client'
 import { channelStore, CHANNELS } from '@/stores/channel'
 import { qwenworkApi as qwenApi } from '@/api/qwenwork'
+import { traeworkApi } from '@/api/traework'
 import type { ChatLabModels } from '@/api/chatlab'
 
 interface ChatMessage {
@@ -202,6 +203,23 @@ const channelOptions = CHANNELS.map((c) => ({ label: c.label, value: c.id }))
 const qwModels = ref<Array<{ id: string; name: string; prefixed: string }>>([])
 const qwModelsLoading = ref(false)
 
+// TRAE 模型：同样从管理端拿。与千问分开存——两者前缀不同（qwen/ vs
+// traework/），混在一份里会让「切通道后下拉还留着上一个通道的模型名」，
+// 而那个名字在新通道下根本不存在。
+const twModels = ref<Array<{ id: string; name: string; prefixed: string }>>([])
+const twModelsLoading = ref(false)
+
+async function loadTwModels() {
+  if (twModelsLoading.value) return
+  twModelsLoading.value = true
+  try {
+    const { data } = await traeworkApi.models()
+    twModels.value = data.models || []
+  } catch { /* 拿不到就空列表，不阻断 */ } finally {
+    twModelsLoading.value = false
+  }
+}
+
 async function loadQwModels() {
   if (qwModelsLoading.value) return
   qwModelsLoading.value = true
@@ -214,12 +232,15 @@ async function loadQwModels() {
 }
 
 // 按通道切换模型列表。**必须清空已选模型**：搭子的模型名（如 glm-5）
-// 在千问通道下无效，留着会让「当前模型」显示一个根本不存在的名字。
+// 在直连通道下无效，留着会让「当前模型」显示一个根本不存在的名字。
 async function applyChannel(id: string) {
   model.value = ''
   if (id === 'qwenwork') {
     if (!qwModels.value.length) await loadQwModels()
     model.value = qwModels.value[0]?.prefixed || ''
+  } else if (id === 'traework') {
+    if (!twModels.value.length) await loadTwModels()
+    model.value = twModels.value[0]?.prefixed || ''
   } else {
     if (!models.value) await loadModels()
     model.value = models.value?.exposed?.[0]?.id || models.value?.aliases?.[0]?.id || ''
@@ -248,6 +269,12 @@ const modelOptions = computed(() => {
     }
     return out
   }
+  if (labChannel.value === 'traework') {
+    for (const m of twModels.value) {
+      out.push({ label: `${m.name} (${m.prefixed})`, value: m.prefixed })
+    }
+    return out
+  }
   for (const m of models.value?.exposed ?? []) {
     out.push({ label: `${m.id}（上游）`, value: m.id })
   }
@@ -266,8 +293,8 @@ async function loadModels() {
   try {
     const { data } = await client.get('/chatlab/models')
     models.value = data
-    // 只在搭子通道下补默认值——千问通道的模型名不带前缀会跑到搭子上
-    if (!model.value && labChannel.value !== 'qwenwork') {
+    // 只在搭子通道下补默认值——直连通道的模型名不带前缀会跑到搭子上
+    if (!model.value && labChannel.value !== 'qwenwork' && labChannel.value !== 'traework') {
       model.value = data.exposed?.[0]?.id || data.aliases?.[0]?.id || ''
     }
   } finally {
@@ -275,9 +302,11 @@ async function loadModels() {
   }
 }
 
-/** 刷新按钮：跟着当前通道走，别在千问通道下刷搭子的模型表 */
+/** 刷新按钮：跟着当前通道走，别在直连通道下刷搭子的模型表 */
 function refreshModels() {
-  return labChannel.value === 'qwenwork' ? loadQwModels() : loadModels()
+  if (labChannel.value === 'qwenwork') return loadQwModels()
+  if (labChannel.value === 'traework') return loadTwModels()
+  return loadModels()
 }
 
 async function loadSessionCost() {

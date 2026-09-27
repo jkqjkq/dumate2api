@@ -2,11 +2,15 @@
   <div class="page">
     <PageHeader
       title="登录态"
-      :sub="isQw ? '千问办公客户端登录态（只读）' : '客户端当前状态（只读）'"
+      :sub="isTw ? 'TRAE Work 登录态（凭证自持）'
+        : isQw ? '千问办公客户端登录态（只读）' : '客户端当前状态（只读）'"
     />
 
+    <!-- ============ TRAE Work：凭证自持，可自动续期（与千问的只读相反） ============ -->
+    <TraeworkLoginState v-if="isTw" />
+
     <!-- ============ 千问办公：单账号直连，登录态在官方客户端的 auth-v2.dat ============ -->
-    <template v-if="isQw">
+    <template v-else-if="isQw">
       <a-alert type="info" show-icon message="只读页面">
         <template #description>
           千问办公的登录态由官方客户端维护（Electron safeStorage 加密的 auth-v2.dat）。
@@ -340,7 +344,8 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import PageHeader from '@/components/PageHeader.vue'
 import client from '@/api/client'
-import { channelStore, isDirectChannel } from '@/stores/channel'
+import { channelStore, isTraework, isQwenwork } from '@/stores/channel'
+import TraeworkLoginState from '@/components/traework/TraeworkLoginState.vue'
 import { qwenworkApi } from '@/api/qwenwork'
 import type { QwLogin } from '@/api/qwenwork'
 import type { AccountData } from '@/api/account'
@@ -349,8 +354,11 @@ const data = ref<AccountData | null>(null)
 // 千问办公的登录态：来自官方客户端 auth-v2.dat，只读
 const qw = ref<QwLogin | null>(null)
 
-// 直连通道（千问办公 / TRAE Work）：账单模型与搭子不同，用统一判定
-const isQw = computed(() => isDirectChannel())
+// 三条通道三种形态：搭子（有后端进程）、千问（单账号只读）、TRAE（多账号自持）。
+// isDirectChannel 只分「搭子 vs 直连」，直连内部还要再分一次——千问与 TRAE
+// 的凭证来源与续期方式完全相反，共用一套模板会把「能不能自动续」说反。
+const isTw = computed(() => isTraework())
+const isQw = computed(() => isQwenwork())
 
 const accountColumns = [
   { title: '账号', key: 'name' },
@@ -388,6 +396,9 @@ const tokenStateColor = computed(() => {
 })
 
 async function load() {
+  // TRAE 的数据由子组件自己拉（它是自持凭证，字段与千问不同），
+  // 这里只负责千问与搭子两条
+  if (isTw.value) return
   if (isQw.value) {
     try {
       const { data: d } = await qwenworkApi.login()
