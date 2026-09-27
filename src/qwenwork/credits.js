@@ -1,6 +1,6 @@
 // src/qwenwork/credits.js - 千问办公积分：余额读取 + 按请求归因
 //
-// 积分不在 auth-v2.dat 里，要问站点：GET https://qwenwork.cn/user/wallets
+// 积分不在凭证里，要问站点：GET https://qwenwork.cn/user/wallets
 // （同一个 Bearer token 可用）。返回三个独立池子：
 //
 //   daily_credits     免费，每天 00:00 (+08:00) 重置
@@ -13,11 +13,13 @@
 // 一个必须诚实的地方：接口只返回**余额**，不返回「每日上限」。
 // 「今日已用 = 上限 − 余额」里的上限来自配置（默认 100），不是接口给的，
 // 界面上必须标注来源，否则额度政策一变就没人知道数字是错的。
+//
+// **三处状态都按账号隔离**（账号池化之后）：余额缓存、归因基准、串行队列。
+// 混在一起会算出「A 请求扣了 B 账号的钱」——多账号下这是最要紧的一条。
 const https = require('https');
 const fs = require('fs');
 const path = require('path');
 const constants = require('./constants');
-const credentials = require('./credentials');
 
 const SITE_ORIGIN = 'https://qwenwork.cn';
 const WALLETS_PATH = '/user/wallets';
@@ -36,6 +38,9 @@ const WALLETS_PATH = '/user/wallets';
 //   2. 若当天有过补充（充值/赠送），余额会回升，峰值反而偏大
 // 所以额外接受配置值作兜底：取「配置值」与「观测峰值」的较大者，
 // 并把来源标出来，让用户知道这个数是怎么来的。
+//
+// 峰值是**账号级**的：两个账号的每日额度互不相干，混在一个桶里会
+// 把 A 的峰值当成 B 的上限。文件按账号 id 分桶。
 // ---------------------------------------------------------------------------
 const PEAK_FILE = 'qwenwork-daypeak.json';
 
@@ -58,6 +63,14 @@ function dayKey() {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
+/**
+ * 读峰值文件。两种形状都接受：
+ *   {'2026-09-25': 81.13}              ← 单账号时期的旧格式
+ *   {'1': {'2026-09-25': 81.13}, ...}  ← 按账号分桶
+ *
+ * 旧格式归到账号 0（历史数据确实是单账号，归属明确）。这样升级后
+ * 老用户的「今日已用」不会凭空归零。
+ */
 function readPeak() {
   try { return JSON.parse(fs.readFileSync(peakPath(), 'utf8')); } catch (e) { return {}; }
 }
@@ -71,20 +84,35 @@ function writePeak(o) {
   } catch (e) { /* 峰值写不进不影响主流程 */ }
 }
 
+/** 取某账号的 {day: peak} 桶。旧格式里非对象的值视作账号 0 的桶 */
+function peakBucketOf(root, accountKey) {
+  const cur = root[accountKey];
+  if (cur && typeof cur === 'object') return cur;
+  return null;
+}
+
 /**
  * 记录本次观测，返回今日消耗的真实口径。
+ * @param {number} balance 该账号当前每日额度余额
+ * @param {string} accountKey 账号 id（字符串）
  * @returns {{limit:number, limitSource:string, freeUsed:number, peak:number, calibrated:boolean}}
  */
-function dailyUsageFromBalance(balance) {
+function dailyUsageFromBalance(balance, accountKey) {
   const k = dayKey();
+  const accKey = String(accountKey == null ? 0 : accountKey);
   const st = readPeak();
-  const prev = st[k] || 0;
+  let bucket = peakBucketOf(st, accKey);
+  if (!bucket) {
+    bucket = {};
+    st[accKey] = bucket;
+  }
+  const prev = bucket[k] || 0;
   const peak = Math.max(prev, balance || 0);
   if (peak !== prev) {
-    st[k] = Number(peak.toFixed(4));
+    bucket[k] = Number(peak.toFixed(4));
     // 只保留最近 30 天，避免文件无限增长
-    const keys = Object.keys(st).sort();
-    while (keys.length > 30) delete st[keys.shift()];
+    const keys = Object.keys(bucket).sort();
+    while (keys.length > 30) delete bucket[keys.shift()];
     writePeak(st);
   }
   // 上限：配置值兜底 + 观测峰值，取较大者
@@ -101,8 +129,16 @@ function dailyUsageFromBalance(balance) {
   };
 }
 
+// 余额缓存按账号分开：A 的余额不能回答「B 还剩多少」
 const CACHE_MS = parseInt(process.env.DUMATE_QWENWORK_CREDIT_CACHE_MS || '30000', 10);
-let cache = { at: 0, data: null };
+const caches = new Map();
+
+/** 取 token。兼容 account 对象与裸 token 串 */
+function tokenOf(account) {
+  if (!account) return '';
+  if (typeof account === 'string') return account;
+  return account.accessToken || account.token || '';
+}
 
 function httpGet(path, token, timeout = 15000) {
   return new Promise((resolve) => {
@@ -134,11 +170,26 @@ function num(v) {
   return typeof v === 'number' && Number.isFinite(v) ? v : 0;
 }
 
-/** 读三池余额。默认走 30s 缓存——仪表盘刷新不该每次都打上游 */
-async function fetchWallets({ force = false } = {}) {
-  if (!force && cache.data && Date.now() - cache.at < CACHE_MS) return cache.data;
-  const doc = credentials.decryptAuth();
-  const r = await httpGet(WALLETS_PATH, doc.token);
+/**
+ * 读三池余额。默认走 30s 缓存——仪表盘刷新不该每次都打上游。
+ *
+ * @param {object} [opts]
+ * @param {object|string} [opts.account] 账号对象或裸 token。**必填**：余额是
+ *   账号级的，没有账号就不知道该查谁。
+ * @param {boolean} [opts.force] 跳过缓存
+ */
+async function fetchWallets(opts = {}) {
+  const token = tokenOf(opts.account);
+  if (!token) {
+    return { ok: false, error: '缺少账号 token，无法查询余额', daily: null, monthly: null, longterm: null };
+  }
+  // 无账号对象（裸 token）时按 token 尾段分桶，保证缓存仍然按身份隔离
+  const key = String((opts.account && opts.account.id) || token.slice(-8));
+  if (!opts.force) {
+    const hit = caches.get(key);
+    if (hit && Date.now() - hit.at < CACHE_MS) return hit.data;
+  }
+  const r = await httpGet(WALLETS_PATH, token);
   if (r.status !== 200 || !r.data) {
     return { ok: false, error: r.error || `HTTP ${r.status}`, daily: null, monthly: null, longterm: null };
   }
@@ -161,13 +212,13 @@ async function fetchWallets({ force = false } = {}) {
   out.paid = out.monthly + out.longterm;
   // 今日真实消耗：上限由「观测峰值 + 配置兜底」得出（见 dailyUsageFromBalance），
   // 余额是接口的真实值，两者相减即当天全部消耗——包含不经网关的对话。
-  const u = dailyUsageFromBalance(out.daily);
+  const u = dailyUsageFromBalance(out.daily, (opts.account && opts.account.id));
   out.limit = u.limit;
   out.limitSource = u.limitSource;
   out.freeUsed = u.freeUsed;
   out.peak = u.peak;
   out.calibrated = u.calibrated;
-  cache = { at: Date.now(), data: out };
+  caches.set(key, { at: Date.now(), data: out });
   return out;
 }
 
@@ -182,15 +233,25 @@ async function fetchWallets({ force = false } = {}) {
 //
 // 所以这里维护一个「上一次结算后的余额」作为基准，每次采集完更新它。
 // 与 points-cursor.js 同一思路（那里也是宁可排队也不缺档）。
+//
+// **基准与队列都按账号分开**（src/traework/credits.js 的 queues 同款）：
+// 共用一个基准会把 A 的余额当成 B 的起点，于是第一条跨账号的差值
+// 等于两个账号余额之差——一个完全编出来的数。
 // ---------------------------------------------------------------------------
-let queue = Promise.resolve();
-let baseline = null; // 上一次结算后的余额；null = 还没建立基准
+const queues = new Map();   // 账号 id → Promise（串行队列）
+const baselines = new Map(); // 账号 id → 上一次结算后的余额
+
+/** 账号在队列里的 key。没有 id 就退回 token 尾段，保证同一身份同一条队列 */
+function queueKeyOf(account) {
+  return String((account && account.id) || tokenOf(account).slice(-8) || 'unknown');
+}
 
 /**
  * 采集一次请求的积分消耗。**必须在请求完成之后调用**——请求本身要几秒
  * （实测 4s），若在发出前调用，等待 1.2s 就读余额会读到请求还没结算的状态。
  *
  * @param {object} opts
+ * @param {object} opts.account  本次实际使用的账号（**必填**：余额与基准都是账号级的）
  * @param {string} opts.model   模型名，写进归因记录
  * @param {number} opts.startedAt 请求开始时刻
  * @param {string} [opts.reqId] 请求埋点的 req_id。**两边靠它对齐**——
@@ -199,20 +260,23 @@ let baseline = null; // 上一次结算后的余额；null = 还没建立基准
  * @returns {Promise<{free:number, paid:number, pool:string}|null>}
  */
 function capture(opts = {}) {
+  const account = opts.account;
+  if (!account) return Promise.resolve(null);
+  const key = queueKeyOf(account);
   const run = async () => {
     // 首次没有基准，只建立它，不产出归因（否则会把历史消耗算到这次请求上）
-    if (!baseline) {
-      const w = await fetchWallets({ force: true });
+    if (!baselines.has(key)) {
+      const w = await fetchWallets({ account, force: true });
       if (!w.ok) return null;
-      baseline = { daily: w.daily, monthly: w.monthly, longterm: w.longterm };
+      baselines.set(key, { daily: w.daily, monthly: w.monthly, longterm: w.longterm });
       return null;
     }
-    const before = baseline;
+    const before = baselines.get(key);
     // 等结算。实测延迟 < 1s，留 1.5s 余量
     await new Promise((s) => setTimeout(s, 1500));
-    const after = await fetchWallets({ force: true });
+    const after = await fetchWallets({ account, force: true });
     if (!after.ok) return null;
-    baseline = { daily: after.daily, monthly: after.monthly, longterm: after.longterm };
+    baselines.set(key, { daily: after.daily, monthly: after.monthly, longterm: after.longterm });
 
     const free = Math.max(0, num(before.daily) - num(after.daily));
     const paid = Math.max(0, (num(before.monthly) + num(before.longterm))
@@ -231,11 +295,19 @@ function capture(opts = {}) {
       total: Number((free + paid).toFixed(6)),
       pool,
       balance: { daily: after.daily, monthly: after.monthly, longterm: after.longterm },
-      // 扣的是哪个千问账号。千问是单账号直连（不像搭子有账号池），
-      // 入口 token 来源唯一，记录一次足够；多账号场景以后再说。
-      // 由 caller 在调用 capture 前解好传入，避免在这里 require 凭证模块
-      // 撞上 DPAPI 初始化时序
-      account: opts.account || null,
+      // 扣的是哪个千问账号。多账号下「哪个账号花了多少」正是这条通道最要紧的
+      // 信息。
+      //
+      // **account 保持对象形状**：前端（web/src/api/reqlogs.ts 的 qw_account
+      // 与 ReqLogsView 的 .name / .tier）按 {id,name,tier,planId} 渲染，改成
+      // 字符串会让那些格子直接空白。所以只**新增** account_id，不换形状。
+      account_id: account.id != null ? account.id : null,
+      account: {
+        id: String(account.id != null ? account.id : ''),
+        name: account.nickname || account.username || '',
+        tier: account.tier || '',
+        planId: account.planId || '',
+      },
     };
     // 并发时「前后差值」分不清是谁消耗的——总和正确、单项归属不准。
     // 如实标记而不是假装精确，聚合时可按需排除。
@@ -243,16 +315,39 @@ function capture(opts = {}) {
     record(entry);
     return entry;
   };
-  const next = queue.then(run, run);
-  queue = next.catch(() => {});
+  const prev = queues.get(key) || Promise.resolve();
+  const next = prev.then(run, run);
+  queues.set(key, next.catch(() => {}));
   return next;
 }
 
-/** 主动建立基准（管理端刷新时用，避免第一次请求归因不出结果） */
-async function primeBaseline() {
-  const w = await fetchWallets({ force: true });
-  if (w.ok) baseline = { daily: w.daily, monthly: w.monthly, longterm: w.longterm };
-  return baseline;
+/**
+ * 主动建立基准（管理端刷新时用，避免第一次请求归因不出结果）。
+ * 按账号逐个建——池里有几个账号就要几个基准。
+ */
+async function primeBaseline(accounts) {
+  const list = Array.isArray(accounts) ? accounts : (accounts ? [accounts] : []);
+  const out = [];
+  for (const a of list) {
+    if (!a) continue;
+    const w = await fetchWallets({ account: a, force: true });
+    if (w.ok) {
+      baselines.set(queueKeyOf(a), { daily: w.daily, monthly: w.monthly, longterm: w.longterm });
+      out.push({ id: a.id, ok: true });
+    } else {
+      out.push({ id: a.id, ok: false, error: w.error });
+    }
+  }
+  return out;
+}
+
+/** 丢掉某账号的基准与队列（删除账号时调用，避免 Map 泄漏） */
+function forget(account) {
+  if (!account) return;
+  const key = queueKeyOf(account);
+  baselines.delete(key);
+  queues.delete(key);
+  caches.delete(String(account.id || ''));
 }
 
 /** 读归因历史（供管理端按天聚合）。rows 已带 req_id，可按请求精确关联 */
@@ -298,6 +393,6 @@ function record(entry) {
 }
 
 module.exports = {
-  fetchWallets, capture, primeBaseline, readHistory, indexByReqId, record,
+  fetchWallets, capture, primeBaseline, forget, readHistory, indexByReqId, record,
   dailyLimit, SITE_ORIGIN, WALLETS_PATH,
 };
