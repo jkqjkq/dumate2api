@@ -55,9 +55,20 @@
       <a-row :gutter="[16, 16]" class="mt-4">
         <a-col :span="17">
           <a-card title="请求量趋势" :bordered="false" class="h-full">
-            <template #extra><span class="text-xs text-slate-400">按天聚合</span></template>
+            <template #extra><span class="text-xs text-slate-400">按天聚合 · 与搭子仪表盘同口径</span></template>
             <a-empty v-if="!(usage?.daily || []).length" description="还没有 TRAE Work 请求记录" />
-            <div v-else ref="tokChartEl" class="dash-chart" />
+            <template v-else>
+              <!-- 与搭子一样拆成上下两张共享 X 轴的小图，而不是双 Y 轴：
+                   请求数与 Token 量纲不同，刻度对齐点没有依据。 -->
+              <div class="trend-block">
+                <div class="trend-label">请求数</div>
+                <div ref="twReqChartEl" class="trend-chart" />
+              </div>
+              <div class="trend-block">
+                <div class="trend-label">Token</div>
+                <div ref="twTokChartEl" class="trend-chart" />
+              </div>
+            </template>
           </a-card>
         </a-col>
         <a-col :span="7">
@@ -140,6 +151,11 @@
           </a-col>
         </a-row>
         <div v-if="twDash?.note" class="text-xs text-slate-400 mt-3">{{ twDash.note }}</div>
+      </a-card>
+
+      <!-- 今日用量：三条通道同一套指标，抽成组件避免各写一份漂移 -->
+      <a-card title="今日用量" :bordered="false" class="mt-4">
+        <TodayUsageCard :today="usage?.cards.today" />
       </a-card>
 
       <!-- 今日积分明细：本地归因，按 req_id 与请求日志配对。
@@ -269,10 +285,18 @@
 
       <a-row :gutter="[16, 16]" class="mt-4">
         <a-col :span="17">
-          <a-card title="积分消耗趋势" :bordered="false" class="h-full">
-            <template #extra><span class="text-xs text-slate-400">按天聚合 · 免费与付费分开</span></template>
+          <a-card title="用量趋势" :bordered="false" class="h-full">
+            <template #extra><span class="text-xs text-slate-400">按天聚合 · 积分免费/付费分开</span></template>
             <a-empty v-if="!qwDaily.length" description="还没有归因记录" />
-            <div v-else ref="qwChartEl" class="qw-chart" />
+            <template v-else>
+              <div ref="qwChartEl" class="qw-chart" />
+              <!-- 再加一张 Token 图：积分是千问独有的口径（三池），
+                   Token 才是与搭子/TRAE 可比的用量指标。 -->
+              <div class="trend-block mt-2">
+                <div class="trend-label">Token</div>
+                <div ref="qwTokChartEl" class="trend-chart" />
+              </div>
+            </template>
           </a-card>
         </a-col>
         <a-col :span="7">
@@ -371,6 +395,11 @@
             </div>
           </a-col>
         </a-row>
+      </a-card>
+
+      <!-- 今日用量：三条通道同一套指标，抽成组件避免各写一份漂移 -->
+      <a-card title="今日用量" :bordered="false" class="mt-4">
+        <TodayUsageCard :today="usage?.cards.today" />
       </a-card>
 
       <!-- 今日积分明细：与 TRAE 侧同一套结构（本地归因、按 req_id 配对），
@@ -619,26 +648,14 @@
     <a-row :gutter="[16, 16]" class="mt-4">
       <a-col :span="12">
         <a-card title="今日用量" :bordered="false">
-          <a-descriptions :column="2" size="small" bordered>
-            <a-descriptions-item label="请求数">
-              {{ stats ? stats.today.requests : '—' }}
-              <a-tag v-if="stats?.today.failed" color="red" class="ml-1">失败 {{ stats.today.failed }}</a-tag>
-            </a-descriptions-item>
-            <a-descriptions-item label="Token">
-              {{ stats ? fmt(stats.today.total_tokens) : '—' }}
-            </a-descriptions-item>
-            <a-descriptions-item label="输入">{{ stats ? fmt(stats.today.input_tokens) : '—' }}</a-descriptions-item>
-            <a-descriptions-item label="输出">{{ stats ? fmt(stats.today.output_tokens) : '—' }}</a-descriptions-item>
-            <a-descriptions-item label="平均耗时">
-              {{ stats ? stats.today.avg_ms + ' ms' : '—' }}
-            </a-descriptions-item>
-            <a-descriptions-item :label="`累计 ${stats?.days ?? 30} 天`">
-              {{ stats ? fmt(stats.total.total_tokens) + ' tokens' : '—' }}
-              <span class="text-xs text-slate-400 ml-1">
-                / {{ stats ? stats.total.requests : '—' }} 次
-              </span>
-            </a-descriptions-item>
-          </a-descriptions>
+          <!-- 与千问/TRAE 用同一个组件：同一组指标（含成功率、首字延迟、
+               流式占比）。此前这里用 stats/summary，缺那三项，切通道时
+               指标会变——对齐后三处一致。 -->
+          <TodayUsageCard :today="usage?.cards.today" />
+          <div v-if="stats" class="text-xs text-slate-400 mt-2">
+            累计 {{ stats.days }} 天：{{ fmt(stats.total.total_tokens) }} tokens
+            / {{ stats.total.requests }} 次
+          </div>
         </a-card>
       </a-col>
 
@@ -676,6 +693,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import PageHeader from '@/components/PageHeader.vue'
+import TodayUsageCard from '@/components/TodayUsageCard.vue'
 import { channelStore, isTraework, isQwenwork } from '@/stores/channel'
 import { qwenworkApi, type QwCredits, type QwDailyRow, type QwAccount, type QwCreditRecord } from '@/api/qwenwork'
 import { traeworkApi } from '@/api/traework'
@@ -1010,23 +1028,28 @@ async function refreshQw() {
   loading.value = true
   error.value = ''
   try {
-    const [c, d, a, rec] = await Promise.all([
+    const [c, d, a, rec, u] = await Promise.all([
       qwenworkApi.credits(),
       qwenworkApi.daily(14),
       // 账号健康快照用——不取的话下面那块只是空骨架
       qwenworkApi.accounts(),
       // 今日积分明细（逐笔归因）
       qwenworkApi.creditRecords(200).catch(() => ({ data: { rows: [], window: { free: 0, paid: 0, total: 0, requests: 0 } } })),
+      // 今日用量（请求数 / Token / 耗时）。与搭子仪表盘同一数据源，
+      // 这样切通道时看到的是同一套指标，不用重新适应。
+      client.get(`/usage/overview?days=14&channel=qwenwork`).catch(() => ({ data: null })),
     ])
     qw.value = c.data
     qwDaily.value = d.data.rows
     qwAccounts.value = (a.data && a.data.accounts) || []
     qwRecords.value = (rec.data && rec.data.rows) || []
     qwWindow.value = (rec.data && rec.data.window) || { free: 0, paid: 0, total: 0, requests: 0 }
+    usage.value = u.data
     await channelStore.load()
     lastRefresh.value = new Date().toLocaleTimeString('zh-CN')
     await nextTick()
     renderQwChart()
+    renderQwTokenChart()
   } catch (e: any) {
     error.value = e?.response?.data?.error || e?.message || '未知错误'
   } finally {
@@ -1056,34 +1079,12 @@ async function refreshTw() {
     await channelStore.load()
     lastRefresh.value = new Date().toLocaleTimeString('zh-CN')
     await nextTick()
-    renderTokChart()
+    renderTwChart()
   } catch (e: any) {
     error.value = e?.response?.data?.error || e?.message || '未知错误'
   } finally {
     loading.value = false
   }
-}
-
-// TRAE 的趋势图复用搭子 token 那张的容器：只画请求量一条线就够回答
-// 「这条通道用得多不多」，额度是存量（不是时间序列），不该画成折线。
-function renderTokChart() {
-  const rows = usage.value?.daily || []
-  if (!tokChartEl.value || !rows.length) return
-  if (!tokChart) tokChart = echarts.init(tokChartEl.value)
-  tokChart.setOption({
-    grid: { left: 56, right: 16, top: 12, bottom: 22 },
-    tooltip: {
-      ...TOOLTIP_BASE,
-      trigger: 'axis',
-      formatter: (params: any[]) => {
-        const r = rows[params[0].dataIndex]
-        return `${r.day}<br/>请求 <b>${exactNum(r.requests)}</b><br/>Token <b>${exactNum(r.total_tokens)}</b>`
-      },
-    },
-    xAxis: { type: 'category', data: rows.map((r) => r.day.slice(5)), ...axisStyle({ showGrid: false }) },
-    yAxis: { type: 'value', ...axisStyle({ formatter: (v: number) => compactNum(v) }) },
-    series: [lineSeries({ name: '请求数', data: rows.map((r) => r.requests), color: SERIES[0], area: true })],
-  })
 }
 
 async function refresh(force = false) {
@@ -1092,13 +1093,16 @@ async function refresh(force = false) {
   loading.value = true
   error.value = ''
   try {
-    const [s, p, a, st, dy, db] = await Promise.all([
+    const [s, p, a, st, dy, db, u] = await Promise.all([
       client.get('/system/status'),
       client.get('/points/points' + (force ? '?refresh=1' : '')),
       client.get('/points/accounts'),
       client.get('/stats/summary'),
       client.get('/stats/daily?days=14'),
       client.get('/web-accounts/dashboard'),
+      // 今日用量：与千问/TRAE 同一数据源，保证三个通道显示同一组指标
+      // （stats/summary 没有成功率与首字延迟，只有这里给全）
+      client.get('/usage/overview?days=14&channel=dumate').catch(() => ({ data: null })),
     ])
     status.value = s.data
     points.value = p.data
@@ -1106,6 +1110,7 @@ async function refresh(force = false) {
     stats.value = st.data
     daily.value = dy.data.rows
     dash.value = db.data
+    usage.value = u.data
     lastRefresh.value = new Date().toLocaleTimeString('zh-CN')
     // 等 DOM 更新后再渲染，否则 ref 还没挂上
     await nextTick()
@@ -1115,6 +1120,79 @@ async function refresh(force = false) {
   } finally {
     loading.value = false
   }
+}
+
+// TRAE 趋势：与搭子同口径（请求数 + Token 两张小倍数图）。
+// 原来只画请求数——Token 是判断「这个通道烧了多少」的主要指标，
+// 缺了它切到 TRAE 就看不到用量规模。
+const twReqChartEl = ref<HTMLElement | null>(null)
+const twTokChartEl = ref<HTMLElement | null>(null)
+let twReqChart: echarts.ECharts | null = null
+let twTokChart: echarts.ECharts | null = null
+
+function renderTwChart() {
+  const rows = usage.value?.daily || []
+  if (!rows.length) return
+  const days = rows.map((r) => r.day.slice(5))
+  const xAxis = {
+    type: 'category' as const,
+    data: days,
+    boundaryGap: false,
+    axisLine: { show: true, lineStyle: { color: INK.axis } },
+    axisTick: { show: false },
+  }
+  const yAxis = { type: 'value' as const, ...axisStyle({ formatter: (v: number) => compactNum(v) }) }
+  const tip = (fmtRow: (r: any) => string) => ({
+    ...TOOLTIP_BASE,
+    trigger: 'axis' as const,
+    formatter: (params: any[]) => fmtRow(rows[params[0].dataIndex]),
+  })
+
+  if (twReqChartEl.value) {
+    if (!twReqChart) twReqChart = echarts.init(twReqChartEl.value)
+    twReqChart.setOption({
+      grid: { left: 56, right: 16, top: 8, bottom: 4 },
+      tooltip: tip((r) => `${r.day}<br/>请求 <b>${exactNum(r.requests)}</b>${r.failed ? `<br/>失败 ${exactNum(r.failed)}` : ''}`),
+      xAxis: { ...xAxis, axisLabel: { show: false } },
+      yAxis,
+      series: [lineSeries({ name: '请求数', data: rows.map((r) => r.requests), color: SERIES[0], area: true })],
+    })
+  }
+  if (twTokChartEl.value) {
+    if (!twTokChart) twTokChart = echarts.init(twTokChartEl.value)
+    twTokChart.setOption({
+      grid: { left: 56, right: 16, top: 8, bottom: 22 },
+      tooltip: tip((r) => `${r.day}<br/>Token <b>${exactNum(r.total_tokens)}</b>`),
+      xAxis: { ...xAxis, axisLabel: { color: INK.muted, fontSize: 11 } },
+      yAxis,
+      series: [lineSeries({ name: 'Token', data: rows.map((r) => r.total_tokens), color: SERIES[1], area: true })],
+    })
+  }
+}
+
+// 千问趋势：与搭子同口径加一张 Token 图。积分图保留——它是这个通道
+// 独有的（免费/付费分池），但 Token 是跨通道可比的用量指标。
+const qwTokChartEl = ref<HTMLElement | null>(null)
+let qwTokChart: echarts.ECharts | null = null
+
+function renderQwTokenChart() {
+  const rows = usage.value?.daily || []
+  if (!qwTokChartEl.value || !rows.length) return
+  if (!qwTokChart) qwTokChart = echarts.init(qwTokChartEl.value)
+  qwTokChart.setOption({
+    grid: { left: 56, right: 16, top: 12, bottom: 22 },
+    tooltip: {
+      ...TOOLTIP_BASE,
+      trigger: 'axis',
+      formatter: (params: any[]) => {
+        const r = rows[params[0].dataIndex]
+        return `${r.day}<br/>Token <b>${exactNum(r.total_tokens)}</b><br/>请求 ${exactNum(r.requests)} 次`
+      },
+    },
+    xAxis: { type: 'category', data: rows.map((r) => r.day.slice(5)), ...axisStyle({ showGrid: false }) },
+    yAxis: { type: 'value', ...axisStyle({ formatter: (v: number) => compactNum(v) }) },
+    series: [lineSeries({ name: 'Token', data: rows.map((r) => r.total_tokens), color: SERIES[1], area: true })],
+  })
 }
 
 // 千问积分趋势：免费与付费堆叠。分开画是因为「消耗的是免费额度还是
@@ -1153,6 +1231,11 @@ function onResize() {
   reqChart?.resize()
   tokChart?.resize()
   qwChart?.resize()
+  // 直连通道新加的两张图（TRAE 请求/Token、千问 Token）也要跟着 resize，
+  // 否则窗口变化后它们停在旧尺寸上
+  twReqChart?.resize()
+  twTokChart?.resize()
+  qwTokChart?.resize()
 }
 
 onMounted(() => {
@@ -1169,9 +1252,15 @@ onBeforeUnmount(() => {
   reqChart?.dispose()
   tokChart?.dispose()
   qwChart?.dispose()
+  twReqChart?.dispose()
+  twTokChart?.dispose()
+  qwTokChart?.dispose()
   reqChart = null
   tokChart = null
   qwChart = null
+  twReqChart = null
+  twTokChart = null
+  qwTokChart = null
 })
 </script>
 
