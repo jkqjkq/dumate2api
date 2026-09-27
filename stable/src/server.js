@@ -4,15 +4,17 @@ const { discoverPort, verifyPort } = require('./discovery');
 const { mapModel, anthropicToOpenAI, openAIToAnthropic, mapFinishReason } = require('./anthropic');
 const { googleToOpenAI, openAIToGoogle, translateStreamToGoogle } = require('./google');
 const { responsesToOpenAI, openAIToResponse, translateStreamToResponses } = require('./responses');
-const { resolveMaxTokens, resolveQwenMaxTokens } = require('./budget');
+const { resolveMaxTokens, resolveQwenMaxTokens, resolveTraeworkMaxTokens } = require('./budget');
 
 // 按通道选用预算策略。收敛在这里而不是在四个调用点各写一遍 if——
 // 分开写必然漂移（曾经就漏了千问，导致小预算直接截断正文）。
-// 千问的下限远低于搭子（4096 vs 32768），因为它的 reasoning 峰值只有百级。
+// 千问与 TRAE 的下限都远低于搭子（16384 vs 32768），因为它们的
+// reasoning 峰值比搭子小一个量级。
 function resolveBudget(target, requested) {
-  return target && target.budgetKind === 'qwenwork'
-    ? resolveQwenMaxTokens(requested)
-    : resolveMaxTokens(requested);
+  const kind = target && target.budgetKind;
+  if (kind === 'qwenwork') return resolveQwenMaxTokens(requested);
+  if (kind === 'traework') return resolveTraeworkMaxTokens(requested);
+  return resolveMaxTokens(requested);
 }
 const reqlog = require('./reqlog');
 const pointsCursor = require('./points-cursor');
@@ -67,7 +69,10 @@ async function ensureUpstream() {
  */
 async function handleDirectChannel(req, res, payload, route, ctx) {
   const { startedAt, info, kind } = ctx;
-  const provider = require('./qwenwork');
+  // 按通道选 provider：两者都是 direct，但一个走 wasm 封装、一个走自持凭证
+  const provider = route.channel === 'traework'
+    ? require('./traework')
+    : require('./qwenwork');
   const wantStream = !!payload.stream;
 
   // 请求 id 在这里就定下来：埋点与积分归因两边都要用同一个值才能配对。
@@ -75,9 +80,15 @@ async function handleDirectChannel(req, res, payload, route, ctx) {
   if (!req._reqId) req._reqId = reqlog.newReqId();
   const reqId = req._reqId;
 
+  // provider 在发请求前回调「这次实际用了哪个账号」，由它写进埋点。
+  // 多账号轮询下（TRAE）只有 provider 知道选中的是哪一个——
+  // 在埋点处猜一个必然会在轮询时记错。
+  const onAccount = (name) => { if (name) req._upstreamAccount = String(name); };
+
   try {
     if (!wantStream) {
-      const result = await provider.send(payload, undefined, { reqId });
+      // traework 的 send 第二参是 onChunk；不传即为非流式聚合
+      const result = await provider.send(payload, undefined, { reqId, onAccount });
       const out = kind === 'openai' ? result : result;
       if (kind === 'anthropic') {
         const anth = openAIToAnthropic(out, payload.model);
@@ -87,6 +98,13 @@ async function handleDirectChannel(req, res, payload, route, ctx) {
       if (kind === 'google') {
         logRequest(req, res, startedAt, info, 200, out.usage || null);
         return sendJSON(res, 200, openAIToGoogle(out, payload.model));
+      }
+      // responses 路径：provider 返回的是 OpenAI chat 形状，
+      // 必须再翻成 Responses 对象，否则 Codex 拿到 chat.completion 会解析失败。
+      // （漏了这条分支时表现为「返回体字段全不认识」）
+      if (kind === 'responses') {
+        logRequest(req, res, startedAt, info, 200, out.usage || null);
+        return sendJSON(res, 200, openAIToResponse(out, payload.model));
       }
       const usage = out.usage || {};
       logRequest(req, res, startedAt, info, 200, {
@@ -115,10 +133,10 @@ async function handleDirectChannel(req, res, payload, route, ctx) {
     const TAIL = 32768;
     let logged = false;
 
-    const done = (usage, status) => {
+    const done = (usage, status, extra) => {
       if (logged) return;
       logged = true;
-      logRequest(req, res, startedAt, info, status || 200, usage || null);
+      logRequest(req, res, startedAt, info, status || 200, usage || null, extra);
     };
 
     // OpenAI 路径专用的延迟响应头。翻译器分支各自会 writeHead，只有
@@ -173,7 +191,15 @@ async function handleDirectChannel(req, res, payload, route, ctx) {
           seen += `data: ${inner}\n`;
           if (seen.length > TAIL) seen = seen.slice(-TAIL);
           shim.write(`data: ${inner}\n\n`);
-        }, { reqId });
+        }, { reqId, onAccount });
+        // traework 的 provider 回调不发 [DONE]（事件流用 event:done 收尾，
+        // 已在 readStream 里吃掉），所以这里补一个再关流。
+        // **顺序关键**：先补 [DONE]、再 end——直接 end 会让翻译器在
+        // 没有收到任何帧的情况下看到流结束，报 upstream stream error。
+        if (route.channel === 'traework') {
+          writeSSEHead && writeSSEHead();
+          shim.write('data: [DONE]\n\n');
+        }
         shim.end();
         // OpenAI 路径的收尾埋点。翻译器分支各自在 done 里记，
         // 只有这里没有——不补上，千问的流式请求就不进请求日志。
@@ -342,13 +368,25 @@ function logRequest(req, res, startedAt, info, status, usage, extra) {
     // 名称另存一份，便于日志直接可读。
     key_id: (req._apiKey && req._apiKey.id) || 0,
     key: (req._apiKey && req._apiKey.name) || '',
+    // 这条请求实际用了哪个上游账号。**权威来源是 provider 上报的**
+    // （req._upstreamAccount，多账号轮询下「实际用的那个」只有它知道）；
+    // provider 没报时按通道读当前凭证兜底。都没有就留空——
+    // 界面显示「—」，而不是编一个名字。
+    account: req._upstreamAccount || require('./upstream-account').fallback(req._channel || 'dumate'),
     ...(extra || {}),
   });
 
   // 余额游标：请求结束后记一次余额，与上一次的差值就是这条请求的实际扣费。
   // 上游账单归因不可靠（实测同一请求时间窗内有 1~3 条候选，无法唯一对应），
   // 所以改用实测余额差。不 await——采集在响应发出后进行，不占请求延迟。
-  if (status && status < 500 && (u.input || u.output || (extra && extra.account))) {
+  //
+  // **只对搭子通道记**：这条游标读的是搭子账号的余额（桌面 8980 或网页凭证），
+  // 直连通道（千问 / TRAE）的账在各自的池子里。早期无条件记录，导致
+  // 搭子余额的差值被贴到直连通道的日志行上——界面上表现为 TRAE 请求
+  // 显示 +1099.19 这种既不是它消耗、也无法解释的数字。
+  const ch = req._channel || 'dumate';
+  if (ch === 'dumate' && status && status < 500
+      && (u.input || u.output || (extra && extra.account))) {
     pointsCursor.capture(ts, (extra && extra.account) || '');
   }
 }
@@ -385,6 +423,19 @@ async function handleOpenAIModels(req, res) {
       const models = await qw.listModels();
       for (const m of router.exposedFor('qwenwork', models)) {
         data.push({ id: m, object: 'model', created, owned_by: 'qwenwork' });
+      }
+    } catch (e) { /* 通道不可用，不列 */ }
+  }
+
+  // TRAE Work 同理：模型名带 traework/ 前缀。凭证是我们自持的，
+  // 没有账号时 listModels 仍返回静态表，但通道不可用就不列。
+  if ((process.env.DUMATE_TRAEWORK_AUTOSTART || 'auto') !== 'off') {
+    try {
+      const tw = require('./traework');
+      if (tw.status().ready) {
+        for (const m of router.exposedFor('traework', tw.listModels())) {
+          data.push({ id: m, object: 'model', created, owned_by: 'traework' });
+        }
       }
     } catch (e) { /* 通道不可用，不列 */ }
   }
@@ -580,6 +631,10 @@ async function handleGoogleGenerateContent(req, res, isStream, pathModel) {
   const info = reqlog.describeRequest(googleReq, pathModel);
   req._logPath = '/v1beta:generateContent';
 
+  // 把 URL 上的模型名落回 body 再转换：通道分流读的是 openaiReq.model，
+  // 不落这一步它会一直是 undefined，`qwen/` / `traework/` 前缀随之丢失、
+  // 静默判成搭子。转换层刻意不再自己 mapModel，映射交给下面的 needsModelMap。
+  googleReq.model = pathModel;
   const openaiReq = googleToOpenAI(googleReq);
   req._mappedModel = openaiReq.model;
 
@@ -724,8 +779,8 @@ async function handleOpenAIResponses(req, res) {
     }
 
     if (isStream) {
-      translateStreamToResponses(upstreamRes, res, reqBody.model, (usage, status) => {
-        logRequest(req, res, startedAt, info, status, usage);
+      translateStreamToResponses(upstreamRes, res, reqBody.model, (usage, status, extra) => {
+        logRequest(req, res, startedAt, info, status, usage, extra);
       });
     } else {
       collectAndFinish(upstreamRes, (data) => {
@@ -1023,7 +1078,22 @@ const server = http.createServer(async (req, res) => {
             direct: true,
             ready: !!(qwenworkUp && router.availability('qwenwork').ok),
             wasm: qwenworkUp || null,
+            // 与 traework 对称：凭证自持后，可用性取决于池里有几个能用的账号
+            accounts: (() => {
+              try { return require('./qwenwork').status().accounts || 0; }
+              catch (e) { return 0; }
+            })(),
           },
+          // TRAE Work：凭证自持（OAuth 换取），没有 wasm 依赖。
+          // ready 取决于「有没有可用账号」——与千问的 wasm+登录态判定不同。
+          traework: (() => {
+            try {
+              const st = require('./traework').status();
+              return { direct: true, ready: st.ready, accounts: st.accounts, error: st.error || '' };
+            } catch (e) {
+              return { direct: true, ready: false, accounts: 0, error: e.message };
+            }
+          })(),
         },
         service: 'dumate2api',
       });
@@ -1173,13 +1243,36 @@ async function start() {
       const qw = qwmod.warmup();
       const st = qwmod.status();
       qwenworkUp = st.loggedIn ? 'ready' : null;
-      log(`✓ QwenWork 通道就绪（wasm ${qw.version}，登录态 ${st.loggedIn ? '已就绪' : '缺失'}）`);
+      // 凭证自持后「有没有账号」是这里唯一的可变因素——wasm 找不到是安装问题，
+      // 没账号是配置问题，日志要能一眼分清是哪一种
+      log(st.loggedIn
+        ? `✓ QwenWork 通道就绪（wasm ${qw.version}，账号 ${st.accounts} 个）`
+        : '· QwenWork 通道未就绪：尚未添加账号（到管理端用浏览器登录一次即可，不需要开千问客户端）');
     } catch (e) {
       log('⚠ QwenWork 通道不可用（搭子链路不受影响）:', e.message);
       qwenworkUp = null;
     }
   } else {
     log('· QwenWork 通道已关闭（DUMATE_QWENWORK_AUTOSTART=off）');
+  }
+
+  // TRAE Work 通道：同样进程内直连，凭证自持（不依赖 TRAE 客户端）。
+  // 这里预热**模型表**：/v1/models 与 upstream-router 都是同步取列表，
+  // 不预热就只能拿到静态兜底里的那一个模型。失败不阻断启动。
+  try {
+    const twmod = require('./traework');
+    const st = twmod.status();
+    if (st.ready) {
+      twmod.warmupModels().then((m) => {
+        if (m && m.ok) log(`✓ TRAE Work 模型表就绪（${m.models.length} 个模型）`);
+        else log(`⚠ TRAE Work 模型表拉取失败（回落静态表）: ${(m && m.error) || 'unknown'}`);
+      });
+      log(`✓ TRAE Work 通道就绪（账号 ${st.accounts} 个）`);
+    } else {
+      log(`· TRAE Work 通道未就绪：${st.error}`);
+    }
+  } catch (e) {
+    log('⚠ TRAE Work 通道不可用（搭子链路不受影响）:', e.message);
   }
 
   server.listen(PROXY_PORT, PROXY_HOST, () => {

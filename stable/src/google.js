@@ -107,7 +107,11 @@ function googleToOpenAI(googleReq) {
   // 预算统一由 budget.js 判定：reasoning 与正文共用 max_tokens，客户端小值
   // 会让正文被 reasoning 吃光。
   const openaiReq = {
-    model: mapModel(googleReq.model),
+    // **不要在这里 mapModel**：同 anthropic.js——带前缀的模型名（`qwen/` /
+    // `traework/`）提前过搭子别名表会被兜底成 `model-text`，前缀丢失后
+    // upstream-router 判成搭子通道，静默打到错的模型上。
+    // 映射统一在 server.js 的 needsModelMap 分支里做。
+    model: googleReq.model || 'model-text',
     messages,
     max_tokens: resolveMaxTokens(cfg.maxOutputTokens || cfg.max_tokens),
     temperature: cfg.temperature,

@@ -55,7 +55,12 @@ function anthropicToOpenAI(anthropicReq) {
   const maxTokens = resolveMaxTokens(anthropicReq.max_tokens);
 
   const openaiReq = {
-    model: mapModel(anthropicReq.model),
+    // **不要在这里 mapModel**：模型名必须先经 upstream-router 按前缀分流
+    // （`qwen/` / `traework/`）。提前过搭子的别名表会把带前缀的名字兜底成
+    // `model-text`，斜杠随之消失，下游 resolve() 就只能判成搭子通道——
+    // 请求返回 200，但回答来自完全不同的模型，客户端无从察觉。
+    // 映射统一在 server.js 的 needsModelMap 分支里做，与 responses.js 同口径。
+    model: anthropicReq.model || 'model-text',
     messages: messages,
     max_tokens: maxTokens,
     temperature: anthropicReq.temperature,

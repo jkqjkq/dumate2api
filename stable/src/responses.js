@@ -248,7 +248,7 @@ function translateStreamToResponses(upstreamRes, res, model, onDone) {
 
   // 收尾时把最终 usage 交回调用方做埋点；两条收尾路径都要走一次
   let finished = false;
-  const finish = (status) => {
+  const finish = (status, extra) => {
     if (finished) return;
     finished = true;
     if (onDone) {
@@ -256,6 +256,7 @@ function translateStreamToResponses(upstreamRes, res, model, onDone) {
       onDone(
         { input: u.input_tokens || 0, output: u.output_tokens || 0, total: u.total_tokens || 0 },
         status,
+        extra,
       );
     }
   };
@@ -463,6 +464,43 @@ function translateStreamToResponses(upstreamRes, res, model, onDone) {
     const hitLength = finishReason === 'length';
     const emptyButTruncated = !fullText && !!finishReason && finishReason !== 'stop';
     const incomplete = hitLength || emptyButTruncated;
+
+    // 思维链失控：整轮预算全部烧在 reasoning 上、正文一个字都没产出。
+    // 实测（Codex 写小说，一次 3 章 + 完整项目上下文）：
+    //   output=32768 / reasoning=32768 / 正文 0，耗时 7.5 分钟
+    // 根因是模型在 reasoning 里做「全景回顾」（逐条罗列全部素材）时停不下来。
+    //
+    // 这种情形**必须报错而不是 incomplete**：Codex 收到 status=incomplete 会
+    // 当成正常收尾（日志里 `model_needs_follow_up=false`），前端什么都不提示，
+    // 用户只看到界面卡回「Ask Codex to do anything」——静默失败，最难排查。
+    // 发 response.failed 后客户端会明确报错，用户知道要重发，而不是干等。
+    const reasoningTokens = (usage && usage.completion_tokens_details
+      && usage.completion_tokens_details.reasoning_tokens) || 0;
+    const outputTokens = (usage && usage.completion_tokens) || 0;
+    const reasoningBurnedAll = !fullText
+      && reasoningTokens > 0
+      && (hitLength || reasoningTokens >= outputTokens);
+    if (reasoningBurnedAll) {
+      send('response.failed', {
+        type: 'response.failed',
+        sequence_number: seq++,
+        response: {
+          ...baseResponse('failed'),
+          output_text: '',
+          usage: usageFrom(usage),
+          error: {
+            code: 'reasoning_budget_exhausted',
+            message: '模型把整轮输出预算全部用在思考上，未产出正文。'
+              + '请缩小单次任务范围（例如「一次只写一章」）后重试。',
+          },
+        },
+      });
+      ended = true;
+      res.end();
+      finish(502, { error: 'reasoning_budget_exhausted' });
+      return;
+    }
+
     send('response.completed', {
       type: 'response.completed',
       sequence_number: seq++,

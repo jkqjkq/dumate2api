@@ -86,6 +86,10 @@ function list() {
     cookie: undefined,
     cookie_len: (a.cookie || '').length,
     cookie_summary: cookieSummary(a.cookie),
+    // 账号存活天数（从 created_at 算到今天）。仪表盘账号健康快照用——
+    // 与「会员剩余天数」是两回事，那个是额度有效期，这是账号用了多久。
+    // 没有 created_at（很早以前加的账号）就 null，界面显示 —
+    daysAlive: a.created_at ? Math.floor((Date.now() - a.created_at) / 86400000) : null,
   }));
 }
 

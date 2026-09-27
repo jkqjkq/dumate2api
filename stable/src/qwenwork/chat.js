@@ -14,19 +14,28 @@
 const https = require('https');
 const crypto = require('crypto');
 const constants = require('./constants');
-const credentials = require('./credentials');
 const bridge = require('./bridge');
 
 const TIMEOUT_MS = 600000;
 
-let authCache = null; // { at, doc } —— 解密要起 PowerShell，别每请求都做
-const AUTH_TTL_MS = 60000;
-
-function loadAuth(force = false) {
-  if (!force && authCache && Date.now() - authCache.at < AUTH_TTL_MS) return authCache.doc;
-  const doc = credentials.decryptAuth();
-  authCache = { at: Date.now(), doc };
-  return doc;
+/**
+ * 取一次请求要用的凭证，必要时先换票。
+ *
+ * 账号池化后凭证不再来自客户端文件，所以这里不再有「全局登录态」：
+ * 凭证在账号记录里（data/qwenwork-accounts.json），换票也是写回那份记录。
+ * 传进来的 account 必须是 authStore 里读出的对象（要有 id，才能写回）。
+ */
+async function ensureAccount(authStore, account) {
+  if (!authStore.needsRefresh(account)) return account;
+  const r = await authStore.exchange(account);
+  if (!r.ok) {
+    authStore.patch(account.id, { lastError: `换票失败: ${r.error}` });
+    const err = new Error(`千问办公 token 换票失败: ${r.error}`);
+    err.statusCode = 401;
+    throw err;
+  }
+  authStore.patch(account.id, r.patch);
+  return authStore.get(account.id) || { ...account, ...r.patch };
 }
 
 function resolveModelKey(name) {
@@ -347,81 +356,14 @@ function aggregate(payloads, model) {
   };
 }
 
-async function refreshToken(doc) {
-  const refresh = doc && doc.refreshToken;
-  if (!refresh) throw new Error('auth-v2.dat 缺少 refreshToken');
-  const res = await new Promise((resolve, reject) => {
-    const body = JSON.stringify({ refresh_token: refresh, target: 'c' });
-    const req = https.request({
-      hostname: new URL(constants.GATEWAY).hostname,
-      path: constants.REFRESH_PATH,
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Accept': 'application/json',
-        'User-Agent': constants.USER_AGENT,
-        'X-Request-Id': crypto.randomUUID(),
-        'Login-Version': constants.LOGIN_VERSION,
-        'Content-Length': Buffer.byteLength(body),
-      },
-      timeout: 30000,
-    }, (r) => {
-      let b = '';
-      r.on('data', (c) => { b += c; });
-      r.on('end', () => {
-        try { resolve({ status: r.statusCode, data: JSON.parse(b) }); }
-        catch (e) { resolve({ status: r.statusCode, data: null }); }
-      });
-    });
-    req.on('error', reject);
-    req.on('timeout', () => req.destroy(new Error('refresh timeout')));
-    req.write(body);
-    req.end();
-  });
-  const token = res.data && (res.data.device_token || res.data.token);
-  if (!token) {
-    // refresh token 失效是**必然会遇到**的情况：它有独立有效期（比 access
-    // token 短），过期后只能重新登录客户端。报「未返回 device_token」会让人
-    // 去查网络，其实该做的是打开千问办公重新登录。把上游的 errorCode 带上。
-    const code = (res.data && (res.data.errorCode || res.data.error)) || `HTTP ${res.status}`;
-    const detail = (res.data && res.data.errorMessage) || '';
-    const err = new Error(
-      `千问办公登录态已失效（${code}${detail ? ': ' + detail : ''}）。` +
-      '请打开千问办公客户端重新登录一次，让 auth-v2.dat 刷新。'
-    );
-    err.statusCode = 401;
-    throw err;
-  }
-  const next = {
-    ...doc,
-    token,
-    refreshToken: (res.data && res.data.refresh_token) || refresh,
-  };
-  if (res.data && res.data.expires_at) next.expiresAt = res.data.expires_at;
-  // 写回原文件：refresh token 是轮换的，客户端和我们在同一份文件上各刷一次
-  // 会互踩（一边刷新会让另一边的 refresh token 失效）。
-  try { credentials.encryptAuth(next); } catch (e) { /* 写回失败不阻断本次请求 */ }
-  authCache = { at: Date.now(), doc: next };
-  return next;
-}
-
-/** 取可用登录态，过期则刷新 */
-async function ensureAuth() {
-  let doc = loadAuth();
-  if (credentials.isExpired(doc)) doc = await refreshToken(doc);
-  return doc;
-}
-
 module.exports = {
   buildBody,
   resolveModelKey,
+  ensureAccount,
   unwrap,
   envelopeStatus,
   payloadError,
   post,
   postStream,
   aggregate,
-  ensureAuth,
-  refreshToken,
-  loadAuth,
 };

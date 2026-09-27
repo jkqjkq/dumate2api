@@ -1,26 +1,43 @@
+快照指纹 sha256（stable/src 下 34 个 .js，按路径+内容计算）：
+f7e7a810afc43e4cef4586c1f7ef1a2f2de2586ed98da1c8dcae34ae839368b6
+
+来源：dev 分支工作区（**含未提交改动**）
+  基线提交 8cc53142d9718c7268792ac38dee5c5c93b0f3ff
+  8cc5314 feat(admin): TRAE Work 管理端集成 + 定时签到
+  2026-09-25 00:53:40 +0800
+  同步时 dev 工作区有 36 个 src 文件未提交（含 TRAE 通道、多账号池、
+  前缀路由修复等）。本快照取的是**工作区当前内容**，不是纯提交内容。
+
+本次同步覆盖的改动：
+  - 新增 TRAE Work 通道（src/traework/ 9 个文件）——第三条直连通道，
+    自持凭证多账号、签到、设备指纹
+  - 新增 src/channels.js（通道 id 单一来源）、src/upstream-account.js、
+    src/model-info.js
+  - 新增 src/qwenwork/auth.js（device flow 自取凭证）
+  - 千问改为自持凭证多账号池（不再读客户端 auth-v2.dat）
+  - 前缀路由修复：anthropic.js / google.js / responses.js 不再提前 mapModel，
+    server.js 统一在 needsModelMap 分支映射（此前 qwen/ 前缀会被兜底成
+    model-text、静默落到搭子通道，返回 200 但答非所问）
+  - **输出预算下限 32768 → 65536**（budget.js）：32768 会被思维链吃光，
+    实测 output=32768/reasoning=32768/正文 0，整轮空转 7.5 分钟
+  - **思维链失控检测**（responses.js 收尾）：reasoning 吃满预算且正文为空时
+    发 `response.failed` + `reasoning_budget_exhausted`，不再发 incomplete
+    ——Codex 收到 incomplete 会当正常收尾、前端无提示，属静默失败
+  - 埋点 error 字段透传（server.js 的 onDone 增加 extra 参数）
+
+启动方式的重要说明：
+  9080 此前是**手工启动**的（未设 DUMATE_ADMIN_DATA），埋点落在
+  `stable/data/`，该目录只有 4 个日志文件、**没有任何凭证**
+  （无 qwenwork-accounts.json / traework-accounts.json / model-map.json）。
+  新版代码的千问与 TRAE 通道必须读这些凭证，所以发布时必须按
+  start-stable.bat 启动（DUMATE_ADMIN_DATA=<repo>/data）。
+  已实测：用 <repo>/data 启动后三条通道全部就绪。
+
+快照范围说明：stable/ 只含网关依赖闭包（src/*.js 17 个 + qwenwork/ 8 个 +
+traework/ 9 个 = 34 个），不含管理端（admin/）、网页端（web/）、
+任务调度与登录器——那些不是 9080 网关运行所必需，且更新频繁。
+
+上一版快照来源：
 ee648d0d9df88cd3b8a01299c6c321c30630f904
 ee648d0 fix(qwenwork): 修 Codex 工具调用全链路失效与流式崩溃
 Thu Sep 24 22:21:51     2026
-
-本次同步覆盖的改动（均在主目录已提交，快照与对应提交一致）：
-  - ee648d0 千问通道在 Codex 下工具调用全链路修复
-    · tools 未过滤 → Codex 的 namespace/web_search 触发整轮 400
-    · system 被摘出 messages → 系统提示词全部丢失
-    · SSE 事件顺序错误 → Codex 报 failed to parse function arguments
-    · responses 路径提前 mapModel → qwen/ 前缀失效、路由落到搭子
-    · 流式结束后仍写入 → ERR_STREAM_WRITE_AFTER_END 打挂网关进程
-    · SSE 跨 chunk 汉字截断 → 四个解析点改用 StringDecoder
-    · 千问预算兜底（resolveQwenMaxTokens，下限 16384）
-    · max_input_tokens 按实测修正为 1024000
-
-  补充：本版快照新含 qwenwork/credits.js。上一版同步时漏了它，
-  导致 9080 启动即报 `Cannot find module './credits'`、千问通道不可用。
-
-快照范围说明：stable/ 只含网关依赖闭包（src/*.js 14 个 + qwenwork/ 8 个），
-不含管理端（admin/）、网页端（web/）、账号池与任务调度模块——
-那些不是 9080 网关运行所必需，且更新频繁，放进快照只会让稳定版跟着开发节奏漂移。
-
-上一版快照来源：
-585d9b14e222685f362c858829a07b6407bc0153
-585d9b1 docs: 补充千问通道与任务执行的约定，去掉重复的硬约束段落
-Wed Sep 24 00:47:09     2026
