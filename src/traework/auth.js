@@ -67,6 +67,9 @@ function list() {
     // 界面要据此标注，否则用户会以为和千问一样是官方数据。
     phoneSource: a.phone ? (a.phoneSource || 'inferred-nickname') : '',
     enabled: a.enabled !== false,
+    // createdAt 供仪表盘的「账号存活天数」用（见 admin/routes/traework.js
+    // 的 /dashboard）。不外传这个字段的话那边只能恒给 null。
+    createdAt: a.createdAt || null,
     expiresAt: a.expiresAt || null,
     refreshExpiresAt: a.refreshExpiresAt || null,
     credits: a.credits == null ? null : a.credits,

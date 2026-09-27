@@ -88,6 +88,128 @@
           </a-card>
         </a-col>
       </a-row>
+
+      <!-- 账号健康快照（多账号）：每账号一张卡，仿搭子/千问仪表盘。
+           与千问的关键差异：TRAE 的 credits 会被消耗、由签到补充，
+           所以健康条按「剩余额度占上限的比例」，而不是存活天数。 -->
+      <a-card :bordered="false" class="mt-4">
+        <template #title>
+          <span>账号健康快照</span>
+          <a-tag v-if="twAccounts.length" color="green" class="ml-2">
+            在线 {{ twAccounts.filter(a => a.enabled && !a.refreshExpired).length }}
+          </a-tag>
+          <a-tag v-if="twDash?.summary.checkedInToday != null" color="blue" class="ml-1">
+            今日已签 {{ twDash.summary.checkedInToday }} / {{ twAccounts.length }}
+          </a-tag>
+        </template>
+        <a-empty v-if="!twAccounts.length" description="还没有添加 TRAE Work 账号，到「账号管理」加一个" />
+        <a-row v-else :gutter="[16, 16]">
+          <a-col v-for="a in twAccounts" :key="a.id" :span="8">
+            <div class="p-3 border border-slate-200 rounded">
+              <div class="flex items-center justify-between mb-2">
+                <span class="font-medium truncate">{{ a.name }}</span>
+                <a-tag :color="a.lastError ? 'red' : a.refreshExpired ? 'orange' : a.enabled ? 'green' : 'default'">
+                  {{ a.lastError ? '异常' : a.refreshExpired ? '待重登' : a.enabled ? '在线' : '停用' }}
+                </a-tag>
+              </div>
+              <div v-if="a.phone" class="text-xs text-slate-400 font-mono mb-2">
+                {{ a.phone }}
+                <span v-if="a.phoneSource === 'inferred-nickname'" class="text-slate-500 ml-1">（从昵称推断）</span>
+              </div>
+              <div class="h-1.5 bg-slate-100 rounded overflow-hidden mb-2">
+                <div
+                  class="h-full rounded transition-all"
+                  :class="healthColorTw(a)"
+                  :style="{ width: healthWidthTw(a) }"
+                />
+              </div>
+              <div class="flex items-center justify-between text-xs">
+                <span class="text-slate-500">
+                  <template v-if="twCreditCap && a.credits != null">
+                    剩余 {{ fmt(a.credits) }} / {{ fmt(twCreditCap) }}
+                  </template>
+                  <template v-else-if="a.daysAlive !== null">已用 {{ a.daysAlive }} 天</template>
+                  <template v-else>额度未知</template>
+                </span>
+                <span :class="a.checkedInToday ? 'text-green-500' : 'text-slate-500'">
+                  {{ a.checkedInToday ? '今日已签' : '今日未签' }}
+                </span>
+              </div>
+              <div v-if="a.lastError" class="text-xs text-red-500 mt-1">{{ a.lastError }}</div>
+            </div>
+          </a-col>
+        </a-row>
+        <div v-if="twDash?.note" class="text-xs text-slate-400 mt-3">{{ twDash.note }}</div>
+      </a-card>
+
+      <!-- 今日积分明细：本地归因，按 req_id 与请求日志配对。
+           成本取相邻 consumed 的差值——它是「这条请求花了多少」，
+           与上面「剩余额度」是两回事，不要相加。 -->
+      <a-card title="今日积分明细" :bordered="false" class="mt-4">
+        <template #extra>
+          <span class="text-xs text-slate-400">
+            最近 {{ twRecords.length }} 条 · 合计 {{ fmt(twWindow.cost) }}
+          </span>
+        </template>
+        <a-row :gutter="[16, 16]" class="mb-3">
+          <a-col :span="6">
+            <a-statistic title="今日消耗" :value="twToday?.cost ?? '—'" :precision="2" />
+            <div class="text-xs text-slate-500 mt-1">按相邻账号游标差值算出</div>
+          </a-col>
+          <a-col :span="6">
+            <a-statistic title="今日经网关请求" :value="twToday?.requests ?? '—'" />
+            <div class="text-xs text-slate-500 mt-1">
+              <a-tag v-if="twToday?.concurrent" color="orange" class="mr-1">并发 {{ twToday.concurrent }}</a-tag>
+              仅统计经本网关的请求
+            </div>
+          </a-col>
+          <a-col :span="12">
+            <div class="text-xs text-slate-400 leading-relaxed">
+              成本来自「同一账号相邻两次累计已消耗的差值」，不是上游账单——
+              TRAE 的额度接口只给累计值，没有逐笔流水。
+              每账号的第一条没有参照点，如实留空（显示 —）而不是补 0。
+              与相邻请求并发时差值可能含对方的消耗，标记为「并发」。
+            </div>
+          </a-col>
+        </a-row>
+        <a-empty v-if="!twRecords.length" description="还没有经网关的积分记录" />
+        <a-table
+          v-else
+          size="small"
+          :data-source="twRecords"
+          :columns="twRecordColumns"
+          row-key="req_id"
+          :pagination="{ pageSize: 10, size: 'small', showSizeChanger: false }"
+        >
+          <template #bodyCell="{ column, record }">
+            <template v-if="column.key === 'ts'">
+              <span class="text-xs">{{ new Date(record.ts).toLocaleString('zh-CN', { hour12: false }) }}</span>
+            </template>
+            <template v-else-if="column.key === 'account'">
+              <span class="text-xs">{{ record.account || '—' }}</span>
+            </template>
+            <template v-else-if="column.key === 'model'">
+              <span class="font-mono text-xs">{{ record.model || '—' }}</span>
+            </template>
+            <template v-else-if="column.key === 'cost'">
+              <span v-if="record.cost != null" class="font-medium">{{ fmt(record.cost) }}</span>
+              <span v-else class="text-slate-400">—</span>
+              <a-tooltip v-if="record.cost != null && !record.exact" title="与相邻请求并发，差值可能含其它请求的消耗">
+                <a-tag color="orange" class="ml-1">并发</a-tag>
+              </a-tooltip>
+            </template>
+            <template v-else-if="column.key === 'remain'">
+              <span class="text-xs text-slate-400">
+                <template v-if="record.remain != null">{{ fmt(record.remain) }}</template>
+                <template v-else>—</template>
+              </span>
+            </template>
+            <template v-else-if="column.key === 'ms'">
+              <span class="text-xs text-slate-400">{{ record.ms != null ? record.ms + ' ms' : '—' }}</span>
+            </template>
+          </template>
+        </a-table>
+      </a-card>
     </template>
 
     <!-- ============ 千问办公：积分卡片。它是另一套账——不消耗搭子积分、不进账号池，
@@ -233,6 +355,76 @@
             </div>
           </a-col>
         </a-row>
+      </a-card>
+
+      <!-- 今日积分明细：与 TRAE 侧同一套结构（本地归因、按 req_id 配对），
+           但千问是**三个池子**，所以「免费/付费」要分列——消耗的是免费
+           额度还是付费额度，是本通道最要紧的一件事。 -->
+      <a-card title="今日积分明细" :bordered="false" class="mt-4">
+        <template #extra>
+          <span class="text-xs text-slate-400">
+            最近 {{ qwRecords.length }} 条 · 合计 {{ fmtQw(qwWindow.total) }}
+          </span>
+        </template>
+        <a-row :gutter="[16, 16]" class="mb-3">
+          <a-col :span="6">
+            <a-statistic title="今日消耗（经网关）" :value="fmtQw(qw?.today.total ?? 0)" />
+            <div class="text-xs text-slate-500 mt-1">{{ qw?.today.requests ?? 0 }} 次请求</div>
+          </a-col>
+          <a-col :span="6">
+            <a-statistic title="免费 / 付费" :value="`${fmtQw(qw?.today.free ?? 0)} / ${fmtQw(qw?.today.paid ?? 0)}`" />
+            <div class="text-xs text-slate-500 mt-1">
+              <a-tag :color="(qw?.today.paid ?? 0) > 0 ? 'orange' : 'green'" class="mr-1">
+                {{ (qw?.today.paid ?? 0) > 0 ? '已动用付费额度' : '全部免费额度' }}
+              </a-tag>
+            </div>
+          </a-col>
+          <a-col :span="12">
+            <div class="text-xs text-slate-400 leading-relaxed">
+              仅统计经本网关的请求——在千问客户端 / 网页里直接对话的部分不计入。
+              「今日全部消耗」在上面的额度卡里（由上限减余额得出），
+              两套口径<b>不要相加</b>。
+            </div>
+          </a-col>
+        </a-row>
+        <a-empty v-if="!qwRecords.length" description="还没有经网关的积分记录" />
+        <a-table
+          v-else
+          size="small"
+          :data-source="qwRecords"
+          :columns="qwRecordColumns"
+          row-key="req_id"
+          :pagination="{ pageSize: 10, size: 'small', showSizeChanger: false }"
+        >
+          <template #bodyCell="{ column, record }">
+            <template v-if="column.key === 'ts'">
+              <span class="text-xs">{{ dateTimeText(record.ts) }}</span>
+            </template>
+            <template v-else-if="column.key === 'model'">
+              <span class="font-mono text-xs">{{ record.model }}</span>
+            </template>
+            <template v-else-if="column.key === 'pool'">
+              <a-tag :color="record.pool === 'daily' ? 'cyan' : (record.pool === 'paid' ? 'blue' : 'default')">
+                {{ record.pool === 'daily' ? '免费池' : record.pool === 'paid' ? '付费池' : '—' }}
+              </a-tag>
+            </template>
+            <template v-else-if="column.key === 'free'">
+              <span class="text-cyan-500">{{ fmtQw(record.free) }}</span>
+            </template>
+            <template v-else-if="column.key === 'paid'">
+              <span class="text-blue-500">{{ fmtQw(record.paid) }}</span>
+            </template>
+            <template v-else-if="column.key === 'total'">
+              <span class="font-medium">{{ fmtQw(record.total) }}</span>
+              <a-tooltip v-if="record.concurrent" title="与相邻请求并发，差值可能含其它请求的消耗">
+                <a-tag color="orange" class="ml-1">并发</a-tag>
+              </a-tooltip>
+            </template>
+            <template v-else-if="column.key === 'ms'">
+              <span class="text-xs text-slate-400">{{ record.ms != null ? record.ms + ' ms' : '—' }}</span>
+            </template>
+          </template>
+        </a-table>
       </a-card>
     </template>
 
@@ -469,9 +661,11 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import PageHeader from '@/components/PageHeader.vue'
 import { channelStore, isTraework, isQwenwork } from '@/stores/channel'
-import { qwenworkApi, type QwCredits, type QwDailyRow, type QwAccount } from '@/api/qwenwork'
+import { qwenworkApi, type QwCredits, type QwDailyRow, type QwAccount, type QwCreditRecord } from '@/api/qwenwork'
 import { traeworkApi } from '@/api/traework'
-import type { TraeworkCreditRow } from '@/api/traework'
+import type {
+  TraeworkCreditRow, TraeworkDashboard, TraeworkCreditRecord, TraeworkDashAccount,
+} from '@/api/traework'
 import client from '@/api/client'
 import type { SystemStatus } from '@/api/system'
 import type { PointsData, AccountsData } from '@/api/points'
@@ -529,6 +723,13 @@ const twInfo = computed(() => channelStore.infos['traework'] || null)
 // TRAE 的额度（按账号独立）与经网关的用量（/usage 按通道过滤）是两个数据源
 const twRows = ref<TraeworkCreditRow[]>([])
 const usage = ref<UsageOverview | null>(null)
+// 账号健康快照 + 今日积分明细。dashboard 走本地数据（不打上游），
+// records 是逐笔归因——两者都是仪表盘每次进入都要拉的数据
+const twDash = ref<TraeworkDashboard | null>(null)
+const twRecords = ref<TraeworkCreditRecord[]>([])
+const twWindow = ref<{ cost: number; requests: number; exact: number }>({ cost: 0, requests: 0, exact: 0 })
+const twAccounts = computed(() => twDash.value?.accounts || [])
+const twToday = computed(() => twDash.value?.today || null)
 const twTotals = computed(() => {
   let remain: number | null = null
   let limit: number | null = null
@@ -544,6 +745,11 @@ const qw = ref<QwCredits | null>(null)
 const qwDaily = ref<QwDailyRow[]>([])
 // 账号健康快照用——千问现在也是多账号池，每个账号一张卡
 const qwAccounts = ref<QwAccount[]>([])
+// 今日积分明细：逐笔归因，按 req_id 与请求日志配对
+const qwRecords = ref<QwCreditRecord[]>([])
+const qwWindow = ref<{ free: number; paid: number; total: number; requests: number }>(
+  { free: 0, paid: 0, total: 0, requests: 0 },
+)
 const qwInfo = computed(() => channelStore.infos['qwenwork'] || null)
 // 三个池子。后端平级返回 wallets，前端不再自己合并——「月度」与「长期」
 // 一个来自订阅套餐、一个来自充值赠送，合并成一张「付费额度」卡会丢信息。
@@ -562,7 +768,36 @@ const accountColumns = [
   { title: '网页凭证', key: 'web', width: '20%' },
 ]
 
+// TRAE 今日积分明细的列。cost 与 remain 分开两列——前者是「这条花了多少」，
+// 后者是「花完还剩多少」，混成一列会被读成同一个指标。
+const twRecordColumns = [
+  { title: '时间', key: 'ts', width: '20%' },
+  { title: '账号', key: 'account', width: '18%' },
+  { title: '模型', key: 'model', width: '16%' },
+  { title: '本次消耗', key: 'cost', width: '16%' },
+  { title: '剩余额度', key: 'remain', width: '14%' },
+  { title: '耗时', key: 'ms', width: '12%' },
+]
+
+// 千问今日积分明细的列。免费与付费分列——这个通道有三个池子，
+// 「消耗的是免费额度还是付费额度」比「花了多少」更要紧。
+const qwRecordColumns = [
+  { title: '时间', key: 'ts', width: '18%' },
+  { title: '模型', key: 'model', width: '16%' },
+  { title: '池', key: 'pool', width: '10%' },
+  { title: '免费', key: 'free', width: '14%' },
+  { title: '付费', key: 'paid', width: '14%' },
+  { title: '合计', key: 'total', width: '16%' },
+  { title: '耗时', key: 'ms', width: '12%' },
+]
+
 const fmt = (n: number) => n.toLocaleString('zh-CN', { maximumFractionDigits: 2 })
+// 千问的积分单位很小（单次请求 0.0025 级别），两位小数会把它们全显示成 0.00。
+// 所以这个通道单独用四位小数——与 PointsView 的口径一致。
+const fmtQw = (n: number | null | undefined) =>
+  n == null ? '—' : n.toLocaleString('zh-CN', { maximumFractionDigits: 4 })
+const dateTimeText = (ts: number) =>
+  new Date(ts).toLocaleString('zh-CN', { hour12: false })
 const compact = (n: number) =>
   n >= 1e9 ? (n / 1e9).toFixed(2) + 'B'
     : n >= 1e6 ? (n / 1e6).toFixed(2) + 'M'
@@ -611,6 +846,35 @@ function healthColorQw(a: QwAccount) {
   if (a.lastError) return 'bg-red-400'
   if (a.refreshExpired) return 'bg-orange-400'
   if (!a.enabled || !a.usable) return 'bg-slate-300'
+  return 'bg-green-500'
+}
+
+// TRAE 版：与千问同一套视觉规则（0 用灰、异常用红/橙、在线用绿），
+// 但长度按**剩余额度占上限的比例**——TRAE 的 credits 是会被消耗掉的
+// 余额（签到补充），「还剩多少」才是这个通道最要紧的寿命指标。
+// 上限取不到（接口不给）时退化为按存活天数，并在卡片上标注来源。
+/** 健康条的额度上限：取所有账号里最大的 limit，没有则 null（退化到天数） */
+const twCreditCap = computed(() => {
+  let cap: number | null = null
+  for (const r of twRows.value) if (r.limit != null && (cap === null || r.limit > cap)) cap = r.limit
+  return cap
+})
+function healthWidthTw(a: TraeworkDashAccount) {
+  const cap = twCreditCap.value
+  if (cap && a.credits != null) {
+    const pct = Math.max(0, Math.min(100, (a.credits / cap) * 100))
+    return pct + '%'
+  }
+  if (a.daysAlive === null) return '0%'
+  const pct = Math.max(0, Math.min(100, (a.daysAlive / 365) * 100))
+  return pct + '%'
+}
+function healthColorTw(a: TraeworkDashAccount) {
+  if (a.lastError) return 'bg-red-400'
+  if (a.refreshExpired) return 'bg-orange-400'
+  if (!a.enabled) return 'bg-slate-300'
+  const cap = twCreditCap.value
+  if (cap && a.credits != null && a.credits < cap * 0.1) return 'bg-orange-400'
   return 'bg-green-500'
 }
 
@@ -717,15 +981,19 @@ async function refreshQw() {
   loading.value = true
   error.value = ''
   try {
-    const [c, d, a] = await Promise.all([
+    const [c, d, a, rec] = await Promise.all([
       qwenworkApi.credits(),
       qwenworkApi.daily(14),
       // 账号健康快照用——不取的话下面那块只是空骨架
       qwenworkApi.accounts(),
+      // 今日积分明细（逐笔归因）
+      qwenworkApi.creditRecords(200).catch(() => ({ data: { rows: [], window: { free: 0, paid: 0, total: 0, requests: 0 } } })),
     ])
     qw.value = c.data
     qwDaily.value = d.data.rows
     qwAccounts.value = (a.data && a.data.accounts) || []
+    qwRecords.value = (rec.data && rec.data.rows) || []
+    qwWindow.value = (rec.data && rec.data.window) || { free: 0, paid: 0, total: 0, requests: 0 }
     await channelStore.load()
     lastRefresh.value = new Date().toLocaleTimeString('zh-CN')
     await nextTick()
@@ -744,12 +1012,18 @@ async function refreshTw() {
   loading.value = true
   error.value = ''
   try {
-    const [c, u] = await Promise.all([
+    const [c, u, d, r] = await Promise.all([
       traeworkApi.credits().catch(() => ({ data: { count: 0, rows: [] } })),
       client.get(`/usage/overview?days=14&channel=traework`).catch(() => ({ data: null })),
+      // 账号健康快照 + 今日消耗：本地数据，不打上游（见后端 /dashboard 注释）
+      traeworkApi.dashboard().catch(() => ({ data: null })),
+      traeworkApi.creditRecords(200).catch(() => ({ data: { rows: [], window: { cost: 0, requests: 0, exact: 0 } } })),
     ])
     twRows.value = c.data.rows || []
     usage.value = u.data
+    twDash.value = d.data
+    twRecords.value = (r.data && r.data.rows) || []
+    twWindow.value = (r.data && r.data.window) || { cost: 0, requests: 0, exact: 0 }
     await channelStore.load()
     lastRefresh.value = new Date().toLocaleTimeString('zh-CN')
     await nextTick()

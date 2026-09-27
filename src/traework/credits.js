@@ -96,18 +96,18 @@ function indexByReqId() {
 }
 
 /**
- * 给请求日志里 channel=traework 的行附上「真实消耗 + 是哪个账号」。
+ * 算出每条请求的成本：同一账号相邻两条 consumed 的差值。
  *
- * 差值是「同一账号上一条请求的累计已消耗」到「这一条」的增量，所以每个
- * 账号的第一条没有值（没有参照点），如实留空而不是补 0。
+ * 抽成共用函数是因为要服务的入口不止一个（请求日志附成本、按天聚合、
+ * 逐笔明细），三处各写一遍必然漂移——某处改了负值处理而另一处没改，
+ * 同一份数据在界面上会出现两个数。
  *
- * 并发判定与 points-cursor 同理：两条请求的执行区间有交集时，增量会把
- * 对方的消耗算进来，总和正确、单项不准，标记出来而不是假装精确。
+ * @returns {{rows: object[], delta: object, inexact: Set<string>}}
+ *   rows 是全量归因记录；delta 按 req_id 给出成本；inexact 是与相邻
+ *   请求并发、差值可能含对方消耗的那批 req_id。
  */
-function attachCosts(pageRows) {
+function computeCosts() {
   const rows = readHistory();
-  if (!rows.length) return pageRows;
-
   const byAcc = {};
   for (const r of rows) {
     const k = String(r.account_id);
@@ -136,6 +136,103 @@ function attachCosts(pageRows) {
       }
     }
   }
+  return { rows, delta, inexact };
+}
+
+/** 本地日期键 YYYY-MM-DD。按本地时区切天，与界面显示的日期一致 */
+function dayKey(ts) {
+  const d = new Date(ts);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+/**
+ * 按天聚合消耗（供仪表盘趋势图）。
+ *
+ * **成本取差值而不是 consumed**：consumed 是累计值，直接按天求和等于把
+ * 历史总量重复计入每一天。差值才是「这一天花了多少」。
+ * 每个账号的首条没有参照点，不计入任何一天——宁可少算也不编。
+ */
+function dailyUsage(days) {
+  const { rows, delta, inexact } = computeCosts();
+  const since = Date.now() - days * 86400000;
+  const byDay = new Map();
+  for (const r of rows) {
+    if (!r || r.ts < since) continue;
+    const key = dayKey(r.ts);
+    const cur = byDay.get(key) || { day: key, cost: 0, requests: 0, concurrent: 0 };
+    if (r.req_id in delta) cur.cost += delta[r.req_id];
+    cur.requests += 1;
+    if (inexact.has(r.req_id)) cur.concurrent += 1;
+    byDay.set(key, cur);
+  }
+  // 补齐没有请求的日期，否则折线图会把间隔压掉
+  const out = [];
+  for (let i = days - 1; i >= 0; i--) {
+    const key = dayKey(Date.now() - i * 86400000);
+    const cur = byDay.get(key) || { day: key, cost: 0, requests: 0, concurrent: 0 };
+    out.push({
+      day: key,
+      cost: Number(cur.cost.toFixed(4)),
+      requests: cur.requests,
+      concurrent: cur.concurrent,
+    });
+  }
+  return out;
+}
+
+/** 今日消耗（按本地日期），供仪表盘指标卡 */
+function todayUsage() {
+  const { rows, delta, inexact } = computeCosts();
+  const today = dayKey(Date.now());
+  let cost = 0; let n = 0; let concurrent = 0;
+  for (const r of rows) {
+    if (!r || dayKey(r.ts) !== today) continue;
+    if (r.req_id in delta) cost += delta[r.req_id];
+    n += 1;
+    if (inexact.has(r.req_id)) concurrent += 1;
+  }
+  return {
+    cost: Number(cost.toFixed(4)),
+    requests: n,
+    concurrent,
+  };
+}
+
+/** 逐笔明细（按时间倒序），供仪表盘表格 */
+function creditRecords(limit) {
+  const { rows, delta, inexact } = computeCosts();
+  return rows
+    .slice()
+    .sort((a, b) => (b.ts || 0) - (a.ts || 0))
+    .slice(0, limit)
+    .map((r) => ({
+      ts: r.ts,
+      req_id: r.req_id || '',
+      account: r.account || '',
+      account_id: r.account_id,
+      model: r.model || '',
+      ms: r.ms ?? null,
+      // 成本可能为 null（首条无参照点），如实留空而不是补 0
+      cost: r.req_id in delta ? delta[r.req_id] : null,
+      exact: !inexact.has(r.req_id),
+      consumed: r.consumed ?? null,
+      remain: r.remain ?? null,
+      limit: r.limit ?? null,
+    }));
+}
+
+/**
+ * 给请求日志里 channel=traework 的行附上「真实消耗 + 是哪个账号」。
+ *
+ * 差值是「同一账号上一条请求的累计已消耗」到「这一条」的增量，所以每个
+ * 账号的第一条没有值（没有参照点），如实留空而不是补 0。
+ *
+ * 并发判定与 points-cursor 同理：两条请求的执行区间有交集时，增量会把
+ * 对方的消耗算进来，总和正确、单项不准，标记出来而不是假装精确。
+ */
+function attachCosts(pageRows) {
+  const { rows, delta, inexact } = computeCosts();
+  if (!rows.length) return pageRows;
 
   const idx = indexByReqId();
   return pageRows.map((r) => {
@@ -158,4 +255,8 @@ function attachCosts(pageRows) {
   });
 }
 
-module.exports = { capture, readHistory, indexByReqId, attachCosts, FILE, filePath };
+module.exports = {
+  capture, readHistory, indexByReqId, attachCosts,
+  computeCosts, dailyUsage, todayUsage, creditRecords, dayKey,
+  FILE, filePath,
+};

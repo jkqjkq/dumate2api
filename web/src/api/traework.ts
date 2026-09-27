@@ -96,8 +96,82 @@ export interface TraeworkModel {
   usage: string
 }
 
+/** 仪表盘用：一个 TRAE Work 账号的健康快照（本地数据，不打上游） */
+export interface TraeworkDashAccount {
+  id: number
+  name: string
+  uid: string
+  phone: string
+  phoneSource: string
+  enabled: boolean
+  credits: number | null
+  /** 账号存活天数（从 createdAt 算到今天）。与搭子的「剩余天数」语义不同 */
+  daysAlive: number | null
+  expiresAt: number | null
+  refreshExpiresAt: number | null
+  refreshExpired: boolean
+  lastCheckin: number | null
+  checkedInToday: boolean
+  lastError: string
+  refreshTail: string
+}
+
+/** 仪表盘用：本地能算出的今日消耗（不打上游，所以没有剩余额度） */
+export interface TraeworkTodayUsage {
+  cost: number
+  requests: number
+  concurrent: number
+}
+
+export interface TraeworkDashboard {
+  accounts: TraeworkDashAccount[]
+  summary: {
+    total: number
+    enabled: number
+    checkedInToday: number
+    refreshExpired: number
+    errored: number
+    creditsTotal: number
+  }
+  today: TraeworkTodayUsage
+  note: string
+}
+
+/** 按天聚合的消耗。成本取相邻 consumed 的差值，不是累计值 */
+export interface TraeworkDailyRow {
+  day: string
+  cost: number
+  requests: number
+  concurrent: number
+}
+
+/** 逐笔消耗明细。cost 为 null 表示该条没有参照点（每账号首条） */
+export interface TraeworkCreditRecord {
+  ts: number
+  req_id: string
+  account: string
+  account_id: number
+  model: string
+  ms: number | null
+  cost: number | null
+  /** false = 与相邻请求并发，差值可能含对方的消耗 */
+  exact: boolean
+  consumed: number | null
+  remain: number | null
+  limit: number | null
+}
+
 export const traeworkApi = {
   status: () => client.get<TraeworkStatus>('/traework/status'),
+  dashboard: () => client.get<TraeworkDashboard>('/traework/dashboard'),
+  daily: (days = 14) =>
+    client.get<{ days: number; rows: TraeworkDailyRow[] }>(`/traework/credits/daily?days=${days}`),
+  creditRecords: (limit = 100) =>
+    client.get<{
+      limit: number
+      rows: TraeworkCreditRecord[]
+      window: { cost: number; requests: number; exact: number }
+    }>(`/traework/credits/records?limit=${limit}`),
   models: (opts: { visibleOnly?: boolean; refresh?: boolean } = {}) => {
     const q: string[] = []
     if (opts.visibleOnly) q.push('visible=1')

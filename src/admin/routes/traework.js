@@ -10,6 +10,7 @@ const authStore = require('../../traework/auth');
 const checkin = require('../../traework/checkin');
 const login = require('../../traework/login');
 const models = require('../../traework/models');
+const credits = require('../../traework/credits');
 const tw = require('../../traework');
 
 const routes = [
@@ -93,6 +94,100 @@ const routes = [
         });
       }
       return sendJSON(res, 200, { count: rows.length, rows });
+    },
+  },
+  {
+    /**
+     * 账号健康快照 + 今日用量（仪表盘用）。
+     *
+     * 与 /credits 的分工：/credits 打上游取实时额度（慢，每账号两次请求），
+     * 这里是**本地数据**——账号文件 + 归因历史，不打上游。仪表盘每进一次
+     * 都要拉，若每次都去上游问一遍，既慢又平白增加被风控的概率。
+     * 所以这里给的是「上次落盘的状态 + 本地归因」，界面标清数据来源。
+     */
+    method: 'GET',
+    path: '/dashboard',
+    handler: async ({ res }) => {
+      const all = authStore.list();
+      const now = Date.now();
+      const accounts = all.map((a) => {
+        // 存活天数：从 createdAt 算到今天。与搭子的「会员剩余天数」语义
+        // 不同——这里衡量的是「这个号用了多久」，不是「还能用多久」。
+        const daysAlive = a.createdAt
+          ? Math.floor((now - a.createdAt) / 86400000) : null;
+        return {
+          id: a.id,
+          name: a.nickname || a.uid || `账号 ${a.id}`,
+          uid: a.uid || '',
+          phone: a.phone || '',
+          phoneSource: a.phoneSource || '',
+          enabled: a.enabled !== false,
+          credits: a.credits == null ? null : a.credits,
+          daysAlive,
+          // 凭证到期（access token 到期能自动续，所以这不是故障信号）
+          expiresAt: a.expiresAt || null,
+          refreshExpiresAt: a.refreshExpiresAt || null,
+          refreshExpired: !!(a.refreshExpiresAt && now >= a.refreshExpiresAt),
+          lastCheckin: a.lastCheckin || null,
+          checkedInToday: a.lastCheckin
+            ? credits.dayKey(a.lastCheckin) === credits.dayKey(now) : false,
+          lastError: a.lastError || '',
+          refreshTail: a.refreshTail || '',
+        };
+      });
+      const today = credits.todayUsage();
+      return sendJSON(res, 200, {
+        accounts,
+        summary: {
+          total: accounts.length,
+          enabled: accounts.filter((a) => a.enabled).length,
+          checkedInToday: accounts.filter((a) => a.checkedInToday).length,
+          refreshExpired: accounts.filter((a) => a.refreshExpired).length,
+          errored: accounts.filter((a) => a.lastError).length,
+          creditsTotal: accounts.reduce((s, a) => (a.credits == null ? s : s + a.credits), 0),
+        },
+        today,
+        // 额度上限要打上游才知道，仪表盘不打。这里只报本地能算的消耗，
+        // 剩余额度由 /credits 那侧给——两个来源不要混在一张卡里。
+        note: '账号状态为本地落盘快照；剩余额度需查「额度」页（会打上游接口）。',
+      });
+    },
+  },
+  {
+    /**
+     * 按天聚合的消耗（仪表盘趋势图）。
+     *
+     * **成本取相邻 consumed 的差值**，不是 consumed 本身——后者是累计值，
+     * 直接按天求和等于把历史总量重复计入每一天。
+     */
+    method: 'GET',
+    path: '/credits/daily',
+    handler: async ({ req, res }) => {
+      const days = Math.min(90, Math.max(1,
+        parseInt((req.url.match(/[?&]days=(\d+)/) || [])[1] || '14', 10) || 14));
+      return sendJSON(res, 200, { days, rows: credits.dailyUsage(days) });
+    },
+  },
+  {
+    /** 逐笔消耗明细（按时间倒序），供仪表盘表格 */
+    method: 'GET',
+    path: '/credits/records',
+    handler: async ({ req, res }) => {
+      const limit = Math.min(1000, Math.max(1,
+        parseInt((req.url.match(/[?&]limit=(\d+)/) || [])[1] || '100', 10) || 100));
+      const rows = credits.creditRecords(limit);
+      // 汇总只统计本次返回的窗口，且只累加算得出的成本——首条无参照点
+      // （cost=null）不计入，界面要写清范围
+      const sum = rows.reduce((s, r) => s + (r.cost || 0), 0);
+      return sendJSON(res, 200, {
+        limit,
+        rows,
+        window: {
+          cost: Number(sum.toFixed(4)),
+          requests: rows.length,
+          exact: rows.filter((r) => r.exact).length,
+        },
+      });
     },
   },
   {
