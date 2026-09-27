@@ -22,13 +22,24 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 > 发布新版的唯一途径：主目录验证通过后覆盖 `stable/src/` + 更新 `SNAPSHOT_FROM.txt`，再重启 9080。
 > 原来另有一个 9081 管理端，与 9083 功能完全重复，已停用——不再需要它。
 
-**两个上游通道，靠模型名前缀分流**（`src/upstream-router.js`）：
+**三条上游通道，靠模型名前缀分流**（`src/upstream-router.js`）：
 
 | 调用方传的模型名 | 路由到 |
 |---|---|
 | `glm-5` / `gpt-4o` 等（无前缀） | DuMate 8980，**现有客户端零改动** |
 | `qwen/pro` / `qwen/flash` / `qwen/auto` | 千问办公（`src/qwenwork/` 直连 `gateway.qwenwork.cn`） |
+| `traework/glm-5.2` | TRAE Work（`src/traework/` 直连，凭证自持） |
 | 未知前缀（如 `qwn/pro`） | **400 报错，不静默回落** |
+
+**通道 id 的单一来源是 `src/channels.js`**（`dumate` / `qwenwork` / `traework`）。
+`keys.js`（网关鉴权）、`admin/routes/keys.js`（校验）、`usage.js` / `reqlogs.js`
+（筛选参数）四处都 require 同一份——加第四条通道只改这一个文件。
+
+**千问与 TRAE 都是直连通道，但彼此也不同**：千问是单账号只读（登录态在客户端
+`auth-v2.dat`）、三个积分池；TRAE 是多账号自持凭证、单一 credits + 签到体系。
+前端 `isDirectChannel()` 只分「搭子 vs 直连」，页面内部还要用 `isTraework()` /
+`isQwenwork()` 再分一次——共用一套模板会把「能不能加账号」「能不能自动续期」
+这类问题说反。
 
 **千问办公是进程内直连，不需要任何外部服务。** 早期版本经 Buddy2api（8787）中转，后来发现它的 `wasm_helper.mjs` 本身就是纯 Node ESM 脚本、Python 只是一层没必要的壳，改为直连后少一个进程、少一层鉴权、少一个故障点。`src/qwenwork/` 直接调官方 wasm 生成请求并发到云端网关。
 
@@ -52,6 +63,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 **历史记录（无 `channel` 字段的旧日志）归入搭子**：分通道埋点上线前只有搭子一条通道，单列「未标注」会让用户切到搭子时数字凭空变小。只有「查看全部通道」时才显示 `untagged` 一栏。服务端过滤在 `usage.js` / `reqlogs.js` 的 `channel` 参数里做——前端筛只能筛掉当前页的行，分页总数仍是全通道的。
 
 **千问通道失败不阻断启动**：搭子是主链路。wasm 找不到或登录态缺失时网关照常监听，`/health` 的 `channels.qwenwork.ready` 报 false。
+
+**TRAE Work 的额度要按 `usage_summary` 解析，不是额度包字段。**
+`ide_user_ent_usage` 返回的是 `{ usage_summary: { total_amount, consumed_amount } }`，
+剩余 = 总额 − 已消耗。早先按 `credits_remain` / `credits_limit` 求和恒得 0，
+界面显示「额度 0」被读成「用完了」，而真相是没解析到。
+`total_amount` 缺失时返回 `null` 而不是 0。
+
+**TRAE 的签到是 HTTP 200 + body 里的 code**：被限流时返回
+`{"code":9074,"message":"当前参与用户太多，请稍后再试"}`。只看状态码会把这次
+当成成功，界面显示「签到成功」而额度没变，用户无从察觉——必须读 `code`。
+
+**TRAE 的账与千问、搭子都不同，界面三套分开显示**：搭子靠上游账单 + 余额游标，
+千问是三个积分池，TRAE 是每个账号独立的一份 credits（签到领取）。
+三边数字**不能相加**。
 
 **每请求 spawn 一次 Node 子进程**（调 wasm_helper.mjs）。若实测成为延迟瓶颈，改成长驻子进程只需改 `src/qwenwork/bridge.js`——`wasm_helper.mjs` 已预留 `serve` 模式，上层 `chat.js` 不受影响。
 
@@ -163,7 +188,17 @@ Claude Code ── Anthropic ───────┼──→ 网关 :9080 ─�
 
 ## 必须知道的约定与陷阱
 
-**输出预算下限是硬需求，不是可选优化。** GLM 的思维链（`reasoning_content`）和正文**共用同一个 `max_tokens`**，且 reasoning 长度实测在 57~8492 tokens 之间浮动。Claude Code 默认传 150/1024 这类小值，不兜底就会拿到空正文或半句截断（客户端表现为「能快就停」）。`src/budget.js` 把预算钳到 `[DUMATE_MIN_MAX_TOKENS, DUMATE_MAX_MAX_TOKENS]`，默认下限 32768——取 32768 而非 4096，是因为 4096 仍在 reasoning 实测峰值内。
+**输出预算下限是硬需求，不是可选优化。** GLM 的思维链（`reasoning_content`）和正文**共用同一个 `max_tokens`**，且 reasoning 长度实测在 57~8492 tokens 之间浮动。Claude Code 默认传 150/1024 这类小值，不兜底就会拿到空正文或半句截断（客户端表现为「能快就停」）。`src/budget.js` 把预算钳到 `[DUMATE_MIN_MAX_TOKENS, DUMATE_MAX_MAX_TOKENS]`，默认下限 **65536**（原为 32768，2026-09-26 上调）。
+
+**下限取 65536 的依据是「思维链失控」实测**：Codex 写小说时（一次 3 章 + 完整项目上下文），模型会在 reasoning 里做「全景回顾」——逐条罗列全部素材，停不下来。该轮零工具调用、零正文输出，`output` 恰好撞满上限：
+- 预算 32768 → `output=32768 / reasoning=32768 / 正文 0`，耗时 7.5 分钟，整轮空转
+- 实测 reasoning 峰值约 28743（占 32768 的 88%）→ 65536 下降到 44%，留出余量
+
+上游搭子自身接受 `[1, 131072]`（传 200000 报 `max_tokens参数非法：限制数值范围[1,131072]`），**32768 从来不是上游限制，是本地默认值**。
+
+**「思维链失控」必须报错而不是 incomplete**（`src/responses.js` 收尾处）。Codex 收到 `status: "incomplete"` 会当成正常收尾（会话日志里 `model_needs_follow_up=false`），前端不提示，用户只看到界面卡回初始态——静默失败，最难排查。现在这种情形发 `response.failed` + `error.code = "reasoning_budget_exhausted"`，客户端会明确报错，埋点也带上 `error` 字段。
+
+**提示词形状会改变是否触发**：若明确要求「落盘到文件」，模型直接调 `exec_command` 写文件，工具调用打断 reasoning，反而不触发；越接近「你想清楚再动手」的指令越容易撞上。
 
 **配置读盘按 mtime 失效，不需要重启网关。** `src/modelmap.js` 和 `src/keys.js` 都落在 `data/` 下，网关与管理端是两个进程，所以两者都在每次调用时比对 mtime 重读。改完模型映射或 API key 立即生效——如果加了启动时读一次的缓存，管理端改完必须重启网关，界面无法解释。
 
@@ -201,7 +236,7 @@ Claude Code ── Anthropic ───────┼──→ 网关 :9080 ─�
 | `DUMATE_REQUIRE_KEY` | 未设（关闭） | 设为 `1` 才对模型端点校验 `data/keys.json` |
 | `DUMATE_ADMIN_PORT` / `DUMATE_ADMIN_HOST` | `9081` / `127.0.0.1` | 管理端监听 |
 | `DUMATE_ADMIN_DATA` | `<repo>/data` | 覆盖数据目录（管理端与网关必须一致） |
-| `DUMATE_MIN_MAX_TOKENS` / `DUMATE_MAX_MAX_TOKENS` | `32768` / `131072` | 输出预算钳制区间（`0` 关闭下限策略） |
+| `DUMATE_MIN_MAX_TOKENS` / `DUMATE_MAX_MAX_TOKENS` | `65536` / `131072` | 输出预算钳制区间（`0` 关闭下限策略） |
 | `DUMATE_AUTOSTART` | `auto` | `auto`=无实例才拉起 / `always`=总是自己拉起 / `off`=只用已有实例 |
 | `DUMATE_UPSTREAM_PORT` | `8980` | 自建后端端口 |
 | `DUMATE_INSTALL_DIR` | DuMate 默认安装路径 | 安装目录不在默认位置时设置 |
@@ -239,6 +274,8 @@ Claude Code ── Anthropic ───────┼──→ 网关 :9080 ─�
 
 **两个 `data/` 目录的陷阱**：`DUMATE_ADMIN_DATA` 决定数据目录，管理端与网关必须一致，否则读到的账号/埋点不同。`stable/` 快照若也跑起来，默认用 `<repo>/data`——与开发实例共享同一份数据，这是有意的（账号池共用）。
 
+**但 9080 当前实际跑的是 `stable/data/`，不是 `<repo>/data`**（实测 2026-09-26）。`reqlog.js` 的 `ROOT = path.resolve(__dirname, '..')`——stable 副本的 `__dirname` 是 `stable/src`，所以未设 `DUMATE_ADMIN_DATA` 时落 `stable/data`。而 `start-stable.bat` 里写着 `set DUMATE_ADMIN_DATA=%~dp0..\data`，说明**现在这个 9080 不是用它自己的脚本起的**（手工起的，没有该环境变量）。后果：9083 管理端读 `<repo>/data`，看不到 9080 的流量——排查时若拿管理端数据核对 9080，会得出「请求根本没经过网关」这种错误结论。查 9080 的埋点必须直接看 `stable/data/requests.jsonl`。
+
 `keys.js` 的 CIDR 匹配是 **fail-closed**：非法条目返回 false（写错一条 CIDR 会让这把 key 对所有来源拒绝，而非意外放行）。token 比对逐条走 `timingSafeEqual`，避免通过响应耗时逐字节猜 token。
 
 ## 平台与依赖
@@ -261,6 +298,7 @@ Claude Code ── Anthropic ───────┼──→ 网关 :9080 ─�
 | `points-agg.js` | 额度包聚合（按来源 / 按发放日 / 临期 / 已过期未用完）。本地后端与网页账号拿到的是同一份额度包结构但字段来源不同，两份都要得出同样的派生视图——收敛在这里，否则「一边按到期日、一边按发放日判断还在不在发」这种口径漂移必然发生 |
 | `points-cursor.js` | 单请求积分成本（余额游标差）。上游账单无法归因到具体请求（同一时间窗有 1~3 条候选扣费，硬挑一条等于编数字），改用「每条请求结束后记一次余额、相邻两次差值即后一条的成本」。**每账号一条串行队列**——丢一条游标会让下一条的差值跨过两条请求，静默算错，所以宁可排队也不缺档 |
 | `login-browser.js` | 浏览器登录器（唯一依赖 playwright-core 的地方） |
+| `admin/routes/traework.js` | TRAE Work 通道的管理接口：`/status` 通道健康+账号列表（mode=multi，可增删）、`/models` 模型表（只读）、`/credits` 各账号额度与签到状态、`/checkin` 手动签到（幂等）、**`/login/url` + `/login/callback` 两步 OAuth 登录**、`DELETE/PATCH /accounts/:id` |
 | `admin/routes/qwenwork.js` | 千问办公通道的管理接口：`/status` 通道健康、`/credits` 三个池、`/credits/daily` 按天聚合、`/credits/records` 逐笔明细、`/models` 模型表、**`/account` 登录态详情（只读）**、**`/accounts` 账号（`mode='single'` 表示单账号直连，不可增删）** |
 | `admin/routes/*.js` | 管理 API，按 `mount()` 挂载到 `/api/admin/<前缀>` |
 
