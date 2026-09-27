@@ -1142,7 +1142,18 @@ const server = http.createServer(async (req, res) => {
         // 「qwen/ 请求会在哪一步失败」。千问是进程内直连，没有端口，
         // 所以报的是 wasm 版本与登录态而不是 port。
         channels: {
-          dumate: { port: upstreamPort, ready: !!upstreamPort },
+          dumate: {
+            port: upstreamPort,
+            ready: !!upstreamPort,
+            // 桌面凭证不可用时会自动回落到网页凭证池（见 forwardWithFallback）。
+            // 报出来是为了让「现在到底走的哪条链路」一眼可见——
+            // 桌面 ready=false 且 fallback.available=true 时，请求仍然能成功，
+            // 但走的是网页池，排障时不知道这点会看错方向。
+            fallback: (() => {
+              try { return { available: webFallback.available(), enabled: webFallback.enabled() }; }
+              catch (e) { return { available: false, enabled: false }; }
+            })(),
+          },
           qwenwork: {
             direct: true,
             ready: !!(qwenworkUp && router.availability('qwenwork').ok),
