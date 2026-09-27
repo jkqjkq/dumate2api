@@ -182,13 +182,20 @@
               「今日消耗（经本网关）」= {{ fmtQw(qwCredits.today.total) }}
               —— 只统计经过本网关转发的请求。
             </div>
-            <div>
+            <div v-if="qwCredits.freeUsed != null">
               「今日全部消耗」= {{ fmtQw(qwCredits.freeUsed) }}
               —— 上限减余额得出，含在千问客户端 / 网页里直接对话的部分。
               <span class="text-slate-400">
                 （上限 {{ fmtQw(qwCredits.limit) }}，来源：
                 {{ qwCredits.limitSource === 'observed' ? '观测峰值' : '配置兜底' }}）
               </span>
+            </div>
+            <!-- 未校准（没观测到满额状态）时不给数字：差值会变成
+                 「配置上限 − 当前余额」，余额被扣穿时会算出编造值。
+                 后端此时返回 null，这里如实说明推不出来。 -->
+            <div v-else>
+              「今日全部消耗」= <span class="text-slate-400">无法推算</span>
+              —— 尚未观测到满额状态，上限只能取配置值，差值不可信。
             </div>
           </template>
         </a-alert>

@@ -120,10 +120,18 @@ function dailyUsageFromBalance(balance, accountKey) {
   const limit = Math.max(configured || 0, peak);
   // calibrated=true 表示峰值已经追平或超过配置值（说明已观测到接近满额的状态）
   const calibrated = peak >= (configured || 0);
+  // 今日消耗 = 上限 − 余额。**但未校准时这个差值不可信**：
+  // limit 此时是配置兜底（100），若余额为 0（账号欠费 / 额度被扣穿），
+  // 差值会算出「今日已用 100」——而真相是「没观测到满额，推不出消耗」。
+  // 实测账号 示例账号 就是这样：一次请求都没走，却报已用 100。
+  // 所以未校准一律给 null，界面显示 — 并注明无法推算，而不是编一个数。
+  const freeUsed = calibrated
+    ? Math.max(0, Number((limit - (balance || 0)).toFixed(4)))
+    : null;
   return {
     limit,
     limitSource: calibrated ? 'observed' : 'config-lower-bound',
-    freeUsed: Math.max(0, Number((limit - (balance || 0)).toFixed(4))),
+    freeUsed,
     peak: Number(peak.toFixed(4)),
     calibrated,
   };

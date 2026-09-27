@@ -231,13 +231,19 @@
               <template v-if="w.resetAt">每天 00:00 重置</template>
               <template v-else>按有效期</template>
             </div>
-            <!-- 今日已用：真实数据。上限由「观测峰值 + 配置兜底」得出，
-                 未校准时如实说明数值可能偏小。 -->
-            <div v-if="w.id === 'daily' && qw?.freeUsed != null" class="text-xs text-slate-500 mt-1">
-              今日已用 {{ qw.freeUsed.toFixed(2) }} / {{ qw.limit }}
-              <a-tag v-if="!qw.calibrated" color="orange" class="ml-1" title="尚未观测到接近满额的状态，实际消耗可能更多">
-                待校准
-              </a-tag>
+            <!-- 今日已用：上限由「观测峰值 + 配置兜底」得出。未校准时**不给数字**
+                 （后端此时返回 null）——因为差值会变成「配置上限 − 当前余额」，
+                 在余额被扣穿时算出「已用 100」这种编造值。这里如实说明推不出来。 -->
+            <div v-if="w.id === 'daily'" class="text-xs text-slate-500 mt-1">
+              <template v-if="qw?.freeUsed != null">
+                今日已用 {{ qw.freeUsed.toFixed(2) }} / {{ qw.limit }}
+                <a-tag v-if="!qw.calibrated" color="orange" class="ml-1" title="尚未观测到接近满额的状态，实际消耗可能更多">
+                  待校准
+                </a-tag>
+              </template>
+              <template v-else-if="qw">
+                今日已用 — <span class="text-slate-400">（未观测到满额状态，推不出消耗）</span>
+              </template>
             </div>
           </a-card>
         </a-col>
@@ -343,12 +349,22 @@
                   :style="{ width: healthWidthQw(a) }"
                 />
               </div>
+              <!-- 每账号的每日免费余额单独给一行：这才是「这个号今天还能用多少」。
+                   只显示三池合计是不够的——合计含长期/月度，且账号欠费时会是负数，
+                   看不出免费额度还剩多少。上限固定 100，来源见下方说明。 -->
+              <div class="flex items-center justify-between text-xs mb-1">
+                <span class="text-slate-500">每日免费</span>
+                <span :class="dailyClassQw(a)">
+                  {{ a.wallets ? fmtQw(a.wallets.daily) : '—' }}
+                  <span class="text-slate-500">/ {{ qwDailyCap }}</span>
+                </span>
+              </div>
               <div class="flex items-center justify-between text-xs">
                 <span class="text-slate-500">
                   {{ a.daysAlive !== null ? a.daysAlive + ' 天' : '天数未知' }}
                 </span>
-                <span :class="a.points !== null && a.points < 0 ? 'text-red-500' : a.points !== null && a.points < 20 ? 'text-orange-500' : 'text-slate-600'">
-                  {{ a.points !== null ? fmt(a.points) + ' 积分' : '积分未知' }}
+                <span class="text-slate-500">
+                  {{ a.wallets ? '合计 ' + fmtQw(a.wallets.total) : '积分未知' }}
                 </span>
               </div>
               <div v-if="a.lastError" class="text-xs text-red-500 mt-1">{{ a.lastError }}</div>
@@ -755,6 +771,10 @@ const qwInfo = computed(() => channelStore.infos['qwenwork'] || null)
 // 一个来自订阅套餐、一个来自充值赠送，合并成一张「付费额度」卡会丢信息。
 const qwWallets = computed(() => qw.value?.wallets || [])
 
+// 每日免费额度的上限。接口不返回分母，来自配置（默认 100，见
+// credits.dailyLimit）。主额度卡片的 limit 也用它，两边同源。
+const qwDailyCap = computed(() => qw.value?.dailyCap ?? 100)
+
 function fmtExpire(iso?: string | null) {
   if (!iso) return '—'
   const t = Date.parse(iso)
@@ -847,6 +867,15 @@ function healthColorQw(a: QwAccount) {
   if (a.refreshExpired) return 'bg-orange-400'
   if (!a.enabled || !a.usable) return 'bg-slate-300'
   return 'bg-green-500'
+}
+// 每日免费余额的配色：0 是「这个号今天用完了」，用红；低于 20 用橙提示。
+// 负数（欠费）也算红——它同样意味着这个号现在发不出请求。
+function dailyClassQw(a: QwAccount) {
+  const d = a.wallets ? a.wallets.daily : null
+  if (d === null) return 'text-slate-400'
+  if (d <= 0) return 'text-red-500'
+  if (d < 20) return 'text-orange-500'
+  return 'text-cyan-400'
 }
 
 // TRAE 版：与千问同一套视觉规则（0 用灰、异常用红/橙、在线用绿），

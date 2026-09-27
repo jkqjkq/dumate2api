@@ -126,20 +126,27 @@ const routes = [
           try {
             const qw = require('../../qwenwork');
             const st = qw.status();
+            const authStore = require('../../qwenwork/auth');
+            // 账号信息必须从**账号池**读（自持凭证），不是客户端的 auth-v2.dat。
+            // 早先这里读 credentials.decryptAuth()，那条链路在改成账号池后就废弃了，
+            // 结果是：报出来的名字是旧文件的残留（可能根本不是主账号），
+            // 且 refreshExpiresAt 取的是客户端那份早已过期的值，
+            // 界面因此常驻「refresh token 已过期」的假告警。
             let acct = {};
             try {
-              const doc = require('../../qwenwork/credentials').decryptAuth();
-              const u = doc.user || {};
-              acct = {
-                account: u.name || '', tier: u.tier || '',
-                tokenExpiresAt: doc.expiresAt || null,
-                refreshExpiresAt: doc.refreshTokenExpiresAt || null,
-                refreshExpired: (() => {
-                  const t = Date.parse(doc.refreshTokenExpiresAt || '');
-                  return Number.isFinite(t) ? Date.now() >= t : false;
-                })(),
-              };
-            } catch (e) { /* 登录态读不到就只报通道状态 */ }
+              const a = authStore.preferred();
+              if (a) {
+                acct = {
+                  account: a.nickname || a.username || String(a.id),
+                  tier: a.tier || '',
+                  // 多账号：报账号数，顶栏与仪表盘据此提示「池里还有几个」
+                  accounts: st.accounts || 0,
+                  tokenExpiresAt: a.expiresAt || null,
+                  refreshExpiresAt: a.refreshExpiresAt || null,
+                  refreshExpired: !!(a.refreshExpiresAt && Date.now() >= a.refreshExpiresAt),
+                };
+              }
+            } catch (e) { /* 账号池读不到就只报通道状态 */ }
             out.qwenwork = {
               id: 'qwenwork', label: '千问办公', kind: 'direct',
               ready: st.ready, wasm: st.wasm ? st.wasm.version : null,
