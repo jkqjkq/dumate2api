@@ -5,6 +5,7 @@ const { mapModel, anthropicToOpenAI, openAIToAnthropic, mapFinishReason } = requ
 const { googleToOpenAI, openAIToGoogle, translateStreamToGoogle } = require('./google');
 const { responsesToOpenAI, openAIToResponse, translateStreamToResponses } = require('./responses');
 const { resolveMaxTokens, resolveQwenMaxTokens, resolveTraeworkMaxTokens } = require('./budget');
+const webFallback = require('./fallback-web');
 
 // 按通道选用预算策略。收敛在这里而不是在四个调用点各写一遍 if——
 // 分开写必然漂移（曾经就漏了千问，导致小预算直接截断正文）。
@@ -293,11 +294,81 @@ function forwardToUpstream(portOrTarget, path, method, headers, body, callback) 
   return req;
 }
 
+/**
+ * 与 forwardToUpstream 同签名，但桌面链路不可用时自动回落到网页凭证池。
+ *
+ * 只在**搭子通道**用（调用点自己判断 target.id）。为什么只回落、不整体切到
+ * 网页凭证：桌面链路有三个网页链路没有的能力——`responses`（Codex CLI 0.155+
+ * 只认它）、`count_tokens`、三通道前缀分流。整体切过去等于把这些一起丢掉。
+ * 而桌面凭证唯一的硬伤是「同一时刻只有一份登录态、过期必须开客户端重登」，
+ * 那正好是回落能补的。
+ *
+ * 回落时机严格限定为「还没交给回调」：后端连不上（fakeResponse）或回了
+ * 4xx/5xx（凭证过期时后端以错误码回应）。一旦回调拿到响应开始写下游，
+ * 就不再换链路——半截响应 + 换链路重来会让客户端收到两段拼接的内容。
+ */
+function forwardWithFallback(portOrTarget, path, method, headers, body, clientReq, callback) {
+  const t = (typeof portOrTarget === 'object' && portOrTarget !== null)
+    ? portOrTarget : null;
+  const isDumate = !t || t.id === 'dumate';
+
+  const useWebFallback = (parsedBody) => {
+    const { emitter, done, ready, flush } = webFallback.callWebPool(parsedBody, {
+      // 账号在池子选中时就回填（早于流结束），供埋点记录「实际用了哪个」。
+      // 多账号轮询下只有池子知道，在埋点处猜必然是错的。
+      onAccount: (name) => { if (name && clientReq) clientReq._upstreamAccount = String(name); },
+    });
+    // 标记这次走了回落——埋点与界面据此区分「用的是哪套凭证」
+    if (clientReq) clientReq._credentialSource = 'web';
+    // 状态码定下来再交出去：调用方拿到就 writeHead，
+    // 晚一步失败就会被翻成「HTTP 200 + 空响应」
+    ready.then(() => { callback(emitter); flush(); });
+    return done;
+  };
+
+  const tryWebFallback = () => {
+    if (!isDumate || !webFallback.available()) return false;
+    let parsed;
+    try { parsed = JSON.parse(body); } catch (e) { return false; }
+    log('桌面链路不可用，回落到网页凭证池');
+    useWebFallback(parsed);
+    return true;
+  };
+
+  // 端口解析也要纳入回落范围。**这是主场景**：桌面凭证失效时
+  // dumate-main-server.exe 会拒绝启动或直接退出，ensureUpstream() 于是抛错——
+  // 而「客户端登录态过期」正是这个回落机制要解决的唯一问题。
+  // 若把端口解析留在调用点（原来的写法），它先抛错、根本走不到回落。
+  if (isDumate && t && !t.port) {
+    ensureUpstream().then(
+      (port) => { t.port = port; startForward(t); },
+      () => { if (!tryWebFallback()) callback({ fakeResponse: true, statusCode: 502, headers: {}, write() {}, end() {} }); },
+    );
+    return null;
+  }
+
+  return startForward(portOrTarget);
+
+  function startForward(targetOrPort) {
+    return forwardToUpstream(targetOrPort, path, method, headers, body, (upstreamRes) => {
+      // 后端在跑但连不上（进程刚挂 / 端口被占），或它回了错误码（凭证过期）
+      const dead = upstreamRes.fakeResponse;
+      const badStatus = !dead && (!upstreamRes.statusCode || upstreamRes.statusCode >= 400);
+      if (dead || badStatus) {
+        if (tryWebFallback()) {
+          if (!dead && upstreamRes.resume) upstreamRes.resume();  // 把失败的上游读干净
+          return;
+        }
+      }
+      callback(upstreamRes);
+    });
+  }
+}
+
 function readBody(req) {
   // 鉴权阶段可能已经为模型白名单预读过请求体；流只能消费一次，
   // 直接返回缓存，否则 handler 拿到空串
-  if (typeof req._rawBody === 'string') return Promise.resolve(req._rawBody);
-  return new Promise((resolve) => {
+  if (typeof req._rawBody === 'string') return Promise.resolve(req._rawBody);  return new Promise((resolve) => {
     const chunks = [];
     req.on('data', (c) => chunks.push(c));
     req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
@@ -351,6 +422,10 @@ function logRequest(req, res, startedAt, info, status, usage, extra) {
     // 通道：区分请求走的是搭子还是千问办公。不加这个字段，两侧的首字延迟
     // 会混在同一个均值里（千问首帧实测 6.7s，搭子不是），且无法归因。
     channel: req._channel || 'dumate',
+    // 这条请求实际用的是哪套凭证。搭子有两条链路（桌面 / 网页回落），
+    // 不记这个的话，排查「为什么这次走的账号不是桌面那个」时无从判断。
+    // 只有真的回落了才有值，桌面链路不带这个字段。
+    credential_source: req._credentialSource || '',
     model: info.model || '',
     // 映射后的模型：客户端发来的名字经 modelmap 转换后实际打给上游的值。
     // 排查「为什么 glm-5 变成了 model-text」这类问题时要看它。
@@ -497,12 +572,9 @@ async function handleOpenAIChat(req, res) {
     return await handleDirectChannel(req, res, reqBody, route, { startedAt, info, kind: 'openai' });
   }
 
-  if (target.id === 'dumate') {
-    target.port = await ensureUpstream();
-  }
   const outBody = JSON.stringify(reqBody);
 
-  const upstreamReq = forwardToUpstream(target, '/chat/completions', 'POST', {}, outBody, (upstreamRes) => {
+  const upstreamReq = forwardWithFallback(target, '/chat/completions', 'POST', {}, outBody, req, (upstreamRes) => {
     if (upstreamRes.fakeResponse) {
       logRequest(req, res, startedAt, info, 502, null, { error: 'upstream_unavailable' });
       return sendJSON(res, 502, { error: { message: 'DuMate upstream unavailable', type: 'api_error' } });
@@ -665,9 +737,8 @@ async function handleGoogleGenerateContent(req, res, isStream, pathModel) {
     openaiReq.stream = isStream;
     return await handleDirectChannel(req, res, openaiReq, route, { startedAt, info, kind: 'google' });
   }
-  if (target.id === 'dumate') target.port = await ensureUpstream();
   const outBody = JSON.stringify(openaiReq);
-  forwardToUpstream(target, '/chat/completions', 'POST', {}, outBody, (upstreamRes) => {
+  forwardWithFallback(target, '/chat/completions', 'POST', {}, outBody, req, (upstreamRes) => {
     if (upstreamRes.fakeResponse) {
       logRequest(req, res, startedAt, info, 502, null, { error: 'upstream_unavailable' });
       return sendJSON(res, 502, { error: { code: 502, message: 'DuMate upstream unavailable', status: 'UNAVAILABLE' } });
@@ -762,9 +833,8 @@ async function handleOpenAIResponses(req, res) {
     openaiReq.stream = isStream;
     return await handleDirectChannel(req, res, openaiReq, route, { startedAt, info, kind: 'responses' });
   }
-  if (target.id === 'dumate') target.port = await ensureUpstream();
   const outBody = JSON.stringify(openaiReq);
-  forwardToUpstream(target, '/chat/completions', 'POST', {}, outBody, (upstreamRes) => {
+  forwardWithFallback(target, '/chat/completions', 'POST', {}, outBody, req, (upstreamRes) => {
     if (upstreamRes.fakeResponse) {
       logRequest(req, res, startedAt, info, 502, null, { error: 'upstream_unavailable' });
       return sendJSON(res, 502, { error: { message: 'DuMate upstream unavailable', type: 'api_error' } });
@@ -843,13 +913,12 @@ async function handleAnthropicMessages(req, res) {
     openaiReq.stream = !!anthropicReq.stream;
     return await handleDirectChannel(req, res, openaiReq, route, { startedAt, info, kind: 'anthropic' });
   }
-  if (target.id === 'dumate') target.port = await ensureUpstream();
   // Ask the upstream for a usage-bearing final chunk so we can report real
   // token counts instead of zeroes. Harmless if the upstream ignores it.
   if (anthropicReq.stream) openaiReq.stream_options = { include_usage: true };
   const outBody = JSON.stringify(openaiReq);
 
-  forwardToUpstream(target, '/chat/completions', 'POST', {}, outBody, (upstreamRes) => {
+  forwardWithFallback(target, '/chat/completions', 'POST', {}, outBody, req, (upstreamRes) => {
     if (upstreamRes.fakeResponse) {
       logRequest(req, res, startedAt, info, 502, null, { error: 'upstream_unavailable' });
       return sendJSON(res, 502, { type: 'error', error: { type: 'api_error', message: 'DuMate upstream unavailable' } });

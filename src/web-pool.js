@@ -280,6 +280,59 @@ async function callWithFailover(path, method, body, opts = {}) {
   };
 }
 
+// 带故障转移的流式调用。
+//
+// 与 callWithFailover 的关键差别：**故障转移只能在「还没转发任何内容」时做**。
+// 一旦首块已经交给客户端，就不能换账号重来——那会让客户端收到两段拼接的
+// 回答。所以这里靠 opts.onStatus 在响应头到达时先判断状态码：非 2xx 就换下
+// 一个账号，此时还没有 data 流过，是安全的。
+//
+// onChunk 一旦被调用过就视为「已提交」，后续失败只上报不重试。
+async function callStreamWithFailover(path, method, body, onChunk, opts = {}) {
+  const tried = new Set();
+  const errors = [];
+  const maxAttempts = Math.max(1, opts.maxAttempts || 3);
+  let committed = false;
+  const guardedChunk = (c) => { committed = true; onChunk(c); };
+
+  for (let i = 0; i < maxAttempts; i++) {
+    const item = pick(tried);
+    if (!item) break;
+    tried.add(item.account.id);
+
+    let accepted = false;
+    const r = await callModelStream(item.account, path, method, body, guardedChunk, {
+      ...opts,
+      onStatus: (code) => {
+        // 2xx 才接受这次响应；否则标记未接受，让下面走故障转移
+        accepted = code >= 200 && code < 300;
+        if (typeof opts.onStatus === 'function') { try { opts.onStatus(code); } catch (e) { /* 忽略 */ } }
+      },
+    });
+
+    if (r.ok && accepted) return { ...r, attempts: i + 1 };
+
+    // 已经吐过内容就不能重试了——客户端已经收到半截回答
+    if (committed) return { ...r, attempts: i + 1, committed: true };
+
+    const status = r.status || 0;
+    // 4xx（除 401/429）是请求本身的问题，换账号也一样失败
+    if (status >= 400 && status < 500 && status !== 401 && status !== 429) {
+      return { ...r, attempts: i + 1, no_retry: true };
+    }
+    markFailure(item.account.id, r.error || `HTTP ${status}`);
+    errors.push({ account: item.account.name, status, error: r.error });
+  }
+
+  return {
+    ok: false,
+    status: errors.length ? 502 : 503,
+    error: errors.length ? '所有账号均调用失败' : '没有可用账号（全部禁用或冷却中）',
+    errors,
+    attempts: tried.size,
+  };
+}
+
 // 池状态快照，供管理端展示
 function snapshot() {
   const now = Date.now();
@@ -322,6 +375,7 @@ function forget(id) {
 }
 
 module.exports = {
-  getToken, callWithFailover, callModel, callModelStream, pick, snapshot, probe, forget,
+  getToken, callWithFailover, callStreamWithFailover, callModel, callModelStream,
+  pick, snapshot, probe, forget,
   GATEWAY_HOST, GATEWAY_PREFIX, stateOf,
 };
