@@ -9,6 +9,7 @@ const { sendJSON } = require('../router');
 const authStore = require('../../traework/auth');
 const checkin = require('../../traework/checkin');
 const login = require('../../traework/login');
+const models = require('../../traework/models');
 const tw = require('../../traework');
 
 const routes = [
@@ -31,6 +32,34 @@ const routes = [
     },
   },
   {
+    // 模型表（只读，上游下发）。带消耗倍率、上下文窗口、会员折扣。
+    // ?visible=1 只看客户端可见的模型（默认全部返回，隐藏的多是内部模型，
+    // 排查「为什么某个名字调不通」时需要看到它们）。
+    method: 'GET',
+    path: '/models',
+    handler: async ({ res, req }) => {
+      const onlyVisible = /[?&]visible=1/.test(req.url || '');
+      const force = /[?&]refresh=1/.test(req.url || '');
+      let out = { ok: false, error: '', models: [], fetchedAt: 0 };
+      try {
+        out = await models.fetchModels({ force });
+      } catch (e) {
+        out = { ok: false, error: e.message, models: [], fetchedAt: 0 };
+      }
+      let list = out.models || [];
+      if (onlyVisible) list = list.filter((m) => m.visible);
+      return sendJSON(res, 200, {
+        models: list,
+        total: (out.models || []).length,
+        // 取不到时如实报错，前端显示错误而不是一张空表
+        error: out.error || '',
+        fetchedAt: out.fetchedAt || 0,
+        // 倍率的单位与来源写清楚：接口给的是相对倍率，不是积分绝对值
+        rateNote: '倍率是相对值（接口字段 consumption_rate.rate），实际扣费 = 倍率 × 用量；折扣未命中时按原价扣。',
+      });
+    },
+  },
+  {
     // 全部账号的签到状态与额度。不落盘——只读快照，避免刷新动作本身触发签到
     method: 'GET',
     path: '/credits',
@@ -46,11 +75,21 @@ const routes = [
           uid: a.uid || '',
           credits: a.credits == null ? null : a.credits,
           checkedIn: st.ok ? st.checkedIn : null,
-          // 额度接口给的剩余值（与落盘的 credits 可能不同，取实时值）
+          // 额度接口的实时值。remain/limit 取不到时给 null——
+          // 补 0 会被读成「额度用完了」，而真相是没解析到
           remain: u.ok ? u.remain : null,
           limit: u.ok ? u.limit : null,
+          consumed: u.ok ? u.consumed : null,
+          // 签到可得的额度（不是余额），来自 status 接口
+          checkinCredits: st.ok ? st.credits : null,
+          checkinExtra: st.ok ? st.extraCredits : null,
           lastCheckin: a.lastCheckin || null,
-          error: st.ok ? (a.lastError || '') : st.error,
+          // error 只表示「这次状态查询失败」——别把上次签到尝试的失败消息
+          // 塞进来。两者是不同的东西：前者是「查不到」，后者是「查到了，
+          // 但上一次签到被上游拒了」。混在一起时前端只能显示「查询失败」，
+          // 把「今天还没签」这个已经查到的事实盖掉了（真踩过）。
+          // 上次签到的结果由 /status 的 lastError 单独报，账号卡上已有告警位。
+          error: st.ok ? '' : st.error,
         });
       }
       return sendJSON(res, 200, { count: rows.length, rows });
@@ -111,6 +150,41 @@ const routes = [
       });
       if (!r.ok) return sendJSON(res, 200, { ok: false, error: r.error });
       return sendJSON(res, 200, { ok: true, account: r.account });
+    },
+  },
+  {
+    // 回填手机号。
+    //
+    // TRAE 的 GetUserInfo 已 401，拿不到官方身份字段，昵称是唯一线索。
+    // 但「昵称 = 用户 + 手机号」这个假设**实测不成立**（本机这个号是
+    // 「用户23062830688」，以 2 开头，不是手机号），所以这里只在昵称
+    // 严格匹配标准手机号时才填，抽不到就不给——不猜、不凑。
+    //
+    // 这条**不发任何网络请求**，只重扫一遍已有的 nickname。
+    method: 'POST',
+    path: '/accounts/refresh-phone',
+    handler: async ({ res, body }) => {
+      const id = body && body.id;
+      const list = id ? [authStore.get(id)].filter(Boolean) : authStore.findUsable();
+      if (!list.length) return sendJSON(res, 200, { ok: false, error: '没有可用账号' });
+      const out = [];
+      for (const a of list) {
+        const p = authStore.phoneFromNickname(a.nickname);
+        if (p) {
+          authStore.patch(a.id, { phone: p, phoneSource: 'inferred-nickname' });
+          out.push({ id: a.id, name: a.nickname || '', ok: true, phone: authStore.maskPhone(p) });
+        } else {
+          out.push({
+            id: a.id, name: a.nickname || '', ok: false,
+            error: '昵称不是「用户+手机号」格式，无法推断',
+          });
+        }
+      }
+      return sendJSON(res, 200, {
+        ok: true, results: out,
+        // 如实说明：TRAE 侧拿不到官方手机号，能填上纯属昵称恰好合格式
+        note: 'TRAE Work 无官方手机号接口（GetUserInfo 已 401）。仅当昵称形如「用户13800138000」时才能取到，否则显示「手机号未知」。',
+      });
     },
   },
   {

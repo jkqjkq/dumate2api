@@ -40,6 +40,14 @@ const DEFAULT_MODEL = 'glm-5.2';
 
 const USER_AGENT = `Trae/${IDE_VERSION}`;
 
+// ---- 客户端身份（签到/额度接口的设备指纹校验用）----
+// 客户端是 VSCode 内核，UA 与 market-client-id 都要跟着装成 VSCode——
+// 写 Trae/0.1.43 会被服务端识别为非客户端，签到被拒（实测 9074）。
+// 取值对齐 TraeWorkAssistant 的 build_headers。
+const UA_VSCODE = 'VSCode 1.107.1 (TRAE SOLO CN)';
+const MARKET_CLIENT_ID = 'VSCode 1.107.1';
+const APP_VERSION = '0.1.45';
+
 // 超时：对话是长流，必须用无总超时的客户端，否则 SSE 会被截断
 const TIMEOUT_MS = 30000;
 const STREAM_TIMEOUT_MS = 600000;
@@ -84,6 +92,6 @@ module.exports = {
   EP_CHECKIN_STATUS, EP_CHECKIN_CLAIM, EP_ENT_USAGE,
   CLIENT_ID, APP_ID, IDE_VERSION, IDE_VERSION_CODE,
   DEVICE_BRAND, OS_VERSION, FUNCTION, DEFAULT_MODEL,
-  USER_AGENT, TIMEOUT_MS, STREAM_TIMEOUT_MS,
+  USER_AGENT, UA_VSCODE, MARKET_CLIENT_ID, APP_VERSION, TIMEOUT_MS, STREAM_TIMEOUT_MS,
   request,
 };

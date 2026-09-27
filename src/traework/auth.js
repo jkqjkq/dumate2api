@@ -61,6 +61,11 @@ function list() {
     uid: a.uid || '',
     nickname: a.nickname || '',
     email: a.email || '',
+    // 手机号：只给脱敏形式。完整值只留在账号文件里（PII）
+    phone: maskPhone(a.phone),
+    // 来源必须一起给——TRAE 这个号是从昵称推断的，不是接口下发的真手机号。
+    // 界面要据此标注，否则用户会以为和千问一样是官方数据。
+    phoneSource: a.phone ? (a.phoneSource || 'inferred-nickname') : '',
     enabled: a.enabled !== false,
     expiresAt: a.expiresAt || null,
     refreshExpiresAt: a.refreshExpiresAt || null,
@@ -153,6 +158,48 @@ async function exchange(a) {
   return { ok: true, patch: out };
 }
 
+/**
+ * 手机号脱敏：157****1251。
+ *
+ * 号码是 PII，列表接口一律只给脱敏形式——认号用「前缀 + 后 4 位」足够了，
+ * 没必要把完整号码裸在页面上（管理端页面可能被投屏/截图）。
+ * 完整值只留在 data/ 的账号文件里，与 token 同级对待。
+ */
+function maskPhone(p) {
+  const s = String(p || '').trim();
+  if (!s) return '';
+  const plus = s.startsWith('+') ? '+' : '';
+  const digits = s.replace(/^\+/, '');
+  // 先剥国家码再脱敏。国内号是 86 + 11 位，不剥的话切出来会是「861****」
+  // 而不是「157****」——认号时要的是本机号的前 3 位。
+  let body = digits;
+  let cc = '';
+  if (digits.length === 13 && digits.startsWith('86')) {
+    cc = '86';
+    body = digits.slice(2);
+  }
+  if (body.length >= 7) {
+    return `${plus}${cc}${body.slice(0, 3)}****${body.slice(-4)}`;
+  }
+  return `${plus}${cc}${body.slice(0, 1)}****`;
+}
+
+/**
+ * 尝试从昵称里抽手机号。
+ *
+ * TRAE 的 GetUserInfo 已 401（拿不到官方身份字段），昵称是唯一的身份线索。
+ * 曾以为上游默认昵称形如「用户<手机号>」——**实测是错的**：本机这个号是
+ * 「用户23062830688」，11 位但以 2 开头，不是手机号格式，也与 uid 无关。
+ *
+ * 所以这里只在昵称**严格**匹配「用户 + 标准手机号」时才认，其他一律不给。
+ * 严格一点是为了不把不是手机号的数字显示成手机号——那比不显示更糟。
+ * 实测本机 TRAE 账号就抽不到，界面显示「手机号未知」，这是正确的结果。
+ */
+function phoneFromNickname(nickname) {
+  const m = String(nickname || '').match(/^用户(1[3-9]\d{9})$/);
+  return m ? m[1] : '';
+}
+
 /** 从 JWT 里取 exp（秒 → 毫秒） */
 function jwtExp(token) {
   try {
@@ -161,6 +208,41 @@ function jwtExp(token) {
     const j = JSON.parse(Buffer.from(part, 'base64url').toString('utf8'));
     return j && j.exp ? j.exp * 1000 : null;
   } catch (e) { return null; }
+}
+
+/** 从 JWT 里取 user id（sub / data.id 都认） */
+function jwtUid(token) {
+  try {
+    const part = String(token).split('.')[1];
+    if (!part) return '';
+    const j = JSON.parse(Buffer.from(part, 'base64url').toString('utf8'));
+    return String((j && j.data && j.data.id) || (j && j.sub) || '');
+  } catch (e) { return ''; }
+}
+
+/**
+ * 补齐账号的设备标识。
+ *
+ * **签到能不能成功取决于这个**：新的 TRAE JWT 会校验设备指纹，随机编一个
+ * 会被恒定拒（表现为 9074）。所以三个值都从 uid 确定性派生——同一账号
+ * 每次算出来一样，且与参考实现（TraeWorkAssistant）完全一致。
+ *
+ * 旧账号（deviceId 是 32 位随机 hex 的）会被就地纠正：那种格式服务端不认。
+ * 判定标准是「15 位纯数字」，不合规就重派生。
+ */
+function ensureDevice(a) {
+  if (!a) return null;
+  const uid = a.uid || jwtUid(a.accessToken) || '';
+  if (!uid) return a;
+  const ok = a.deviceId && /^\d{15}$/.test(a.deviceId) && a.sessionId && a.marketUserId;
+  if (ok) return a;
+  const d = require('./device').deriveDevice(uid);
+  return patch(a.id, {
+    deviceId: d.deviceId,
+    sessionId: d.sessionId,
+    marketUserId: d.marketUserId,
+    deviceDerivedFrom: uid,
+  }) || { ...a, ...d };
 }
 
 /** 取用户信息（登录后用一次，补 uid / 昵称） */
@@ -179,5 +261,6 @@ async function fetchUserInfo(a) {
 
 module.exports = {
   FILE, filePath, dataDir, load, save, list, get, findUsable, upsert, remove, patch,
-  needsRefresh, exchange, jwtExp, fetchUserInfo, genId,
+  needsRefresh, exchange, jwtExp, jwtUid, fetchUserInfo, ensureDevice,
+  maskPhone, phoneFromNickname, genId,
 };

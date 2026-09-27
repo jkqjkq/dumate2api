@@ -66,6 +66,11 @@ function logRequest(req, res, startedAt, info, status, usage, extra) {
     key: (req._apiKey && req._apiKey.name) || '',
     // 区分链路来源：同一个日志文件里要能分辨是本地后端还是网页凭证跑的
     upstream: 'web',
+    // 通道：网页凭证走的仍是**搭子**这条上游通道（模型名与计费都是搭子的），
+    // 只是凭证来源不同（网页 cookie vs 桌面 auth.json）。所以这里标 dumate，
+    // 而不是另立一条通道——另立会把搭子的用量在界面上劈成两半。
+    // 与 upstream 字段配合看：channel=dumate + upstream=web = 网页凭证链路
+    channel: req._channel || 'dumate',
     account: (extra && extra.account) || '',
     ...(extra || {}),
   });
@@ -192,6 +197,10 @@ async function handleAnthropicMessages(req, res) {
   req._logPath = '/v1/messages';
 
   const openaiReq = anthropicToOpenAI(anthropicReq);
+  // 9084 只有搭子一条通道，没有前缀分流，所以映射在这里补——翻译层已经
+  // 不再自己 mapModel（那会让 `traework/xxx` 这类带前缀的名字在 9080/9082
+  // 上被提前兜底、前缀丢失）。同文件 OpenAI 路径的 mapModel 是同一口径。
+  openaiReq.model = modelmap.mapModel(openaiReq.model);
   if (anthropicReq.stream) openaiReq.stream_options = { include_usage: true };
 
   const r = await pool.callWithFailover('/chat/completions', 'POST', openaiReq, {

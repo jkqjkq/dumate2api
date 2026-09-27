@@ -105,6 +105,25 @@ function postStream(body, auth) {
 }
 
 /**
+ * 从事件里取上游报错。**TRAE 的错误是流里的一个事件，不是 HTTP 状态码**：
+ * 模型名不认识时返回 `event:error` + `{"code":4001,"message":"...param is invalid"}`，
+ * 而 HTTP 仍是 200。
+ *
+ * 不判这个会把失败当成「成功的空回答」——客户端拿到 200 + 空正文，
+ * 无从察觉；这正是最难排查的那类静默失败。
+ *
+ * @returns {{code:number, message:string}|null}
+ */
+function eventError(evt) {
+  if (!evt || evt.event !== 'error') return null;
+  const d = evt.data || {};
+  return {
+    code: Number(d.code) || 0,
+    message: String(d.message || d.error || '上游返回错误'),
+  };
+}
+
+/**
  * 解析 TRAE 的 SSE 流。
  *
  * **它不是 OpenAI 格式**，是 `event:xxx\ndata:{...}` 的自定义事件流：
@@ -114,6 +133,7 @@ function postStream(body, auth) {
  *   extra_info   汇总帧（含完整 reasoning，忽略：正文已逐块收到）
  *   token_usage  用量 —— {prompt_tokens, completion_tokens, reasoning_tokens}
  *   done         结束 —— {finish_reason}
+ *   error        上游报错 —— {code, message}（HTTP 仍是 200，必须自己判）
  *
  * 注意结束标记是 `event:done`，**不是** `data: [DONE]`。
  * 所以这里不按 OpenAI 的 `data:` 单行协议解析，而是按「事件块」切分。
@@ -185,11 +205,13 @@ function aggregate(events, model) {
   let finish = 'stop';
   let usage = null;
   let sessionId = '';
+  let err = null;
   const calls = new Map();
 
   for (const e of events) {
     const d = e.data || {};
     if (e.event === 'metadata' && d.session_id) sessionId = d.session_id;
+    if (e.event === 'error') err = eventError(e);
     if (e.event === 'output') {
       if (d.response) content += d.response;
       if (d.reasoning_content) reasoning += d.reasoning_content;
@@ -225,7 +247,7 @@ function aggregate(events, model) {
     message.tool_calls = [...calls.entries()].sort((a, b) => a[0] - b[0]).map(([, v]) => v);
     if (!content) message.content = null;
   }
-  return {
+  const out = {
     id: sessionId || 'traework',
     object: 'chat.completion',
     created: Math.floor(Date.now() / 1000),
@@ -233,6 +255,15 @@ function aggregate(events, model) {
     choices: [{ index: 0, message, finish_reason: finish }],
     usage: usage || {},
   };
+  // 上游报错时抛出去，而不是返回一个空的 200。上层（server.js）会据此回
+  // 正经的 4xx，客户端才知道这次没跑成。
+  if (err) {
+    const e = new Error(`traework ${err.code}: ${err.message}`);
+    e.statusCode = err.code >= 400 && err.code < 600 ? err.code : 400;
+    e.upstreamCode = err.code;
+    throw e;
+  }
+  return out;
 }
 
-module.exports = { buildBody, postStream, readStream, toOpenAIChunk, aggregate };
+module.exports = { buildBody, postStream, readStream, toOpenAIChunk, aggregate, eventError };
