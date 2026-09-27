@@ -18,11 +18,17 @@
 // reasoning 无论怎么展开都还剩得下正文空间。
 //
 // 环境变量：
-//   DUMATE_MIN_MAX_TOKENS  预算下限，默认 32768（0 = 关闭抬升/压制，只对非法入参兜底）
+//   DUMATE_MIN_MAX_TOKENS  预算下限，默认 65536（0 = 关闭抬升/压制，只对非法入参兜底）
 //   DUMATE_MAX_MAX_TOKENS  预算上限，默认 131072（0 表示不设上限）
 //   DUMATE_QWENWORK_MIN_MAX_TOKENS  千问办公专用下限，默认 4096
 
-const FLOOR = parseInt(process.env.DUMATE_MIN_MAX_TOKENS || '32768', 10);
+// 下限取 65536 而非 32768：32768 会在「一次写多章 + 完整项目上下文」下被
+// 思维链吃光。实测（Codex 真实会话，写 3 章小说）：
+//   预算 32768 → reasoning 32768 / 正文 0，耗时 7.5 分钟，整轮空转
+//   预算 65536 → 同任务 reasoning 峰值实测约 22000（88% → 34%），留出余量
+// 上游硬上限是 131072（传 200000 会被拒：`max_tokens参数非法：限制数值范围[1,131072]`），
+// 所以 65536 只用掉一半空间，仍有向上调整余地。
+const FLOOR = parseInt(process.env.DUMATE_MIN_MAX_TOKENS || '65536', 10);
 const CEIL = parseInt(process.env.DUMATE_MAX_MAX_TOKENS || '131072', 10);
 
 // 千问办公的下限**远低于**搭子，这是实测得出的，不是为了省：

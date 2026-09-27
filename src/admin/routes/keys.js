@@ -38,7 +38,7 @@ function usageByKey(days = 30) {
 
 // 合法的通道 id。keys.js 存 channel 字段，网关鉴权段据此决定这把 key
 // 允许走哪条通道（缺省 = 不限通道，兼容已有 key）
-const CHANNELS = ['dumate', 'qwenwork'];
+const { CHANNELS, normalize } = require('../../channels');
 
 function checkLists(body) {
   const problems = [];
@@ -73,7 +73,7 @@ const routes = [
       // 通道过滤：管理端切到千问时只列与千问相关的 key
       // （channel 为 qwenwork，或未限定通道的通用 key）
       const chRaw = decodeURIComponent((req.url.match(/[?&]channel=([^&]*)/) || [])[1] || '');
-      const ch = CHANNELS.includes(chRaw) ? chRaw : '';
+      const ch = normalize(chRaw);
       let list = keysvc.list().map((k) => ({
         ...k,
         usage: usage[k.id] || { requests: 0, total_tokens: 0, failed: 0, last_at: 0, channels: {} },

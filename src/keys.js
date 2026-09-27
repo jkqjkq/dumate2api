@@ -116,10 +116,10 @@ function normalizeList(items) {
 
 // 通道绑定。'' / null = 不限通道（兼容已有 key：网关按模型名前缀分流，
 // 不按 key 分流）。设成具体通道后，这把 key 只能调该通道的模型。
-const CHANNELS = ['dumate', 'qwenwork'];
+// 三条通道：dumate（本地转发）、qwenwork（直连）、traework（直连，凭证自持）
+const { CHANNELS, normalize } = require('./channels');
 function normalizeChannel(v) {
-  const s = String(v == null ? '' : v).trim();
-  return CHANNELS.includes(s) ? s : '';
+  return normalize(v);
 }
 
 // ---- 校验 ----

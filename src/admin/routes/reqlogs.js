@@ -10,6 +10,7 @@ const reqlog = require('../../reqlog');
 const pointsCursor = require('../../points-cursor');
 const accounts = require('../../accounts');
 const web = require('../../dumate-web');
+const { belongs } = require('../../channels');
 const { sendJSON } = require('../router');
 
 function clampInt(raw, def, min, max) {
@@ -46,9 +47,38 @@ function attachQwCredits(rows) {
       qw_concurrent: !!c.concurrent,
       // 请求结束后的余额快照，便于核对
       qw_balance: c.balance || null,
-      // 消耗了哪个千问账号。千问是单账号直连，记一次即可
+      // 消耗了哪个千问账号。多账号下这就是「这次请求花的谁的钱」——
+      // 由 provider 在选号后写进归因记录，与「池里的第一个」不是一回事
       qw_account: c.account || null,
     };
+  });
+}
+
+/**
+ * 给 TRAE Work 通道的行附上真实消耗与**实际使用的账号**。
+ *
+ * 与千问同理按 req_id 配对（归因要等额度接口返回，ts 必然晚于埋点）。
+ * 差别在于 TRAE 是多账号，所以每条都带上是哪个账号花的——
+ * 「哪个账号消耗了多少」正是这条通道最要紧的信息。
+ */
+function attachTwCredits(rows) {
+  const credits = require('../../traework/credits');
+  return credits.attachCosts(rows);
+}
+
+/**
+ * 摘掉直连通道行上的搭子余额游标字段。
+ *
+ * points-cursor 的差值来自**搭子账号**的余额，对直连通道没有意义。
+ * 采集端已按通道过滤（server.js 的 logRequest），但历史数据里已经贴错了，
+ * 且这里再兜一层——界面宁可显示「—」，也不要显示一个解释不通的数字。
+ */
+function stripDumateCursor(rows) {
+  return rows.map((r) => {
+    if (!r.channel || r.channel === 'dumate') return r;
+    if (r.points_delta === undefined) return r;
+    const { points_delta, points_exact, ...rest } = r;
+    return rest;
   });
 }
 
@@ -63,9 +93,9 @@ const routes = [
       const offset = clampInt(q('offset') && decodeURIComponent(q('offset')), 0, 0, 10_000_000);
       const days = clampInt(q('days') && decodeURIComponent(q('days')), 7, 1, 90);
       const type = q('status') ? decodeURIComponent(q('status')) : '';
-      // 通道筛选：dumate / qwenwork；缺省或未知值 = 全部通道
+      // 通道筛选：dumate / qwenwork / traework；缺省或未知值 = 全部通道
       const chRaw = q('channel') ? decodeURIComponent(q('channel')) : '';
-      const ch = chRaw === 'dumate' || chRaw === 'qwenwork' ? chRaw : '';
+      const ch = require('../../channels').normalize(chRaw);
 
       // 过滤语义：all=全部；ok=仅成功（2xx/3xx）；err=仅失败（4xx/5xx/0=中断）
       // 通道语义：历史记录没有 channel 字段，归入搭子——分通道埋点上线前
@@ -73,10 +103,7 @@ const routes = [
       const since = Date.now() - days * 86400000;
       const filter = (r) => {
         if (r.ts < since) return false;
-        if (ch) {
-          const eff = r.channel || 'dumate';
-          if (eff !== ch) return false;
-        }
+        if (!belongs(r, ch)) return false;
         if (type === 'ok') return r.status >= 200 && r.status < 400;
         if (type === 'err') return r.status >= 400 || r.status === 0;
         return true;
@@ -89,8 +116,10 @@ const routes = [
       return sendJSON(res, 200, {
         // 附上实测扣费（余额差）。没有游标的行如实留空——
         // 第一条请求没有参照点，补 0 会被读成「这条没花钱」
-        // 千问的行另按 req_id 附积分明细（两套账，见 attachQwCredits）
-        rows: attachQwCredits(pointsCursor.attachCosts(rows, allInWindow)),
+        // 千问/TRAE 的行另按 req_id 附各自的积分明细（三套账，见上面两个 attach）
+        rows: attachTwCredits(attachQwCredits(
+          stripDumateCursor(pointsCursor.attachCosts(rows, allInWindow)),
+        )),
         total,
         limit,
         offset,
@@ -185,8 +214,12 @@ const routes = [
       const { rows } = reqlog.read({ limit: 0 });
       const row = rows.find((r) => Number(r.ts) === ts);
       if (!row) return sendJSON(res, 404, { error: '记录不存在（可能已随日志轮转删除）' });
-      // 传全量行，并发判定才准（详情页同样要标出「差值可能含别人消耗」）
-      const [withCost] = pointsCursor.attachCosts([row], rows);
+      // 传全量行，并发判定才准（详情页同样要标出「差值可能含别人消耗」）。
+      // 与列表接口走**同一条 attach 链**：少一环就会出现「列表显示 TRAE 消耗、
+      // 点进详情却是搭子的游标差」这种自相矛盾
+      const [withCost] = attachTwCredits(attachQwCredits(
+        stripDumateCursor(pointsCursor.attachCosts([row], rows)),
+      ));
       return sendJSON(res, 200, withCost);
     },
   },

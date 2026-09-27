@@ -9,6 +9,7 @@
 const reqlog = require('../../reqlog');
 const accounts = require('../../accounts');
 const web = require('../../dumate-web');
+const { normalize, belongs, effChannel, LABELS } = require('../../channels');
 const { sendJSON } = require('../router');
 
 // 积分记录按账号查，且需要 startAt/endAt（实测缺参数会报
@@ -71,23 +72,17 @@ function clampInt(raw, def, min, max) {
 // 按通道取行。**历史记录（channel 未标注）归入搭子**——分通道埋点上线前
 // 只有搭子一条通道，把它们算到「未标注」里，用户切到搭子会看到数字凭空变小，
 // 反而比默认成搭子更像在编数据。只有「查看全部」时才单列未标注。
+const CH = require('../../channels');
 function loadRows(days, ch) {
   const since = Date.now() - days * 86400000;
   const { rows } = reqlog.read({
     limit: 0,
     filter: (r) => {
       if (r.ts < since) return false;
-      if (!ch) return true;
-      if (ch === 'dumate') return r.channel === 'dumate' || !r.channel;
-      return r.channel === ch;
+      return CH.belongs(r, ch);
     },
   });
   return rows;
-}
-
-/** 通道归属：无 channel 字段时，按当前筛选归入搭子；查看全部时归入未标注 */
-function effChannel(r, ch) {
-  return r.channel || (ch === 'dumate' ? 'dumate' : 'untagged');
 }
 
 // 把一组请求聚合成一行统计
@@ -116,9 +111,9 @@ const routes = [
     path: '/overview',
     handler: async ({ res, req }) => {
       const days = clampInt((req.url.match(/[?&]days=(\d+)/) || [])[1], 30, 1, 90);
-      // 通道筛选：dumate / qwenwork；缺省或未知值 = 全部通道
+      // 通道筛选：dumate / qwenwork / traework；缺省或未知值 = 全部通道
       const chRaw = decodeURIComponent((req.url.match(/[?&]channel=([^&]*)/) || [])[1] || '');
-      const ch = chRaw === 'dumate' || chRaw === 'qwenwork' ? chRaw : '';
+      const ch = normalize(chRaw);
       const rows = loadRows(days, ch);
       const today = dayKey(Date.now());
       const todayRows = rows.filter((r) => dayKey(r.ts) === today);
@@ -203,11 +198,11 @@ const routes = [
       // 按通道聚合。关键点：**channel 字段上线前的历史记录归入「未标注」**，
       // 不并入任一通道——默认成 dumate 就是在编数据，会让搭子的历史数字
       // 凭空变大，而用户无从察觉。
-      const CH_LABEL = { dumate: '百度搭子', qwenwork: '千问办公' };
+      const CH_LABEL = { ...LABELS, untagged: '未标注' };
       const chMap = {};
       for (const r of rows) {
         const id = effChannel(r, ch);
-        if (!chMap[id]) chMap[id] = { id, label: CH_LABEL[id] || (id === 'untagged' ? '未标注' : id), requests: 0, total_tokens: 0, failed: 0, avg_ms: 0, _msSum: 0 };
+        if (!chMap[id]) chMap[id] = { id, label: CH_LABEL[id] || id, requests: 0, total_tokens: 0, failed: 0, avg_ms: 0, _msSum: 0 };
         const c = chMap[id];
         c.requests++;
         c.total_tokens += r.total_tokens || 0;
@@ -249,9 +244,13 @@ const routes = [
         // 各账号的积分消耗，供「按账号」视图。仅搭子有上游账单
         points_by_account: pointsAll.accounts,
         // 说明扣费口径，避免与本地 token 统计混淆
+        // 说明扣费口径，避免与本地 token 统计混淆。
+        // 直连通道（千问 / TRAE）的账都在各自的池子里，不查搭子的账单。
         note: ch === 'qwenwork'
           ? '千问办公的积分在自己的池子里（见仪表盘的千问积分卡），这里只统计经网关转发的 Token 与请求数。'
-          : 'Token 与请求数来自本地网关日志；积分消耗来自上游计费记录，两者口径不同（不同模型单价不同）。',
+          : ch === 'traework'
+            ? 'TRAE Work 的积分在自己的池子里（见仪表盘的 TRAE 额度卡），这里只统计经网关转发的 Token 与请求数。'
+            : 'Token 与请求数来自本地网关日志；积分消耗来自上游计费记录，两者口径不同（不同模型单价不同）。',
       });
     },
   },

@@ -152,10 +152,27 @@ const routes = [
           try {
             const tw = require('../../traework');
             const st = tw.status();
+            const authStore = require('../../traework/auth');
+            // TRAE 是多账号自持凭证：报账号数与最早到期的 token，
+            // 顶栏徽标与仪表盘据此提示「要不要重新登录」。
+            const usable = authStore.findUsable();
+            const soonest = usable.reduce((m, a) => {
+              const t = a.expiresAt || Infinity;
+              return t < m ? t : m;
+            }, Infinity);
+            const refreshSoonest = usable.reduce((m, a) => {
+              const t = a.refreshExpiresAt || Infinity;
+              return t < m ? t : m;
+            }, Infinity);
             out.traework = {
               id: 'traework', label: 'TRAE Work', kind: 'direct',
               ready: st.ready, loggedIn: !!st.loggedIn,
-              accounts: st.accounts || 0, error: st.error || '',
+              accounts: st.accounts || 0,
+              account: usable[0] ? (usable[0].nickname || usable[0].uid || `账号 ${usable[0].id}`) : '',
+              tokenExpiresAt: Number.isFinite(soonest) ? new Date(soonest).toISOString() : null,
+              refreshExpiresAt: Number.isFinite(refreshSoonest) ? new Date(refreshSoonest).toISOString() : null,
+              refreshExpired: Number.isFinite(refreshSoonest) ? Date.now() >= refreshSoonest : false,
+              error: st.error || '',
             };
           } catch (e) {
             out.traework = { id: 'traework', label: 'TRAE Work', kind: 'direct', ready: false, error: e.message };
