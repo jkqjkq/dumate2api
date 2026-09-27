@@ -121,6 +121,19 @@ cd web && npm run build    # 前端构建（vue-tsc 类型检查 + vite build �
 
 `start.bat` / `stop.bat` / `restart.bat` 是 Windows 生命周期脚本。`stop.bat` 用 `taskkill /T` 杀进程树（后端是网关的子进程），**不动 DuMate GUI 和 cc-switch**，可重复执行；`stop.bat nopause` 供 `restart.bat` 内部调用。
 
+**`.bat` 文件必须保持纯 ASCII——中文提示语会让脚本随机执行乱码片段。**
+cmd.exe 按**字节偏移**读取批处理文件；在 `chcp 65001`（UTF-8）下多字节字符
+会让偏移失步，某一行从错误位置被读出、尾部被当成命令执行。**且非确定性**：
+同一个文件、同一条命令，实测 3 次里 1 次失败 2 次成功。真实损害是
+`echo  供 cc-switch / Codex / Claude Code 使用` 的残片 `Code 使用` 被当命令执行，
+把 `claude` 当可执行文件启动，**凭空派生出游离的 claude.exe 会话**（表现为
+多出几个空终端窗口）。
+
+`chcp` 解决不了：代码页必须在文件被解析之前设好，而 `chcp` 那行本身就是被
+解析的文件的一部分。所以规则是**文件内容纯 ASCII**，不是「设对代码页」。
+脚本里 `chcp 65001` 仍要保留——它让 **node 子进程**的中文日志正常显示，
+与脚本自身文本是两回事。新增脚本请照 `start.bat` / `stop.bat` 的写法。
+
 **改完后端代码必须重启对应的管理端/网关进程。** 后端路由在进程启动时 `require` 一次，不会热更新；而 `web/dist` 是每次请求读磁盘。这个不对称会造成「前端看着是新的、接口返回旧数据」的假象——排查时先看进程启动时间（`netstat -ano | grep ":9083"` 找 pid，再查 `StartTime`），不要先怀疑构建。
 
 重启命令（与 `start-dev.bat` 参数一致）：
