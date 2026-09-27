@@ -85,6 +85,9 @@ const routes = [
           checkinCredits: st.ok ? st.credits : null,
           checkinExtra: st.ok ? st.extraCredits : null,
           lastCheckin: a.lastCheckin || null,
+          // 额度包明细（含各自到期时间）。仪表盘据此回答「哪些积分快过期了」
+          // ——签到奖励是一批批到期的，只给总额答不出这个问题。
+          packs: u.ok ? (u.packs || []) : [],
           // error 只表示「这次状态查询失败」——别把上次签到尝试的失败消息
           // 塞进来。两者是不同的东西：前者是「查不到」，后者是「查到了，
           // 但上一次签到被上游拒了」。混在一起时前端只能显示「查询失败」，
@@ -93,7 +96,48 @@ const routes = [
           error: st.ok ? '' : st.error,
         });
       }
-      return sendJSON(res, 200, { count: rows.length, rows });
+      // 顶部指标卡用。**在这里算而不是 /dashboard**：到期数据要打上游才有，
+      // 而 /dashboard 刻意不打（见它的注释），所以汇总跟着 /credits 走。
+      const nowMs = Date.now();
+      const SOON_MS = 7 * 86400000;
+      const expiring = [];
+      for (const r of rows) {
+        for (const p of (r.packs || [])) {
+          // 只算「还有剩余」且「7 天内到期」的包——已用完的包到期不构成损失，
+          // 报出来只会制造噪音
+          if (!p.expireAt || !(p.remain > 0)) continue;
+          if (p.expireAt - nowMs > SOON_MS) continue;
+          expiring.push({
+            account: r.nickname || r.uid || `账号 ${r.id}`,
+            accountId: r.id,
+            name: p.name,
+            remain: p.remain,
+            limit: p.limit,
+            expireAt: p.expireAt,
+            daysLeft: Math.max(0, Math.ceil((p.expireAt - nowMs) / 86400000)),
+          });
+        }
+      }
+      expiring.sort((a, b) => a.expireAt - b.expireAt);
+      // 额度取不到的账号单独计数：它既不算「有效」也不该被当成 0 额度
+      const known = rows.filter((r) => r.remain !== null || r.limit !== null);
+      return sendJSON(res, 200, {
+        count: rows.length,
+        rows,
+        summary: {
+          total: rows.length,
+          // 凭证可用性口径与千问一致（rows 都来自 findUsable，所以这里
+          // 等价于「查询没报错」）。留字段是为了两边形状一致。
+          valid: rows.filter((r) => !r.error).length,
+          checkedIn: rows.filter((r) => r.checkedIn).length,
+          unknown: rows.length - known.length,
+          remainTotal: Number(known.reduce((s, r) => s + (r.remain || 0), 0).toFixed(2)),
+          limitTotal: Number(known.reduce((s, r) => s + (r.limit || 0), 0).toFixed(2)),
+        },
+        // 7 天内到期且还有剩余的额度包。空数组 = 无风险，界面据此显示「暂无」
+        expiring,
+        expiringPoints: Number(expiring.reduce((s, x) => s + x.remain, 0).toFixed(4)),
+      });
     },
   },
   {

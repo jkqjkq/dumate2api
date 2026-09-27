@@ -228,9 +228,15 @@ const routes = [
       const all = authStore.list();
       for (const a of all) {
         let wallets = null;
+        // 即将过期的积分（上游 expiring_soon 段）。与 expiring 不同——
+        // 那个是每日额度重置（每天都有，不是损失），这个才是真会作废的。
+        let expiringSoon = { count: 0, total: 0, wallets: [] };
         try {
           const w = await walletsOf(authStore.get(a.id));
-          if (w && w.ok) wallets = { daily: w.daily, monthly: w.monthly, longterm: w.longterm, total: w.total };
+          if (w && w.ok) {
+            wallets = { daily: w.daily, monthly: w.monthly, longterm: w.longterm, total: w.total };
+            if (w.expiringSoon) expiringSoon = w.expiringSoon;
+          }
         } catch (e) { /* 余额取不到不影响账号信息 */ }
         accounts.push({
           id: String(a.id),
@@ -251,6 +257,7 @@ const routes = [
           // 读上面查到的 wallets，不是 a.wallets——a 是 list() 的脱敏视图，
           // 它没有余额字段，写成 a.wallets 会让这里恒为 null
           points: wallets ? wallets.total : null,
+          expiringSoon,
           tokenExpiresAt: a.expiresAt || null,
           refreshExpiresAt: a.refreshExpiresAt || null,
           refreshExpired: !!(a.refreshExpiresAt && Date.now() >= a.refreshExpiresAt),
@@ -265,6 +272,28 @@ const routes = [
         modeNote: '千问办公的凭证由本项目自行 device flow 换取并保存（data/qwenwork-accounts.json），可多账号并存、可增删；换账号不需要打开千问客户端。',
         count: accounts.length,
         accounts,
+        // 顶部指标卡用。口径与搭子那边对齐（账号总数 / 有效期内 / 即将过期 /
+        // 积分余额），让切通道时读到的是一回事。
+        summary: (() => {
+          const enabled = accounts.filter((a) => a.enabled);
+          // 「有效期内」= 凭证可用（enabled 且未 refreshExpired）。
+          // 千问没有订阅到期日这个概念（免费版无 next_due_date），
+          // 所以这里用凭证可用性而不是搭子的「会员剩余天数」。
+          const valid = enabled.filter((a) => a.usable).length;
+          const soon = accounts.filter((a) => (a.expiringSoon && a.expiringSoon.count > 0));
+          return {
+            total: accounts.length,
+            enabled: enabled.length,
+            disabled: accounts.length - enabled.length,
+            valid,
+            expiringSoon: soon.length,
+            // 即将过期积分的**总量**（不是账号数）——用户关心的是「有多少积分
+            // 会作废」，账号数只是它的来源分布
+            expiringSoonPoints: Number(soon
+              .reduce((s, a) => s + (a.expiringSoon.total || 0), 0).toFixed(4)),
+            pointsTotal: accounts.reduce((s, a) => (a.points == null ? s : s + a.points), 0),
+          };
+        })(),
         error: accounts.length ? '' : (d.error || NO_ACCOUNT),
       });
     },

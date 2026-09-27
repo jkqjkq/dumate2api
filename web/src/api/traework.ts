@@ -49,6 +49,19 @@ export interface TraeworkStatus {
   rows: TraeworkAccount[]
 }
 
+/** 一个额度包（含各自到期时间）。签到奖励是一批批到期的 */
+export interface TraeworkPack {
+  name: string
+  /** 该包面额。取不到为 null——补 0 会被读成「这个包是空的」 */
+  limit: number | null
+  /** 该包**已消耗**（上游字段叫 credits_amount，不是剩余） */
+  used: number | null
+  /** 剩余 = limit − used。面额缺失时推不出来，为 null */
+  remain: number | null
+  expireAt: number | null
+  status: number | null
+}
+
 export interface TraeworkCreditRow {
   id: number
   nickname: string
@@ -65,7 +78,31 @@ export interface TraeworkCreditRow {
   /** 签到额外赠送，如连续签到奖励 */
   checkinExtra: number | null
   lastCheckin: number | null
+  /** 额度包明细（含到期时间），按到期时间升序 */
+  packs: TraeworkPack[]
   error: string
+}
+
+/** 即将过期的一个额度包（7 天内到期且还有剩余） */
+export interface TraeworkExpiring {
+  account: string
+  accountId: number
+  name: string
+  remain: number
+  limit: number | null
+  expireAt: number
+  daysLeft: number
+}
+
+/** /traework/credits 的汇总（顶部指标卡用） */
+export interface TraeworkCreditsSummary {
+  total: number
+  valid: number
+  checkedIn: number
+  /** 额度取不到的账号数——既不算有效，也不该被当成 0 额度 */
+  unknown: number
+  remainTotal: number
+  limitTotal: number
 }
 
 /** 一个 TRAE Work 模型（上游下发，含消耗倍率） */
@@ -185,7 +222,14 @@ export const traeworkApi = {
       rateNote: string
     }>(`/traework/models${qs}`)
   },
-  credits: () => client.get<{ count: number; rows: TraeworkCreditRow[] }>('/traework/credits'),
+  credits: () => client.get<{
+    count: number
+    rows: TraeworkCreditRow[]
+    summary: TraeworkCreditsSummary
+    /** 7 天内到期且还有剩余的额度包，按到期时间升序。空数组 = 无风险 */
+    expiring: TraeworkExpiring[]
+    expiringPoints: number
+  }>('/traework/credits'),
   checkin: (id?: number) => client.post('/traework/checkin', id ? { id } : {}),
   loginUrl: () => client.post<{ ok: boolean; url: string; deviceId: string; machineId: string; hint: string }>('/traework/login/url'),
   loginCallback: (payload: { callback: string; deviceId: string; machineId: string }) =>

@@ -40,7 +40,17 @@ export interface QwCredits {
   calibrated: boolean
   /** 今日全部消耗 = 上限 − 余额（含客户端/网页里的对话） */
   freeUsed: number | null
-  expiring: Array<{ balance: number; valid_to: string }>
+  /**
+   * 最近到期的钱包。**注意这不是「积分要作废」**：daily 池每天 00:00 重置，
+   * 所以 valid_to 就是明天的重置时刻——每天都「即将到期」，不是风险。
+   * kind='reset' 标出这一点，界面不要把它渲染成风险。
+   */
+  expiring: Array<{ balance: number; valid_to: string; kind?: 'reset' | 'expire' }>
+  /**
+   * 上游自己给的「即将过期」列表——**这才是会作废的那部分**（付费积分
+   * 按有效期，过期即消失）。count 为 0 表示无风险。
+   */
+  expiringSoon: { count: number; total: number; wallets: Array<{ balance: number; valid_to: string }> }
   fetchedAt: number
   /**
    * 今日消耗。**仅统计经本网关的请求**——客户端/网页里的对话不经网关，
@@ -153,6 +163,22 @@ export interface QwAccount {
   /** refresh token 尾 6 位，供人工核对是哪个账号。全量不外传 */
   refreshTail: string
   wallets: { daily: number; monthly: number; longterm: number; total: number } | null
+  /** 该账号即将过期的积分（上游 expiring_soon）。count=0 表示无风险 */
+  expiringSoon: { count: number; total: number; wallets: Array<{ balance: number; valid_to: string }> }
+}
+
+/** /qwenwork/accounts 的汇总（顶部指标卡用，口径与搭子对齐） */
+export interface QwAccountsSummary {
+  total: number
+  enabled: number
+  disabled: number
+  /** 有效期内 = 凭证可用（enabled 且未 refreshExpired） */
+  valid: number
+  /** 有即将过期积分的**账号数** */
+  expiringSoon: number
+  /** 即将过期积分的**总量**——用户关心的是会作废多少积分 */
+  expiringSoonPoints: number
+  pointsTotal: number
 }
 
 /** device flow 登录：一次登录会话 */
@@ -200,6 +226,8 @@ export const qwenworkApi = {
     modeNote: string
     count: number
     accounts: QwAccount[]
+    /** 顶部指标卡用（账号总数 / 有效期内 / 即将过期 / 积分余额） */
+    summary: QwAccountsSummary
     error: string
   }>('/qwenwork/accounts'),
   // ---- 以下为多账号后的写接口 ----

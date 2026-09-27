@@ -13,23 +13,62 @@
 
     <!-- ============ TRAE Work：额度 + 签到 + 账号，与千问三池不同 ============ -->
     <template v-if="isTw">
+      <!-- 顶部指标卡：口径与搭子/千问对齐（账号总数 / 有效期内 / 即将过期 /
+           积分余额）。各通道独有的账（TRAE 的签到、千问的三池）放在下面的
+           专有卡片里，不塞进这一排，否则切通道时这排数字含义会变。 -->
       <a-row :gutter="[16, 16]">
-        <a-col :span="6">
+        <a-col :span="5">
           <a-card :bordered="false" class="h-full">
-            <a-statistic title="剩余额度" :value="twTotals.remain ?? '—'" />
+            <a-statistic title="账号总数" :value="twSummary?.total ?? '—'">
+              <template #suffix><span class="text-sm text-slate-400">个</span></template>
+            </a-statistic>
             <div class="text-xs text-slate-500 mt-2">
-              <template v-if="twTotals.limit">上限合计 {{ twTotals.limit.toLocaleString('zh-CN') }}</template>
+              <template v-if="twSummary">今日已签 {{ twSummary.checkedIn }} 个</template>
+              <span v-else>—</span>
+            </div>
+          </a-card>
+        </a-col>
+        <a-col :span="5">
+          <a-card :bordered="false" class="h-full">
+            <a-statistic title="有效期内" :value="twSummary?.valid ?? '—'" value-style="color:#34d399">
+              <template #suffix><span class="text-sm text-slate-400">个</span></template>
+            </a-statistic>
+            <div class="text-xs text-slate-500 mt-2">
+              <template v-if="twSummary">
+                <template v-if="twSummary.unknown">额度查询失败 {{ twSummary.unknown }} 个</template>
+                <template v-else>凭证可用</template>
+              </template>
+              <span v-else>—</span>
+            </div>
+          </a-card>
+        </a-col>
+        <a-col :span="5">
+          <a-card :bordered="false" class="h-full">
+            <a-statistic
+              title="即将过期积分"
+              :value="twExpiringPoints"
+              :precision="2"
+              :value-style="twExpiringPoints > 0 ? 'color:#fbbf24' : ''"
+            />
+            <div class="text-xs text-slate-500 mt-2">
+              <template v-if="twExpiring.length">
+                {{ twExpiring.length }} 个额度包 7 天内到期
+              </template>
+              <template v-else-if="twCreditsLoaded">7 天内无到期积分</template>
+              <span v-else>—</span>
+            </div>
+          </a-card>
+        </a-col>
+        <a-col :span="5">
+          <a-card :bordered="false" class="h-full">
+            <a-statistic title="额度余额" :value="twSummary?.remainTotal ?? '—'" :precision="2" />
+            <div class="text-xs text-slate-500 mt-2">
+              <template v-if="twSummary?.limitTotal">上限合计 {{ fmt(twSummary.limitTotal) }}</template>
               <span v-else>上游未给出额度上限</span>
             </div>
           </a-card>
         </a-col>
-        <a-col :span="6">
-          <a-card :bordered="false" class="h-full">
-            <a-statistic title="今日已签到" :value="`${twTotals.checked} / ${twRows.length}`" />
-            <div class="text-xs text-slate-500 mt-2">签到每日一次，幂等</div>
-          </a-card>
-        </a-col>
-        <a-col :span="6">
+        <a-col :span="4">
           <a-card :bordered="false" class="h-full">
             <a-statistic title="今日请求" :value="usage?.cards.today.requests ?? '—'" value-style="color:#22d3ee" />
             <div class="text-xs text-slate-500 mt-2">
@@ -38,19 +77,50 @@
             </div>
           </a-card>
         </a-col>
-        <a-col :span="6">
-          <a-card :bordered="false" class="h-full">
-            <a-statistic
-              title="通道状态"
-              :value="twInfo?.ready ? '就绪' : '不可用'"
-              :value-style="twInfo?.ready ? 'color:#34d399' : 'color:#f87171'"
-            />
-            <div class="text-xs text-slate-500 mt-2">
-              {{ twInfo?.ready ? `可用账号 ${twInfo.accounts ?? 0} 个` : (twInfo?.error || '—') }}
-            </div>
-          </a-card>
-        </a-col>
       </a-row>
+
+      <!-- 即将过期的积分明细。只在真有风险时出现——空的时候整块不显示，
+           免得每次进仪表盘都看到一张「暂无」的卡。 -->
+      <a-card
+        v-if="twExpiring.length"
+        title="即将过期的积分"
+        :bordered="false"
+        class="mt-4"
+      >
+        <template #extra>
+          <span class="text-xs text-slate-400">7 天内到期 · 合计 {{ fmt(twExpiringPoints) }}</span>
+        </template>
+        <a-table
+          size="small"
+          :pagination="false"
+          :data-source="twExpiring"
+          :columns="expiringColumns"
+          row-key="key"
+        >
+          <template #bodyCell="{ column, record }">
+            <template v-if="column.key === 'account'">
+              <span class="text-xs">{{ record.account }}</span>
+            </template>
+            <template v-else-if="column.key === 'name'">
+              <a-tag :color="record.daysLeft <= 3 ? 'red' : 'orange'">{{ record.name }}</a-tag>
+            </template>
+            <template v-else-if="column.key === 'remain'">
+              <span class="font-medium text-amber-500">{{ fmt(record.remain) }}</span>
+              <span v-if="record.limit" class="text-xs text-slate-400 ml-1">/ {{ fmt(record.limit) }}</span>
+            </template>
+            <template v-else-if="column.key === 'expireAt'">
+              <span class="text-xs">{{ new Date(record.expireAt).toLocaleString('zh-CN', { hour12: false }) }}</span>
+            </template>
+            <template v-else-if="column.key === 'daysLeft'">
+              <a-tag :color="record.daysLeft <= 3 ? 'red' : 'orange'">还剩 {{ record.daysLeft }} 天</a-tag>
+            </template>
+          </template>
+        </a-table>
+        <div class="text-xs text-slate-400 mt-2">
+          这些积分包到期即作废（签到奖励与月度赠送按各自有效期，不累积）。
+          已用完的包不计入——到期不构成损失。
+        </div>
+      </a-card>
 
       <a-row :gutter="[16, 16]" class="mt-4">
         <a-col :span="17">
@@ -231,6 +301,119 @@
     <!-- ============ 千问办公：积分卡片。它是另一套账——不消耗搭子积分、不进账号池，
          所以整块替换而不是与搭子的指标卡混排。 ============ -->
     <template v-else-if="isQw">
+      <!-- 顶部指标卡：口径与搭子/TRAE 对齐（账号总数 / 有效期内 / 即将过期 /
+           积分余额）。千问独有的三池放在下面，不塞进这一排——否则切通道时
+           这排数字的含义会变。 -->
+      <a-row :gutter="[16, 16]">
+        <a-col :span="5">
+          <a-card :bordered="false" class="h-full">
+            <a-statistic title="账号总数" :value="qwSummary?.total ?? '—'">
+              <template #suffix><span class="text-sm text-slate-400">个</span></template>
+            </a-statistic>
+            <div class="text-xs text-slate-500 mt-2">
+              <template v-if="qwSummary">
+                启用 {{ qwSummary.enabled }} · 停用 {{ qwSummary.disabled }}
+              </template>
+              <span v-else>—</span>
+            </div>
+          </a-card>
+        </a-col>
+        <a-col :span="5">
+          <a-card :bordered="false" class="h-full">
+            <a-statistic title="有效期内" :value="qwSummary?.valid ?? '—'" value-style="color:#34d399">
+              <template #suffix><span class="text-sm text-slate-400">个</span></template>
+            </a-statistic>
+            <div class="text-xs text-slate-500 mt-2">
+              <!-- 千问没有订阅到期日（免费版无 next_due_date），所以这里的
+                   「有效期内」用凭证可用性判定，并在文案上说清与搭子的差别 -->
+              <template v-if="qwSummary">凭证可用</template>
+              <span v-else>—</span>
+            </div>
+          </a-card>
+        </a-col>
+        <a-col :span="5">
+          <a-card :bordered="false" class="h-full">
+            <a-statistic
+              title="即将过期积分"
+              :value="qwSummary?.expiringSoonPoints ?? '—'"
+              :precision="4"
+              :value-style="(qwSummary?.expiringSoonPoints ?? 0) > 0 ? 'color:#fbbf24' : ''"
+            />
+            <div class="text-xs text-slate-500 mt-2">
+              <template v-if="qwSummary?.expiringSoon">
+                {{ qwSummary.expiringSoon }} 个账号有到期积分
+              </template>
+              <template v-else-if="qwSummary">暂无即将过期</template>
+              <span v-else>—</span>
+            </div>
+          </a-card>
+        </a-col>
+        <a-col :span="5">
+          <a-card :bordered="false" class="h-full">
+            <a-statistic title="积分余额" :value="qwSummary?.pointsTotal ?? '—'" :precision="2" />
+            <div class="text-xs text-slate-500 mt-2">
+              <template v-if="qwSummary">{{ qwSummary.total }} 个账号合计</template>
+              <span v-else>—</span>
+            </div>
+          </a-card>
+        </a-col>
+        <a-col :span="4">
+          <a-card :bordered="false" class="h-full">
+            <a-statistic title="今日请求" :value="usage?.cards.today.requests ?? '—'" value-style="color:#22d3ee" />
+            <div class="text-xs text-slate-500 mt-2">
+              <template v-if="usage">{{ compact(usage.cards.today.tokens) }} Token</template>
+              <span v-else>—</span>
+            </div>
+          </a-card>
+        </a-col>
+      </a-row>
+
+      <!-- 即将过期的积分明细。只在真有风险时出现——空的时候不显示，
+           免得每次进仪表盘都看到一张「暂无」的卡。
+           注意**不要用 qw.expiring** 渲染这里：那是每日额度的重置时刻
+           （daily 池每天 00:00 归位），每天都「即将到期」但不是损失。 -->
+      <a-card
+        v-if="qwExpiringRows.length"
+        title="即将过期的积分"
+        :bordered="false"
+        class="mt-4"
+      >
+        <template #extra>
+          <span class="text-xs text-slate-400">
+            {{ qwExpiringRows.length }} 笔 · 合计 {{ fmtQw(qwSummary?.expiringSoonPoints ?? 0) }}
+          </span>
+        </template>
+        <a-table
+          size="small"
+          :pagination="false"
+          :data-source="qwExpiringRows"
+          :columns="expiringColumns"
+          row-key="key"
+        >
+          <template #bodyCell="{ column, record }">
+            <template v-if="column.key === 'account'">
+              <span class="text-xs">{{ record.account }}</span>
+            </template>
+            <template v-else-if="column.key === 'name'">
+              <a-tag :color="record.daysLeft <= 3 ? 'red' : 'orange'">{{ record.name }}</a-tag>
+            </template>
+            <template v-else-if="column.key === 'remain'">
+              <span class="font-medium text-amber-500">{{ fmtQw(record.remain) }}</span>
+            </template>
+            <template v-else-if="column.key === 'expireAt'">
+              <span class="text-xs">{{ new Date(record.expireAt).toLocaleString('zh-CN', { hour12: false }) }}</span>
+            </template>
+            <template v-else-if="column.key === 'daysLeft'">
+              <a-tag :color="record.daysLeft <= 3 ? 'red' : 'orange'">还剩 {{ record.daysLeft }} 天</a-tag>
+            </template>
+          </template>
+        </a-table>
+        <div class="text-xs text-slate-400 mt-2">
+          这些是上游标记「即将过期」的付费积分，到期即作废。
+          每日免费额度不在此列——它每天 00:00 重置，不是损失。
+        </div>
+      </a-card>
+
       <!-- 三个池子平级展示：月度与长期性质不同（订阅套餐 vs 充值赠送），
            不能合并成一张「付费额度」卡。 -->
       <a-row :gutter="[16, 16]">
@@ -695,10 +878,11 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import PageHeader from '@/components/PageHeader.vue'
 import TodayUsageCard from '@/components/TodayUsageCard.vue'
 import { channelStore, isTraework, isQwenwork } from '@/stores/channel'
-import { qwenworkApi, type QwCredits, type QwDailyRow, type QwAccount, type QwCreditRecord } from '@/api/qwenwork'
+import { qwenworkApi, type QwCredits, type QwDailyRow, type QwAccount, type QwCreditRecord, type QwAccountsSummary } from '@/api/qwenwork'
 import { traeworkApi } from '@/api/traework'
 import type {
   TraeworkCreditRow, TraeworkDashboard, TraeworkCreditRecord, TraeworkDashAccount,
+  TraeworkCreditsSummary, TraeworkExpiring,
 } from '@/api/traework'
 import client from '@/api/client'
 import type { SystemStatus } from '@/api/system'
@@ -760,25 +944,64 @@ const usage = ref<UsageOverview | null>(null)
 // 账号健康快照 + 今日积分明细。dashboard 走本地数据（不打上游），
 // records 是逐笔归因——两者都是仪表盘每次进入都要拉的数据
 const twDash = ref<TraeworkDashboard | null>(null)
+// /credits 的汇总与到期包。**到期数据只能从这里来**——它要打上游，
+// 而 /dashboard 刻意不打（见后端注释），所以汇总跟着 /credits 走。
+const twSummary = ref<TraeworkCreditsSummary | null>(null)
+const twExpiring = ref<TraeworkExpiring[]>([])
+const twExpiringPoints = ref(0)
+// 区分「查过了没有」与「还没查」：前者显示「7 天内无到期积分」，
+// 后者显示 —。不然没数据时会被读成「没有风险」。
+const twCreditsLoaded = ref(false)
+
+// 即将过期表格的列。TRAE 与千问共用——两边都是「哪个账号的哪笔积分何时作废」，
+// 形状一致，各写一份必然漂移。
+const expiringColumns = [
+  { title: '账号', key: 'account', width: '24%' },
+  { title: '来源', key: 'name', width: '18%' },
+  { title: '剩余', key: 'remain', width: '20%' },
+  { title: '到期时间', key: 'expireAt', width: '24%' },
+  { title: '剩余天数', key: 'daysLeft', width: '14%' },
+]
 const twRecords = ref<TraeworkCreditRecord[]>([])
 const twWindow = ref<{ cost: number; requests: number; exact: number }>({ cost: 0, requests: 0, exact: 0 })
 const twAccounts = computed(() => twDash.value?.accounts || [])
 const twToday = computed(() => twDash.value?.today || null)
-const twTotals = computed(() => {
-  let remain: number | null = null
-  let limit: number | null = null
-  let checked = 0
-  for (const r of twRows.value) {
-    if (r.remain != null) remain = (remain ?? 0) + r.remain
-    if (r.limit != null) limit = (limit ?? 0) + r.limit
-    if (r.checkedIn) checked++
-  }
-  return { remain, limit, checked }
-})
+// 顶部的汇总与到期数据来自 /credits 的 summary/expiring（见后端注释：
+// 到期数据要打上游，而 /dashboard 刻意不打）。原来的 twTotals 是前端
+// 自己把 rows 加起来算的——现在后端直接给，两边口径统一由后端保证。
 const qw = ref<QwCredits | null>(null)
 const qwDaily = ref<QwDailyRow[]>([])
 // 账号健康快照用——千问现在也是多账号池，每个账号一张卡
 const qwAccounts = ref<QwAccount[]>([])
+// 顶部指标卡（账号总数 / 有效期内 / 即将过期 / 积分余额）
+const qwSummary = ref<QwAccountsSummary | null>(null)
+// 即将过期的积分，摊平成表格行。来源是各账号的 expiringSoon——
+// **不是** qw.expiring（那是每日额度重置，每天都「即将到期」但不是损失）。
+const qwExpiringRows = computed(() => {
+  const out: Array<{
+    key: string; account: string; name: string; remain: number
+    limit: number | null; expireAt: number; daysLeft: number
+  }> = []
+  const now = Date.now()
+  for (const a of qwAccounts.value) {
+    const es = a.expiringSoon
+    if (!es || !es.count) continue
+    for (const w of (es.wallets || [])) {
+      const t = Date.parse(w.valid_to || '')
+      if (!Number.isFinite(t)) continue
+      out.push({
+        key: `${a.id}-${w.valid_to}-${w.balance}`,
+        account: a.name || a.username || a.id,
+        name: '付费积分',
+        remain: w.balance,
+        limit: null,
+        expireAt: t,
+        daysLeft: Math.max(0, Math.ceil((t - now) / 86400000)),
+      })
+    }
+  }
+  return out.sort((x, y) => x.expireAt - y.expireAt)
+})
 // 今日积分明细：逐笔归因，按 req_id 与请求日志配对
 const qwRecords = ref<QwCreditRecord[]>([])
 const qwWindow = ref<{ free: number; paid: number; total: number; requests: number }>(
@@ -1042,6 +1265,7 @@ async function refreshQw() {
     qw.value = c.data
     qwDaily.value = d.data.rows
     qwAccounts.value = (a.data && a.data.accounts) || []
+    qwSummary.value = (a.data && a.data.summary) || null
     qwRecords.value = (rec.data && rec.data.rows) || []
     qwWindow.value = (rec.data && rec.data.window) || { free: 0, paid: 0, total: 0, requests: 0 }
     usage.value = u.data
@@ -1065,13 +1289,19 @@ async function refreshTw() {
   error.value = ''
   try {
     const [c, u, d, r] = await Promise.all([
-      traeworkApi.credits().catch(() => ({ data: { count: 0, rows: [] } })),
+      traeworkApi.credits().catch(() => ({
+        data: { count: 0, rows: [], summary: null, expiring: [], expiringPoints: 0 },
+      })),
       client.get(`/usage/overview?days=14&channel=traework`).catch(() => ({ data: null })),
       // 账号健康快照 + 今日消耗：本地数据，不打上游（见后端 /dashboard 注释）
       traeworkApi.dashboard().catch(() => ({ data: null })),
       traeworkApi.creditRecords(200).catch(() => ({ data: { rows: [], window: { cost: 0, requests: 0, exact: 0 } } })),
     ])
     twRows.value = c.data.rows || []
+    twSummary.value = c.data.summary || null
+    twExpiring.value = c.data.expiring || []
+    twExpiringPoints.value = c.data.expiringPoints || 0
+    twCreditsLoaded.value = true
     usage.value = u.data
     twDash.value = d.data
     twRecords.value = (r.data && r.data.rows) || []
