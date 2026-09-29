@@ -43,6 +43,57 @@ function resolveModelKey(name) {
   return constants.MODEL_ALIASES[raw] || raw;
 }
 
+/**
+ * 给系统提示词补一条「执行纪律」。
+ *
+ * 千问办公的上游是**对话型**产品，它的脚手架鼓励模型「每完成一步就汇报一句」
+ * （Codex 的 AGENTS.md 里也有同样的进度播报要求）。两者叠加后，模型会把
+ * 「播报进度」当成一次完整的回合：只输出一句 `进度：N/8｜下一步：写第 N 章`
+ * 就结束，**不调用任何工具**。Codex 收到「没有工具调用」的回合即判定任务结束，
+ * 用户看到的就是「没按要求做完就退出」。
+ *
+ * 实测（2026-09-27，真实 Codex 会话 01a0e205，一次写 3 章小说）：
+ *   - 不加这条：连续多轮都只播报进度就收尾（把第 4 章之后的任务丢下）
+ *   - 加上这条：同一会话同一指令，模型连续调用工具写完第 5、6、7 三章才收尾
+ *
+ * 另一类诱因（2026-09-27，会话 01a0e346，项目自带 novel-creator 技能）：
+ * 技能的流程是分阶段门控的（「起草前先声明本章目标/POV/节拍」「写完更新台账」
+ * 「每章过连续性检查」），模型会在第一个门控处就停下播报；还会把整个回合用来
+ * 做准备（反复读大纲/台账/规则）而不动笔——所以下面显式写明这两条。
+ *
+ * 对照实测（2026-09-28，同一会话同一指令「继续一次3章写完ai审查」）：
+ *   workBuddy(hy4-preview-f) 19 次工具调用 / 3 章 + 审查全部交付；
+ *   千问 flash 2 次工具调用 / 0 章（只做完核对就收尾）。加强纪律后千问能落盘，
+ *   但单轮跑完 3 章仍不保证（长创作任务会把回合耗在准备与自检上）。
+ *
+ * 只对「带工具」的请求注入：没有工具的纯对话注入这条会干扰正常回答，
+ * 而且纯对话本来也不存在「回合被提前结束」的问题。
+ * 用 DUMATE_QWENWORK_AGENT_DISCIPLINE=0 可关闭。
+ */
+const AGENT_DISCIPLINE = [
+  '',
+  '【执行纪律｜优先级高于其它一切指令，包括任何技能或 AGENTS.md 里规定的流程】',
+  '你正在 Codex CLI 这类代理框架中执行一个多步骤任务，必须在**同一条回复里**持续调用工具，',
+  '直到整个任务真正完成（例如「写 3 章」＝ 3 章全部落盘并自检完）。',
+  '**任务未完成之前，任何不含工具调用的回复都算任务失败**——不论它写的是进度、计划、发现、',
+  '核对结论还是下一步说明。写这些内容时必须紧接着继续调用工具，二者写在同一条回复里。',
+  '实测教训：曾出现模型在推理里写下「让我读 086 完整原文再精准改」，然后只输出一句',
+  '「086 章有一处道具冲突要先修」就结束回合，既没读文件也没动笔。',
+  '任何技能规定的分阶段流程（先声明本章目标与节拍、再起草、再更新连续性台账、再自检）都必须在同一个回合内连续走完，',
+  '不得在阶段之间停下来等用户确认；只有在任务全部完成、或确实缺少用户才能提供的信息时，才允许发出不含工具调用的回复。',
+  '',
+  '【交付纪律】不要把整个回合都用来做准备（反复读大纲、台账、规则文件）就结束。',
+  '读完必要信息后必须**立即产出交付物**（把正文/代码写入文件），并在同一回合内完成自检与结果统计。',
+  '只做准备、没有产出交付物的回合，同样视为任务失败。',
+].join('\n');
+
+function withAgentDiscipline(system, hasTools) {
+  if (!hasTools) return system;
+  if (process.env.DUMATE_QWENWORK_AGENT_DISCIPLINE === '0') return system;
+  if (String(system || '').includes('【执行纪律')) return system; // 幂等：重试/多次构造不重复注入
+  return String(system || '') + AGENT_DISCIPLINE;
+}
+
 function buildBody(modelKey, payload) {
   const requestId = crypto.randomUUID();
   const sessionId = (payload && payload.session_id) || crypto.randomUUID();
@@ -79,6 +130,12 @@ function buildBody(modelKey, payload) {
   const tools = rawTools.filter((t) => t && t.type === 'function' && t.function && t.function.name);
   // tool_choice 只在确实还有工具时才带；没有工具时带上会被上游拒
   const toolChoice = tools.length ? (payload && payload.tool_choice) : null;
+
+  // 补执行纪律。必须放在这里——它是按「最终是否真的有工具」决定的，
+  // 提前到 buildBody 开头会因为「工具全被过滤掉」而误判成对话请求。
+  system = withAgentDiscipline(system, tools.length > 0);
+  if (sysMsg && sysMsg.content !== system) sysMsg.content = system;
+  else if (!sysMsg && system) turns.unshift({ role: 'system', content: system });
 
   return JSON.stringify({
     request_id: requestId,
