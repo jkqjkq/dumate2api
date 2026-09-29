@@ -52,11 +52,45 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 6. **`system` 必须留在 `messages` 里**。上游**不读顶层 `system` 字段**——原实现把 system 摘出来单独传，导致系统提示词（含 skills 定义、行为约束）全部丢失，表现为模型「随口答两句就停、不按要求做事」。顶层字段可以照旧带上做兼容，但权威来源是 messages。
 
 **千问的预算与上下文（实测值，别照抄搭子的）**：
-- 预算走 `resolveQwenMaxTokens`，下限 **16384**（`DUMATE_QWENWORK_MIN_MAX_TOKENS`）。搭子的 32768 对千问偏大，但 4096 又太小——实测 4096 时 reasoning 会把预算吃光，模型陷入反复推演后只吐一句话。
+- 预算走 `resolveQwenMaxTokens`，下限 **16384**（`DUMATE_QWENWORK_MIN_MAX_TOKENS`），**默认值 131072**（`DUMATE_QWENWORK_DEFAULT_MAX_TOKENS`，与搭子的 `DEFAULT_BUDGET=32768` 分开）。搭子的 32768 对千问偏大，但 4096 又太小——实测 4096 时 reasoning 会把预算吃光，模型陷入反复推演后只吐一句话。
+- **上游接受的 `max_tokens` 范围是 `[1, 131072]`**（实测 2026-09-27）：131072 通过，**131073 起一律 400**（`pro` / `flash` 边界一致）。**省略该字段不报错**，实测一次输出到 66807 token 才自然收尾（`finish=stop`）——说明上游自己的默认值远大于 66807。
+- 因此默认值直接取上游上限 131072：原来网关发 32768，**是网关自己把上限压低了**。代价实测过——Codex 不发 `max_output_tokens`，网关按默认值下发，实测「一次写 3 章」的单轮输出（≈8400 字正文 + 工具参数里又写一遍正文 + 两万多 token 推理）正好撞满 32768，上游报 `length`，断在工具参数中间那一章就丢了（实测断在 `@('第三章　第七户','',`）。取上限后网关不再是那个约束，与官方客户端行为一致（客户端自己也不带这个字段）。
 - 上下文上限 **~1,024,000 token**（1250K 汉字 = 1,022,745 token 通过；1262K 起 502，1300K 起 400）。`pro` 与 `flash` 边界一致。
 - **超限不是截断而是整轮失败**（400/502），所以客户端声明的 `model_context_window` 宁可小一点。
 - 输出侧 `max_tokens` 约束比搭子松：传 4000 实测能输出 7808，且自然收尾（`stop`）而非被截断。
 - 上游只有 `pro` / `flash` 两个模型，没有别的。
+
+**千问通道必须给带工具的请求注入「执行纪律」**（`src/qwenwork/chat.js` 的 `withAgentDiscipline`）。
+千问上游是**对话型**产品，其脚手架鼓励「每完成一步汇报一句」；Codex 的 `AGENTS.md` 里也有同样的进度播报要求。两者叠加后模型会把播报当成一次完整回合：只输出 `进度：N/8｜下一步：写第 N 章` 就结束，**不调用任何工具**——Codex 收到「无工具调用」的回合即判定任务完成并退出，用户看到的就是「没按要求做完就退出」。实测（2026-09-27，真实 Codex 会话 `01a0e205`，一次写 3 章小说）：
+
+- 不加纪律：连续多轮都只播报进度就收尾（把第 4 章之后的任务全丢下）；重放同一上下文 10 次有 2 次触发
+- 加了纪律：**同一会话同一指令**，模型连续调用工具写完第 5、6、7 章才收尾（对比：该会话此前每轮只调 1 次工具）
+
+只对「最终确实带工具」的请求注入（工具全被过滤掉的纯对话注入会干扰正常回答），且幂等。`DUMATE_QWENWORK_AGENT_DISCIPLINE=0` 关闭。离线验证：`node test/verify-qwen-discipline.js`。
+
+**第二类诱因是「项目自带的技能」**（2026-09-27 补，会话 `01a0e346` 实测）。
+sanguo 项目的 `novel-creator` 技能把写作拆成分阶段门控（「起草前先声明本章目标/POV/节拍」→「写完更新连续性台账」→「每章过连续性检查」，还写着「让用户审定基调后才继续」）。模型会在第一个门控处就停下播报，于是 `继续创作下3章内容` 变成「盘点项目 → 读 3 章 → 播报 20% → 结束」，0 章落盘。
+
+**根因不是纪律、也不是 agent 侧——是 `flash` 档位**（2026-09-28 对照实测，同一会话 `01a0e346`、同一指令「继续一次3章写完ai审查」、同一份 AGENTS.md 与技能）：
+
+| 上游 | 上游请求数 | 工具调用 | 写文件 | 产出 | 耗时 | reasoning 合计 |
+|---|---|---|---|---|---|---|
+| **搭子 `glm-5`**（8980） | 24 | 23 | 7 | **090-092 三章 + AI 审查 + 报告 + 台账** | **317s** | **172** |
+| **workBuddy `global:hy4-preview-f`**（7864） | 20 | 19 | 5 | **084-086 三章 + AI 审查 + 报告 + 台账** | 997s | — |
+| 千问 `qwen/pro`（9082） | 28 | 27 | 5 | **087-089 三章 + AI 审查 + 报告 + 台账** | 361s | 743 |
+| 千问 `qwen/flash` 原始纪律 | 3 | 2 | 0 | **0 章**，停在核对 | 78s | 2000-6400/轮 |
+| 千问 `qwen/flash` 加强纪律（技能流程+交付纪律） | 2 | 1 | 0 | 0 章 | 55s | 2000+/轮 |
+| 千问 `qwen/flash` 无条件纪律（任何无工具回复都算失败） | 3 | 2 | 0 | 0 章 | 66s | 2000+/轮 |
+
+**三个上游（搭子 glm-5 / workBuddy 前沿档 / 千问 pro）都完整跑通，只有 `flash` 三种纪律写法全失败**——所以这不是提示词能修的，是档位能力差异。`flash` 的失败形态很一致：推理很长（单轮 reasoning 2000~6400 token），只做「核对/确认」这类准备动作，然后把结论（「086 有一处道具冲突要先修」「核对 085/086 与貂蝉化名」）当作回合终点输出，**推理里写了「让我读 086 原文再精准改」却不发那个工具调用**。对照：搭子 glm-5 整轮 reasoning 只有 172 token、`pro` 743 token，预算全用在工具调用上。
+
+**结论：千问通道做重创作/长任务用 `pro`，不要用 `flash`**（`flash` 只适合轻量问答）。搭子是这批里最快也最省的（317s / 172 reasoning），适合作为长任务首选。这条与「纪律注入」无关，纪律本身仍然保留（它解决的是另一类「播报即收尾」，在 `01a0e205` 会话实测有效）。
+
+判定这类问题时要**分清「网关行为」与「模型行为」**：把出问题的那次请求（从会话日志重建 input + instructions）经网关重放，如果稳定调工具（本次 5/5、多轮循环 6 轮 × 3 次全正常），说明是概率性的模型行为而不是网关丢帧——**不要为了一个复现不出来的现象去改翻译层**。本次排查还顺带确认：sanguo 会话上下文其实只有 1.3~2.5 万 token（网关日志里 25 万那条属于另一个会话），所以与长上下文无关。
+
+**工具参数被截断必须报 `incomplete`，不能报 `completed`**（`src/responses.js` 的 `truncatedArguments`）。
+上游在 `finish_reason=length` 处会把 `arguments` 停在半句 JSON（实测 `{"cmd": "... @('第三章　第七户','',`，字符串都没闭合）。网关若当正常工具调用交给 Codex，Codex 会**执行一条语法残缺的命令**：命令必然失败，模型看到失败后往往只回一句「下一步：写入第 N 章」就结束回合。现在这种参数会被判成 incomplete，埋点带 `error=tool_arguments_truncated`。离线验证：`node test/verify-truncated-toolcall.js`。
+顺带修掉一个误报：`emptyButTruncated` 原来只排除 `stop`，把**纯工具调用轮次**（`finish_reason=tool_calls` + 正文 0，Codex 里大量存在）也算成了截断。
 
 **`channel` 字段是必须项**：`reqlog` 每条记录带 `channel`（`dumate` / `qwenwork`）。千问首帧实测 6.7s，与搭子混在同一均值里会让「平均首字延迟」无法归因。
 
@@ -73,6 +107,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 **TRAE 的签到是 HTTP 200 + body 里的 code**：被限流时返回
 `{"code":9074,"message":"当前参与用户太多，请稍后再试"}`。只看状态码会把这次
 当成成功，界面显示「签到成功」而额度没变，用户无从察觉——必须读 `code`。
+
+**签到结果必须报「到账差值」，不能只报总额**（`checkin.js` 的 `computeGained`）。
+上游 `claim` 只回 `{code:0, message:"success"}`，**从不告诉发了多少**；`status` 的
+`credits`（实测恒为 150）是「签到可得」的固定值，**不等于实际入账**。早先只报
+一个余额总额，用户看到「签到成功 + 4144.95」无从判断签到生效没有——实测
+`status.checked_in` 与 `usage_summary` 会不同步（status 说没签、usage 已含奖励），
+这时网关走「签到成功」分支而余额纹丝不动，被读成「显示的是旧积分」。
+现在签到前后各取一次 `usage.remain`，差值即实际到账，并把「前 → 后」一并报出。
+边界都如实给：差值为 **0** 说明奖励延迟入账（不粉饰成 null），为**负数**说明
+上游结算异常或并发消耗（不吞掉）。快照失败才退回 `null`——**不补 0**，0 会被
+读成「签到没发积分」。离线验证：`node test/verify-traework-gained.js`。
 
 **TRAE 的账与千问、搭子都不同，界面三套分开显示**：搭子靠上游账单 + 余额游标，
 千问是三个积分池，TRAE 是每个账号独立的一份 credits（签到领取）。
@@ -96,6 +141,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 | API Key | `data/keys.json` | 我们签发给调用方的，**只存 sha256** |
 
 **关键分界**：桌面端同一时刻只有一个账号可用，网页端可以管多个。所以「两个账号都有效」只在网页端成立——仪表盘的「账号状态」表（桌面）与「账号健康快照」（网页）是两套数据，**不要互相替代**。
+
+**网页账号的显示名一律走 `accounts.displayName()`，不要直接用 `a.name`**（2026-09-29 修）。`accounts.create()` 在用户没填名字时会写入占位名「账号 N」，而 `nickname` 早先**只在浏览器登录那条路径**（`/login/poll`）回填——手动粘贴 cookie 添加的账号走 `POST /web-accounts`，那条路径从不写 `nickname`。结果：这些账号的显示名永久停在「账号 1」，哪怕上游 `user/info` 明明返回了「张三」。用户报的「为什么显示账号 1 而不是真实用户名」就是这个。
+
+两半修法，缺一不可：
+
+1. **自愈回填**（`backfillNickname`，`admin/routes/accounts.js`）：任何触达上游的路径顺手补一次 `nickname`/`uid`，**幂等**（已有昵称直接返回，不打上游）。不用写迁移脚本，老账号会在下次进仪表盘时自动补上。
+2. **显示名解析**（`displayName`，`accounts.js`）：优先级 **用户填的名字 > 上游昵称 > 占位名**。关键是识别占位名 `^账号\s*\d+$` 并跳过——**只匹配这一种形态**，用户真想起名叫「账号 1 号机」时不该被覆盖。
+
+`list()` / `create()` / `update()` 返回的 `name` 字段**已被覆盖成显示名**（原始标签留在 `label`），这样列表页、请求日志、任务记录、仪表盘拿到的名字一致。**所有后端显示点都改用 `displayName()`**：`admin/routes/{accounts,usage,reqlogs,chatlab}.js`、`web-pool.js`、`web-gateway.js`、`fallback-web.js`、`task-runner.js`、`task-scheduler.js`。前端直接渲染 `a.name` 即可，**不要再写 `nickname || name` 兜底**——那会把优先级反过来（昵称压过用户填的名字）。
+
+注意 TRAE/千问账号是另一套存储（`traework/auth.js`、`qwenwork/auth.js`），它们的 `nickname || uid` 兜底是合法的，不要一起改。离线验证：`node test/verify-display-name.js`。
 
 **桌面凭证不可用时，搭子会自动回落到网页凭证池**（`src/fallback-web.js`）。
 不整体切到网页凭证的原因：桌面链路有三个网页链路没有的能力——`responses`
@@ -177,6 +233,16 @@ DUMATE2API_PORT=9082 node src/server.js
 另有两个一键脚本：`start-dev.bat`（同时起开发网关 9082 + 管理端 9083）、`start-web-gateway.bat`（起 9084）。
 
 **`node test/verify-channel.js` 是通道过滤的离线验证**：不依赖任何运行中的服务，直接复用管理端路由与 qwenwork 模块读落盘数据，跑 12 项断言（搭子/千问过滤、历史记录归属、积分 req_id 配对）。改完通道相关代码先跑它。
+
+另有两个同样离线的千问专项验证（都不需要起服务）：
+`node test/verify-qwen-discipline.js`（执行纪律的注入条件与幂等）、
+`node test/verify-truncated-toolcall.js`（工具参数截断判定 + 纯工具调用轮次不误报 incomplete）。
+
+另有一个 TRAE 专项离线验证（不需要起服务）：
+`node test/verify-traework-gained.js`（签到到账差值计算，含 0/负数/快照缺失三种边界）。
+
+另一个搭子专项离线验证（不需要起服务）：
+`node test/verify-display-name.js`（账号显示名解析：占位名识别、优先级、空值边界）。
 
 离线自测的完整流程（无需安装 DuMate）：两个终端分别跑 `npm start` → `npm test`。
 
@@ -292,6 +358,8 @@ Claude Code ── Anthropic ───────┼──→ 网关 :9080 ─�
 | `CB_QWENWORK_WASM` | 自动探测 | 直接指定 `qoder_auth_wasm_bg.wasm` 的完整路径 |
 | `DUMATE_QWENWORK_DAILY_CREDITS` | `100` | 千问每日免费额度的**配置兜底下限**（接口不返回上限，只作推断的下界） |
 | `DUMATE_QWENWORK_MIN_MAX_TOKENS` | `16384` | 千问输出预算下限（与搭子的 `DUMATE_MIN_MAX_TOKENS` 分开） |
+| `DUMATE_QWENWORK_DEFAULT_MAX_TOKENS` | `131072` | 千问**默认**输出预算（客户端未给 `max_tokens` 时；搭子仍用 `DEFAULT_BUDGET=32768`）。取上游上限，见上文实测 |
+| `DUMATE_QWENWORK_AGENT_DISCIPLINE` | 未设（注入） | 设 `0` 关闭「执行纪律」注入（见上文「千问通道必须给带工具的请求注入执行纪律」） |
 | `DUMATE_QWENWORK_CREDIT_CACHE_MS` | `30000` | 千问余额缓存时长，避免每次请求都打站点接口 |
 | `DUMATE_ADMIN_SECURE_COOKIE` | 未设（不置 Secure） | 设 `1` 才给会话 cookie 加 Secure（本地 http 下会被浏览器丢弃） |
 
@@ -367,11 +435,29 @@ Vue 3 + Vite + ant-design-vue 4 + Tailwind + ECharts（按需引入，不用全�
 | `tailwind.config.js` | **把 `slate` 槽位整体重映射为控制台灰阶** | 全站 100+ 处 `text-slate-400` 这类工具类因此一次性换到深色语义。**新增页面继续用 `slate-*`，不要为了「准确」改成语义色名**——那样等于把这层映射废掉，回到逐页维护 |
 | `src/utils/chartTheme.ts` | 图表色板与轴样式 | 分类色按固定槽位取用、不按排名重排（否则筛掉一条序列会让其余序列换色，读者刚建立的对应关系就废了） |
 
-**通道切换是全局状态，不是各页各存一份。** `web/src/stores/channel.ts` 管「当前在看哪个通道」，持久化到 localStorage，顶栏切（不是侧栏——侧栏可折叠，折叠后切换器会消失，而通道是任何时候都不该丢的上下文）。`CHANNELS` 里的 `menuKeys` 是该通道**有意义**的菜单白名单：千问没有「任务记录」（无签到/抽奖），账号管理只做只读展示。
+**通道切换是全局状态，不是各页各存一份。** `web/src/stores/channel.ts` 管「当前在看哪个通道」，持久化到 localStorage，顶栏切（不是侧栏——侧栏可折叠，折叠后切换器会消失，而通道是任何时候都不该丢的上下文）。`CHANNELS` 里的 `menuKeys` 是该通道**有意义**的菜单白名单：千问与 TRAE 都没有「操作流水」（无签到/抽奖/任务体系），账号管理只做只读展示。
+
+**「任务记录」已并入「积分明细」，不再是独立页**（2026-09-29）。判定依据是**职责而非数据来源**：
+
+- 签到 / 任务 / 抽奖 / 自动发放这四类记录，**全都是积分的来源**。积分明细页其余区块（额度包、按来源、每日发放、逐笔发放）回答的是同一个问题——「积分从哪来、怎么没的」。拆成两页会让「查一笔积分的来历」在页面之间来回跳。
+- 账号管理页保留的是**操作台**：增删账号、跑任务、开轮询。记录是结果，不该堆在操作台上。它原来那块「任务执行记录」与任务记录页的「操作明细」是**同一份数据**（`task-runner.js` 的 `appendLog` 同时写 `task-runs.jsonl` 与统一记录流 `records.append`），留着就是同一件事三个视图，已删掉；本页只留「跑完的即时反馈」提示条，历史去积分明细查。
+- 因此 `/records` 路由、`RecordsView.vue`、侧栏菜单项、`menuKeys` 里的 `records` 全部移除。后端接口（`/web-accounts/records`、`/web-accounts/checkin-calendar`）**保持不变**，只是换了调用方。
+
+**别按「数据存哪个文件」划页面，按「用户要回答什么问题」划。** 同一个 `records.js` 的数据既支撑「操作流水」也支撑签到日历，它们是同一页的两个视图；而 `task-runs.jsonl` 虽然单独落盘，内容却是 `records` 的真子集——按文件划分会把一条任务拆到两个页面。
 
 **各页面必须 `watch` 通道变化并重新拉数据**，不能只在 `onMounted` 读一次——否则顶栏切了、页面还是旧通道的内容。两个数据源结构不同的页面（登录态、积分明细、账号管理、模型管理、API Key）用 `v-if="isQw"` / `<template v-else>` 分开两套模板，共用同一个路由；只差筛选条件的页面（用量统计、请求日志、聊天测试台）同一套模板，只换请求参数。
 
 **千问办公的账与搭子完全不同，界面必须分开显示**：搭子靠上游账单 + 余额游标（`points-cursor.js`），千问是三个积分池（`daily` 免费 / `monthly` 订阅 / `longterm` 充值）按 `req_id` 归因。两边数字**不能相加**。千问的「每日上限」接口不返回，由「观测峰值 + 配置兜底」推断（`credits.js` 的 `dailyUsageFromBalance`），界面要标出 `limitSource` 是 `observed` 还是 `config-lower-bound`。
+
+**模型管理页的三条通道共用一套骨架，但账各自独立**（2026-09-29 对齐）。页面结构固定为「通道元信息行 → 模型信息表 → 该通道的额度卡 → 通道专有区块」：
+
+- **通道元信息行**（`.qw-channel-row` 三联卡）：TRAE 给「可用账号 / 当前账号 / token 状态」，千问给「账号 / 套餐 / token 状态」，搭子给「上游端口 / 桌面登录账号 / 凭证来源」。放的是**通道级**信息，不随模型变。
+- **模型信息表**：三条通道共用 `ModelInfoTable.vue` + 后端 `/models/info?channel=`。**倍率只有 TRAE 有**（上游下发），搭子与千问如实 `null` → 显示「—」，**不估算**——编一个单价会让人以为真能按那个价扣。
+- **额度卡**：回答「这些模型花的是哪份额度」。TRAE 是单 credits（签到补充）、千问是三池、搭子是上游账单 + 余额游标。**三套账的数字不能相加**，所以各写各的卡片，不抽成一个通用组件。
+
+**搭子模型页的「凭证来源」必须区分「未加载」与「已回落」**：`channelStore.infos['dumate']` 为空时显示 `—`，不能默认成任一侧。桌面凭证不可用时会自动回落到网页池（`fallback-web.js`），把一次「还没拉到状态」显示成「网页凭证回落」等于凭空报一个不存在的故障。
+
+**搭子的「今日消耗」取 `/usage/overview` 的 `cards.today.consumed_points`**（来自上游账单，`points-cursor.js` 的余额游标差）。这个字段**只有搭子有**，直连通道为 `null`——界面据此显示「上游未给出账单」而不是 0，0 会被读成「今天没花钱」。
 
 **新页面的骨架约定**：
 
