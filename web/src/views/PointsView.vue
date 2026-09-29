@@ -292,7 +292,7 @@
         >
           <template #bodyCell="{ column, record }">
             <template v-if="column.key === 'name'">
-              <div>{{ record.nickname || record.name }}</div>
+              <div>{{ record.name }}</div>
               <div v-if="!record.ok" class="text-xs text-red-500">{{ record.error }}</div>
             </template>
             <template v-else-if="column.key === 'left'">
@@ -504,6 +504,150 @@
       </a-table>
     </a-card>
     </div>
+
+    <!-- ============ 操作流水（签到 / 任务 / 抽奖 / 自动发放）============
+         原来这是独立的「任务记录」页。并入积分明细的理由：这些动作**全都是
+         积分的来源**，而本页其余区块（额度包、按来源、每日发放、逐笔发放）
+         回答的是同一个问题——「积分从哪来、怎么没的」。拆成两页会让
+         「查一笔积分的来历」要在两页之间来回跳。
+         账号管理页保留的是**操作台**（增删账号、跑任务、开轮询），
+         记录是结果，不该堆在操作台上。 -->
+    <a-card title="签到日历" :bordered="false" class="mt-4">
+      <template #extra>
+        <span class="text-xs text-slate-400">已签日来自上游 sign_in_days，是权威数据</span>
+      </template>
+      <a-spin :spinning="calLoading">
+        <a-empty v-if="!calendar?.accounts?.length" description="还没有账号" />
+        <div v-for="a in calendar?.accounts ?? []" :key="a.account_id" class="mb-4">
+          <div class="flex items-center justify-between mb-2">
+            <div>
+              <span class="font-medium">{{ a.name }}</span>
+              <a-tag :color="a.has_issued_today ? 'green' : 'orange'" class="ml-2">
+                {{ a.has_issued_today ? '今日已签' : '今日未签' }}
+              </a-tag>
+              <span class="text-xs text-slate-500 ml-2">
+                累计 {{ a.total_times ?? '—' }} 次 · 本月 {{ a.sign_in_days.length }} 天
+              </span>
+            </div>
+            <a-tag v-if="!a.ok" color="red">{{ a.error }}</a-tag>
+          </div>
+          <div class="flex flex-wrap gap-1">
+            <a-tag
+              v-for="d in monthDays(a)"
+              :key="d.day"
+              :color="d.signed ? 'green' : d.isToday ? 'blue' : 'default'"
+              :title="d.day"
+            >
+              {{ d.label }}
+            </a-tag>
+          </div>
+        </div>
+      </a-spin>
+    </a-card>
+
+    <a-card title="操作流水" :bordered="false" class="mt-4">
+      <template #extra>
+        <a-space>
+          <a-select v-model:value="opType" size="small" style="width: 110px" :options="opTypeOptions" />
+          <a-select v-model:value="opAccount" size="small" style="width: 140px" :options="opAccountOptions" />
+          <a-select v-model:value="opDays" size="small" style="width: 100px" :options="opDayOptions" />
+          <a-button size="small" class="ghost-btn" :loading="opLoading" @click="loadOps">刷新</a-button>
+        </a-space>
+      </template>
+
+      <!-- 按天聚合：一眼看出哪天做了什么。只标类型不显示次数——
+           「哪天做过什么」是这张表要回答的，次数在下面明细里能数。 -->
+      <a-empty v-if="!ops?.daily?.length" description="还没有操作记录" />
+      <a-table
+        v-else
+        size="small"
+        :pagination="false"
+        :data-source="ops.daily"
+        :columns="opDailyColumns"
+        row-key="account_id"
+        class="mb-4"
+      >
+        <template #bodyCell="{ column, record }">
+          <template v-if="column.key === 'name'">{{ record.account }}</template>
+          <template v-else-if="column.key === 'days'">
+            <div v-for="(acts, day) in record.days" :key="day" class="text-xs leading-5">
+              <span class="text-slate-400">{{ day }}</span>
+              <a-tag v-for="(_, t) in acts" :key="t" :color="opTypeColor(String(t))" class="ml-1">
+                {{ opTypeText(String(t)) }}
+              </a-tag>
+            </div>
+          </template>
+        </template>
+      </a-table>
+
+      <a-table
+        size="small"
+        :data-source="ops?.rows ?? []"
+        :columns="opColumns"
+        row-key="rowKey"
+        :pagination="{ pageSize: 20, size: 'small', showSizeChanger: false }"
+      >
+        <template #bodyCell="{ column, record }">
+          <template v-if="column.key === 'ts'">
+            <!-- 自动发放显示真实发放时刻（服务端 00:00 发的），不是「我们查到的时刻」
+                 ——否则会看起来像点签到才发的 -->
+            <span class="text-xs">
+              {{ dateTimeText(record.type === 'grant' && record.granted_at ? record.granted_at : record.ts) }}
+            </span>
+          </template>
+          <template v-else-if="column.key === 'type'">
+            <a-tag :color="opTypeColor(record.type)">{{ opTypeText(record.type) }}</a-tag>
+          </template>
+          <template v-else-if="column.key === 'account'">{{ record.account }}</template>
+          <template v-else-if="column.key === 'detail'">
+            <template v-if="record.type === 'checkin'">
+              {{ opCheckinText(record.result) }}
+              <a-tag v-if="!record.ok" color="red" class="ml-1">失败</a-tag>
+              <span v-if="record.error" class="text-xs text-red-500 ml-1">{{ record.error }}</span>
+            </template>
+            <template v-else-if="record.type === 'task'">
+              {{ record.title }}
+              <a-tag v-if="record.already" color="default" class="ml-1">已发放</a-tag>
+              <a-tag v-if="!record.ok" color="red" class="ml-1">失败</a-tag>
+              <span v-if="record.error" class="text-xs text-red-500 ml-1">{{ record.error }}</span>
+              <div class="text-xs text-slate-400 mt-1">
+                <span v-if="record.via === 'query-then-complete'">发消息+上报</span>
+                <span v-else-if="record.via === 'complete-only'">仅上报</span>
+                <span v-else-if="record.via === 'noop'">无事可做</span>
+                <template v-if="record.ms != null">
+                  <span class="mx-1">·</span>耗时 {{ fmtMs(record.ms) }}
+                </template>
+                <template v-if="record.expected_points">
+                  <span class="mx-1">·</span>声明奖励 {{ record.expected_points }} 积分
+                </template>
+              </div>
+            </template>
+            <template v-else-if="record.type === 'draw'">
+              <template v-if="record.prize">抽到 <span class="font-medium">{{ record.prize }}</span></template>
+              <template v-else>抽了 {{ record.count || 1 }} 次</template>
+            </template>
+            <template v-else-if="record.type === 'grant'">
+              登录奖励 <span class="font-medium">+{{ record.points_delta }}</span>
+              <a-tag color="blue" class="ml-1">自动</a-tag>
+              <span class="text-xs text-slate-400 ml-1">{{ record.note }}</span>
+            </template>
+          </template>
+          <template v-else-if="column.key === 'points'">
+            <template v-if="record.points_delta !== null && record.points_delta !== undefined">
+              <span :class="record.points_delta > 0 ? 'text-green-600' : 'text-slate-400'">
+                余额 {{ record.points_delta > 0 ? '+' + record.points_delta : record.points_delta }}
+                <span v-if="record.points_before !== null && record.points_after !== null" class="text-xs text-slate-400">
+                  ({{ fmt(record.points_before) }} → {{ fmt(record.points_after) }})
+                </span>
+              </span>
+            </template>
+            <!-- 没有 delta 与「delta 为 0」是两回事：前者是没打发放接口（今日已签），
+                 后者才是真发了但没增加。如实显示 —，不折成 0。 -->
+            <span v-else class="text-slate-400">— <span class="text-xs">本次未发放</span></span>
+          </template>
+        </template>
+      </a-table>
+    </a-card>
     </template>
   </div>
 </template>
@@ -522,6 +666,7 @@ import type { TraeworkCreditRow, TraeworkStatus } from '@/api/traework'
 import { qwenworkApi } from '@/api/qwenwork'
 import type { QwCredits, QwCreditRecord } from '@/api/qwenwork'
 import type { PointsData, PointsPackage, AllPointsData, AccountPoints } from '@/api/points'
+import type { RecordsData, CheckinCalendarData } from '@/api/records'
 import { SERIES, INK, TOOLTIP_BASE, axisStyle, compactNum, exactNum, barSeries } from '@/utils/chartTheme'
 
 echarts.use([BarChart, GridComponent, TooltipComponent, LegendComponent, CanvasRenderer])
@@ -618,6 +763,110 @@ const qwRecordColumns = [
 const poolText = (p: string) =>
   p === 'daily' ? '每日免费' : p === 'paid' ? '付费积分' : p === 'none' ? '未扣费' : '—'
 
+// ---- 操作流水（签到 / 任务 / 抽奖 / 自动发放）----
+// 原来是一个独立的「任务记录」页，并入本页的理由见模板里的注释。
+// 数据是搭子网页端（dumate.baidu.com）的，与千问/TRAE 无关，所以只在搭子分支渲染。
+const ops = ref<RecordsData | null>(null)
+const calendar = ref<CheckinCalendarData | null>(null)
+const opLoading = ref(false)
+const calLoading = ref(false)
+const opType = ref('')
+const opAccount = ref<number | null>(null)
+const opDays = ref(30)
+
+const opTypeOptions = [
+  { label: '全部类型', value: '' },
+  { label: '签到', value: 'checkin' },
+  { label: '任务', value: 'task' },
+  { label: '抽奖', value: 'draw' },
+  { label: '自动发放', value: 'grant' },
+]
+const opDayOptions = [
+  { label: '近 7 天', value: 7 },
+  { label: '近 30 天', value: 30 },
+  { label: '近 90 天', value: 90 },
+]
+const opAccountOptions = ref<Array<{ label: string; value: number | null }>>([
+  { label: '全部账号', value: null },
+])
+const opDailyColumns = [
+  { title: '账号', key: 'name', width: '20%' },
+  { title: '按天', key: 'days' },
+]
+const opColumns = [
+  { title: '时间', key: 'ts', width: '16%' },
+  { title: '类型', key: 'type', width: '9%' },
+  { title: '账号', key: 'account', width: '14%' },
+  { title: '结果', key: 'detail' },
+  { title: '积分', key: 'points', width: '19%' },
+]
+
+const opTypeText = (t: string) => ops.value?.types?.[t] || t
+const opTypeColor = (t: string) =>
+  t === 'checkin' ? 'green' : t === 'task' ? 'blue' : t === 'draw' ? 'orange'
+    : t === 'grant' ? 'cyan' : 'default'
+// 任务耗时：秒/毫秒自动切换
+const fmtMs = (ms: number) => (ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`)
+
+// 「今日已签」不等于这次发了分：签到是幂等的，已签就不再打发放接口，
+// 所以这行没有本次发放金额。当天额度通常已由服务端在 00:00 自动发过，
+// 那份属于当天早些时候的发放，不记在这次调用头上。
+function opCheckinText(r?: string) {
+  return r === 'claimed' ? '签到成功'
+    : r === 'already' ? '今日已签（本次未发放）'
+    : r === 'failed' ? '签到失败' : '—'
+}
+
+// 本月逐日：已签来自上游 sign_in_days，今天单独标色
+function monthDays(a: { sign_in_days: string[] }) {
+  const signed = new Set(a.sign_in_days)
+  const now = new Date()
+  const key = (d: number) =>
+    `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`
+  const todayKey = key(now.getDate())
+  const out = []
+  for (let d = 1; d <= now.getDate(); d++) {
+    out.push({ day: key(d), label: String(d), signed: signed.has(key(d)), isToday: key(d) === todayKey })
+  }
+  return out
+}
+
+async function loadOps() {
+  opLoading.value = true
+  try {
+    const params = new URLSearchParams()
+    if (opType.value) params.set('type', opType.value)
+    if (opAccount.value) params.set('account_id', String(opAccount.value))
+    params.set('days', String(opDays.value))
+    params.set('limit', '500')
+    const { data } = await client.get(`/web-accounts/records?${params}`)
+    // rowKey：ts 可能撞（同一毫秒多条），补上类型与序号
+    ops.value = {
+      ...data,
+      rows: (data.rows || []).map((r: any, i: number) => ({ ...r, rowKey: `${r.ts}-${r.type}-${i}` })),
+    }
+    // 用记录里出现的账号补全筛选选项，避免额外请求
+    if (opAccountOptions.value.length === 1 && data.daily?.length) {
+      opAccountOptions.value = [
+        { label: '全部账号', value: null },
+        ...data.daily.map((d: any) => ({ label: d.account, value: d.account_id })),
+      ]
+    }
+  } finally {
+    opLoading.value = false
+  }
+}
+
+async function loadCalendar() {
+  calLoading.value = true
+  try {
+    const { data } = await client.get('/web-accounts/checkin-calendar')
+    calendar.value = data
+  } finally {
+    calLoading.value = false
+  }
+}
+
 async function loadQw() {
   loading.value = true
   try {
@@ -638,7 +887,7 @@ async function loadQw() {
 const accountOptions = computed(() => {
   const opts: Array<{ key: string; label: string; ok: boolean }> = []
   for (const a of allPoints.value?.accounts ?? []) {
-    opts.push({ key: String(a.id), label: a.nickname || a.name, ok: !!a.ok })
+    opts.push({ key: String(a.id), label: a.name, ok: !!a.ok })
   }
   opts.push({ key: 'local', label: data.value?.account_name || '本地后端', ok: !!data.value })
   return opts
@@ -836,12 +1085,20 @@ watch([current, recentDaily], async () => {
 
 function onResize() { grantChart?.resize() }
 
+// 操作流水只在搭子通道有意义（签到/抽奖/任务是网页端独有），
+// 千问与 TRAE 各自的账在各自的区块里，切过去时不请求、也不渲染。
+watch([opType, opAccount, opDays], () => { if (!isTw.value && !isQw.value) loadOps() })
+
 onMounted(() => {
   // 按当前通道初始化：顶栏已切到 TRAE/千问时进这个页面，
   // 该拉的是对应通道的账，而不是搭子的额度包
   if (isTw.value) loadTw()
   else if (isQw.value) loadQw()
-  else load()
+  else {
+    load()
+    loadOps()
+    loadCalendar()
+  }
   window.addEventListener('resize', onResize)
 })
 
@@ -849,7 +1106,11 @@ onMounted(() => {
 watch(() => channelStore.current, () => {
   if (isTw.value) loadTw()
   else if (isQw.value) loadQw()
-  else load()
+  else {
+    load()
+    loadOps()
+    loadCalendar()
+  }
 })
 
 onBeforeUnmount(() => {

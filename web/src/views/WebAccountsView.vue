@@ -51,7 +51,7 @@
             <div class="flex items-start justify-between">
               <div>
                 <div class="font-medium">
-                  {{ a.nickname || a.name }}
+                  {{ a.name }}
                   <a-tag v-if="!a.enabled" color="default" class="ml-1">已停用</a-tag>
                 </div>
                 <div class="text-xs text-slate-400 font-mono mt-1">
@@ -116,84 +116,11 @@
       </a-row>
     </a-card>
 
-    <!-- 任务执行记录：**常驻显示**，不是仅在跑完后的提示里出现。
-         要回答「哪个账号、跑了什么任务、什么时候、真实花了多少积分」，
-         这些是既成事实，刷新页面也该看得到。 -->
-    <a-card :bordered="false" class="mt-4">
-      <template #title>
-        <span class="font-medium">任务执行记录</span>
-        <a-tag v-if="taskRuns.length" class="ml-2">{{ taskRuns.length }} 条</a-tag>
-      </template>
-      <template #extra>
-        <a-space>
-          <a-button size="small" :loading="loadingRuns" @click="loadRuns">刷新</a-button>
-          <a-button size="small" type="primary" :loading="runningTasks" @click="runTasks">跑任务</a-button>
-        </a-space>
-      </template>
-
-      <a-empty v-if="!taskRuns.length" description="还没有执行记录。点「跑任务」后会显示在这里。" />
-      <a-table
-        v-else
-        size="small"
-        :data-source="taskRuns"
-        :columns="runColumns"
-        row-key="rowKey"
-        :pagination="{ pageSize: 15, size: 'small', showSizeChanger: false }"
-      >
-        <template #bodyCell="{ column, record }">
-          <template v-if="column.key === 'ts'">
-            <span class="text-xs">{{ dateText(record.ts) }}</span>
-          </template>
-          <template v-else-if="column.key === 'account'">
-            <span class="text-xs">{{ record.account || record.account_id }}</span>
-          </template>
-          <template v-else-if="column.key === 'title'">
-            <div class="text-xs">
-              {{ record.title }}
-              <a-tag v-if="record.noop" color="default" class="ml-1">无事可做</a-tag>
-              <a-tag v-else-if="!record.ok" color="red" class="ml-1">失败</a-tag>
-              <a-tag v-else-if="record.already" color="default" class="ml-1">已发放</a-tag>
-              <a-tag v-else-if="record.ok" color="green" class="ml-1">完成</a-tag>
-            </div>
-            <div v-if="record.error" class="text-xs text-red-500 mt-1">{{ record.error }}</div>
-            <!-- 执行方式：说清这个任务是靠什么动作完成的 -->
-            <div class="text-xs text-slate-400 mt-1">
-              <template v-if="record.via === 'query-then-complete'">发消息 + 上报</template>
-              <template v-else-if="record.via === 'complete-only'">仅上报</template>
-              <template v-if="record.task_type"> · {{ record.task_type }}</template>
-            </div>
-          </template>
-          <template v-else-if="column.key === 'ms'">
-            <span v-if="record.ms != null" class="text-xs">{{ fmtMs(record.ms) }}</span>
-            <span v-else class="text-slate-400">—</span>
-            <div v-if="record.model_ms != null" class="text-xs text-slate-400">
-              发消息 {{ fmtMs(record.model_ms) }}
-            </div>
-          </template>
-          <template v-else-if="column.key === 'points'">
-            <!-- 真实积分：余额差实测。负数是发消息消耗，正数是奖励到账 -->
-            <template v-if="record.points_delta !== null && record.points_delta !== undefined">
-              <span
-                class="text-xs font-medium"
-                :class="record.points_delta > 0 ? 'text-green-600' : (record.points_delta < 0 ? 'text-amber-600' : 'text-slate-400')"
-              >
-                {{ record.points_delta > 0 ? '+' : '' }}{{ record.points_delta }}
-              </span>
-              <div
-                v-if="record.points_before !== null && record.points_after !== null"
-                class="text-xs text-slate-400"
-              >
-                {{ fmt(record.points_before) }} → {{ fmt(record.points_after) }}
-              </div>
-              <div v-if="record.expected_points" class="text-xs text-slate-400">
-                声明奖励 {{ record.expected_points }}
-              </div>
-            </template>
-            <span v-else class="text-slate-400">—</span>
-          </template>
-        </template>
-      </a-table>
-    </a-card>
+    <!-- 任务执行历史不在这里。它和签到/抽奖记录是同一份数据（task-runner
+         同时写 task-runs.jsonl 与统一记录流），已并入「积分明细 → 操作流水」。
+         本页保留的是**操作台**：账号增删、跑任务、开轮询；记录是结果，
+         放在操作台上会让「同一件事」在三个页面各有一个视图。
+         跑完的即时反馈由上面的 lastRun 提示条给，历史去积分明细查。 -->
 
     <a-card title="任务与抽奖" :bordered="false" class="mt-4">
       <div class="flex items-center justify-between mb-3">
@@ -278,7 +205,7 @@
       >
         <template #bodyCell="{ column, record }">
           <template v-if="column.key === 'name'">
-            <div>{{ record.nickname || record.name }}</div>
+            <div>{{ record.name }}</div>
             <div v-if="!record.ok" class="text-xs text-red-500">{{ record.error }}</div>
           </template>
           <template v-else-if="column.key === 'tasks'">
@@ -341,7 +268,7 @@
       >
         <template #bodyCell="{ column, record }">
           <template v-if="column.key === 'name'">
-            <div>{{ record.nickname || record.name }}</div>
+            <div>{{ record.name }}</div>
             <div v-if="record.last_error" class="text-xs text-red-500">
               {{ record.last_error }}
             </div>
@@ -570,14 +497,12 @@ import client from '@/api/client'
 import { channelStore, isTraework, isQwenwork } from '@/stores/channel'
 import TraeworkAccounts from '@/components/traework/TraeworkAccounts.vue'
 import QwenworkAccounts from '@/components/qwenwork/QwenworkAccounts.vue'
-import type { WebAccount, AccountStatus, PoolData, PoolAccount, TaskRunRow } from '@/api/webaccounts'
+import type { WebAccount, AccountStatus, PoolData, PoolAccount } from '@/api/webaccounts'
 
 // 三条通道三种账号形态：搭子是网页凭证池、千问与 TRAE 都是凭证自持可增删。
 // 后两者的数据由各自的子组件自己拉（字段与搭子不同），这里只做分支。
 const isTw = computed(() => isTraework())
 const isQw = computed(() => isQwenwork())
-
-const dateText = (ts: number) => new Date(ts).toLocaleString('zh-CN')
 
 const accounts = ref<WebAccount[]>([])
 const loginUrl = ref('')
@@ -601,35 +526,9 @@ const lastRun = ref('')
 // 最近一次跑任务的逐条明细（任务名 / 耗时 / 真实积分）
 const taskRunDetail = ref<string[]>([])
 
-// 任务执行历史：**常驻列表**，进页面就加载，跑完自动刷新。
-// 与「跑完后的提示条」是两回事——提示条是本次反馈，列表是历史事实。
-const taskRuns = ref<TaskRunRow[]>([])
-const loadingRuns = ref(false)
+// 任务执行历史列表已移走（并入「积分明细 → 操作流水」），这里只保留
+// 本次跑完的即时反馈。用户切到积分明细时会重新拉取，本页不再持有那份列表。
 
-const runColumns = [
-  { title: '执行时间', key: 'ts', width: '16%' },
-  { title: '账号', key: 'account', width: '13%' },
-  { title: '任务', key: 'title' },
-  { title: '耗时', key: 'ms', width: '12%' },
-  { title: '真实积分', key: 'points', width: '16%' },
-]
-
-async function loadRuns() {
-  loadingRuns.value = true
-  try {
-    const { data } = await client.get('/web-accounts/tasks/runs?limit=200')
-    // rowKey：ts 可能撞（同一毫秒多条），补上任务 id 与序号
-    taskRuns.value = (data.rows || []).map((r: TaskRunRow, i: number) => ({
-      ...r,
-      rowKey: `${r.ts}-${r.task_id ?? ''}-${i}`,
-    }))
-  } catch (e) { /* 取不到就保持原列表，不覆盖成空 */ } finally {
-    loadingRuns.value = false
-  }
-}
-
-// 任务耗时：秒/毫秒自动切换
-const fmtMs = (ms: number) => (ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`)
 const sched = ref<any>(null)
 const schedMinutes = ref(30)
 const schedSaving = ref(false)
@@ -720,8 +619,6 @@ async function load() {
     pool.value = p
   } catch (e) { /* 忽略 */ }
   await loadTasks()
-  // 执行历史是既成事实，进页面就该看到，不依赖「刚跑过」
-  await loadRuns()
 }
 
 async function loadTasks() {
@@ -808,8 +705,8 @@ async function runTasks() {
       }
     }
     if (lines.length) taskRunDetail.value = lines
-    // 跑完立刻刷新常驻列表：提示条是本次反馈，列表要跟上最新事实
-    await loadRuns()
+    // 跑完刷新任务状态表。历史记录不在这里——它已并入「积分明细 → 操作流水」，
+    // 用户切过去时会重新拉取，不必在本页维护第二份。
     await loadTasks()
   } catch (e: any) {
     message.error(e?.response?.data?.error || '跑任务失败')

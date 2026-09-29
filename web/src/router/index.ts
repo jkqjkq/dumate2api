@@ -9,7 +9,6 @@ const Keys = () => import('@/views/KeysView.vue')
 const Account = () => import('@/views/AccountView.vue')
 const Points = () => import('@/views/PointsView.vue')
 const WebAccounts = () => import('@/views/WebAccountsView.vue')
-const Records = () => import('@/views/RecordsView.vue')
 const Usage = () => import('@/views/UsageView.vue')
 const ReqLogs = () => import('@/views/ReqLogsView.vue')
 const ChatLab = () => import('@/views/ChatLabView.vue')
@@ -28,7 +27,6 @@ const router = createRouter({
         { path: 'account', component: Account, meta: { title: '登录态', key: 'account' } },
         { path: 'points', component: Points, meta: { title: '积分明细', key: 'points' } },
         { path: 'web-accounts', component: WebAccounts, meta: { title: '账号管理', key: 'web-accounts' } },
-        { path: 'records', component: Records, meta: { title: '任务记录', key: 'records' } },
         { path: 'usage', component: Usage, meta: { title: '用量统计', key: 'usage' } },
         { path: 'reqlogs', component: ReqLogs, meta: { title: '请求日志', key: 'reqlogs' } },
         { path: 'chatlab', component: ChatLab, meta: { title: '聊天测试台', key: 'chatlab' } },

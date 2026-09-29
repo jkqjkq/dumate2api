@@ -39,7 +39,7 @@ export const CHANNELS = [
   {
     id: 'dumate',
     label: '百度搭子',
-    menuKeys: ['dashboard', 'chatlab', 'usage', 'reqlogs', 'models', 'keys', 'account', 'points', 'web-accounts', 'records'],
+    menuKeys: ['dashboard', 'chatlab', 'usage', 'reqlogs', 'models', 'keys', 'account', 'points', 'web-accounts'],
   },
   {
     id: 'qwenwork',

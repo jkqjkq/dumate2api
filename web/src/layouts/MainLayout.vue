@@ -42,10 +42,6 @@
           <template #icon><TeamOutlined /></template>
           <span>账号管理</span>
         </a-menu-item>
-        <a-menu-item v-if="showMenu('records')" key="records">
-          <template #icon><HistoryOutlined /></template>
-          <span>任务记录</span>
-        </a-menu-item>
       </a-menu>
       <div v-if="!collapsed" class="lab-sider-foot">
         <span class="dot" />
@@ -95,7 +91,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { DashboardOutlined, DeploymentUnitOutlined, KeyOutlined, UserOutlined, WalletOutlined, TeamOutlined, HistoryOutlined, BarChartOutlined, FileTextOutlined, CommentOutlined } from '@ant-design/icons-vue'
+import { DashboardOutlined, DeploymentUnitOutlined, KeyOutlined, UserOutlined, WalletOutlined, TeamOutlined, BarChartOutlined, FileTextOutlined, CommentOutlined } from '@ant-design/icons-vue'
 import { auth } from '@/stores/auth'
 import { channelStore, CHANNELS } from '@/stores/channel'
 
