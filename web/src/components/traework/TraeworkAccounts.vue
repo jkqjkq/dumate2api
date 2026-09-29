@@ -384,14 +384,31 @@ async function checkinAll() {
   }
 }
 
+/**
+ * 渲染签到结果。
+ *
+ * `gained` 是网关**实测的到账差值**（签到后余额 − 签到前余额），不是上游
+ * 返回的发放数额——上游 claim 只回 {code:0,message:"success"}，从不报发了多少。
+ * 所以这里把「签到前 → 签到后」一并写出来：只报一个总额时，用户看到
+ * 「签到成功 + 余额」无从判断签到到底生效没有（上游 status 与 usage 不同步
+ * 时还会出现「签到成功但余额没变」，被读成「显示的是旧积分」）。
+ */
 function reportCheckin(data: any) {
   const list = data?.results ?? []
   checkinDetail.value = list.map((r: any) => {
-    if (!r.ok) return `${r.nickname || r.id}：失败 — ${r.error || '未知错误'}`
-    if (r.already) return `${r.nickname || r.id}：今日已签到过（跳过）`
-    const g = r.gained != null ? `，获得 ${r.gained}` : ''
-    const c = r.credits != null ? `，剩余 ${r.credits}` : ''
-    return `${r.nickname || r.id}：签到成功${g}${c}`
+    const name = r.nickname || r.id
+    if (!r.ok) return `${name}：失败 — ${r.error || '未知错误'}`
+    const c = r.credits != null ? `，当前剩余 ${r.credits}` : ''
+    // 已签到的分支也要给余额：跳过 ≠ 没有数据
+    if (r.already) return `${name}：今日已签到过（跳过）${c}`
+    // 差值 0 或负数如实说，不粉饰——它意味着奖励延迟入账或上游没发
+    let g = ''
+    if (r.gained != null && r.gained > 0) g = `，本次到账 ${r.gained}`
+    else if (r.gained === 0) g = '，本次到账 0（奖励可能延迟入账）'
+    else if (r.gained != null && r.gained < 0) g = `，本次到账 ${r.gained}（余额反降，请核对上游）`
+    const b = (r.creditsBefore != null && r.credits != null)
+      ? `（${r.creditsBefore} → ${r.credits}）` : ''
+    return `${name}：签到成功${g}${b}${c}`
   })
   const failed = list.filter((r: any) => !r.ok).length
   checkinMsgType.value = failed ? (failed === list.length ? 'error' : 'warning') : 'success'
