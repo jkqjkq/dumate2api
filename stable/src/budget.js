@@ -45,6 +45,25 @@ const QW_FLOOR = (() => {
   return Number.isFinite(n) && n >= 0 ? n : 16384;
 })();
 
+// 千问的**默认**预算（客户端没给 max_tokens 时用），与搭子的 DEFAULT_BUDGET 分开。
+//
+// 取 131072 的实测依据（2026-09-27）：
+//   - 上游接受的 max_tokens 范围是 **[1, 131072]**：131072 通过，131073 起一律
+//     400（`pro` / `flash` 边界一致，实测）。
+//   - **省略 max_tokens 不报错**，且实测一次输出到 **66807 token 才自然收尾**
+//     （finish=stop），说明上游自己的默认远大于 66807——原来网关发 32768，
+//     是**我们自己**把上限压低了。
+//   - 压低的实际代价：Codex 不发 max_output_tokens，网关按默认值下发，实测
+//     「一次写 3 章」单轮输出正好撞满 32768 → 上游报 `length`，断在工具参数
+//     中间那一章就丢了（实测断在 `@('第三章　第七户','',`）。
+// 所以默认值直接取上游上限：网关不再成为那个约束，行为与官方客户端一致
+// （客户端自己也不带这个字段）。代价是失控的 reasoning 循环最多烧掉 131072
+// token，但那种情形会被 `reasoning_budget_exhausted` 明确报错，不会静默失败。
+const QW_DEFAULT = (() => {
+  const n = parseInt(process.env.DUMATE_QWENWORK_DEFAULT_MAX_TOKENS || '131072', 10);
+  return Number.isFinite(n) && n > 0 ? n : 131072;
+})();
+
 // TRAE Work 的下限：与千问同理（reasoning 与正文抢预算），
 // 但它实测 reasoning 峰值更高（单次 138~195 token 级别，长任务可到千级），
 // 取 16384 与千问一致——低于这个值长任务会被 reasoning 吃光正文。
@@ -72,7 +91,7 @@ function resolveMaxTokens(requested) {
  */
 function resolveQwenMaxTokens(requested) {
   const n = Number(requested);
-  let out = Number.isFinite(n) && n > 0 ? n : DEFAULT_BUDGET;
+  let out = Number.isFinite(n) && n > 0 ? n : QW_DEFAULT;
   if (QW_FLOOR > 0) out = Math.max(out, QW_FLOOR);
   if (CEIL > 0) out = Math.min(out, CEIL);
   return out;
@@ -93,6 +112,7 @@ module.exports = {
   resolveTraeworkMaxTokens,
   FLOOR,
   QW_FLOOR,
+  QW_DEFAULT,
   TW_FLOOR,
   CEIL,
   DEFAULT_BUDGET,

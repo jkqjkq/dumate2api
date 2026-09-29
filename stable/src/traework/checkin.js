@@ -147,10 +147,84 @@ async function usage(auth) {
 
   // 剩余 = 总额 − 已消耗；总额拿不到时如实返回 null
   const remain = limit == null ? null : Math.max(0, limit - consumed);
-  return { ok: true, remain, limit, consumed: anyConsumed ? consumed : null, raw: d };
+  return { ok: true, remain, limit, consumed: anyConsumed ? consumed : null, packs: parsePacks(d), raw: d };
 }
 
-/** 签到并回写账号（含额度刷新）。供 task-runner 调用 */
+/**
+ * 解析额度包列表，取出「每个包还剩多少、什么时候到期」。
+ *
+ * 字段含义是**实测确认**的，不要照字段名猜：
+ *   entitlement_base_info.quota.credits_limit  该包的面额
+ *   usage.credits_amount                       该包**已消耗**（不是剩余！）
+ *   expire_time（或 base.end_time）            到期时刻（Unix 秒）
+ * 验证依据：各包 credits_amount 之和 == usage_summary.consumed_amount
+ * （1504.84），各包 credits_limit 之和 == usage_summary.total_amount（5350）。
+ * 所以剩余 = credits_limit − credits_amount。
+ *
+ * 漏掉包维度时界面只能给「总额还剩多少」一个数，答不出「哪些积分快过期了」
+ * ——而签到奖励是一批批到期的（实测 32 个包、到期日从明天排到下月），
+ * 那正是最该提醒的部分。
+ */
+function parsePacks(d) {
+  const list = (d && Array.isArray(d.user_entitlement_pack_list))
+    ? d.user_entitlement_pack_list : [];
+  const out = [];
+  for (const it of list) {
+    if (!it || typeof it !== 'object') continue;
+    const b = it.entitlement_base_info || {};
+    const q = b.quota || {};
+    const limit = Number(q.credits_limit ?? b.credits_limit);
+    const used = Number((it.usage || {}).credits_amount);
+    const exp = Number(it.expire_time || b.end_time) || null;
+    if (!Number.isFinite(limit) && !Number.isFinite(used) && !exp) continue;
+    const lim = Number.isFinite(limit) ? limit : null;
+    const usd = Number.isFinite(used) ? used : 0;
+    out.push({
+      name: String(it.display_desc || it.group_name || '额度包'),
+      // 面额拿不到就 null——补 0 会被读成「这个包是空的」
+      limit: lim,
+      used: Number.isFinite(used) ? usd : null,
+      // 剩余按 limit − used；面额缺失时推不出来，如实 null
+      remain: lim == null ? null : Math.max(0, Number((lim - usd).toFixed(4))),
+      expireAt: exp ? exp * 1000 : null,
+      status: it.status == null ? null : Number(it.status),
+    });
+  }
+  // 先按到期时间排，让「最快过期的」排在最前
+  return out.sort((a, b) => (a.expireAt || Infinity) - (b.expireAt || Infinity));
+}
+
+/**
+ * 算「本次签到实际到账多少」。
+ *
+ * 两侧余额都拿得到时取差值；算不出就退回上游直接给的 gained（通常为 null）。
+ * **不补 0**——0 会被读成「签到没发积分」，而真相可能是没测到（奖励延迟入账）。
+ * 差值为 0 或负数**如实返回**，交给界面解释（0 = 可能延迟入账，负数 =
+ * 上游结算异常），不在这一层粉饰成 null。
+ *
+ * 抽成纯函数是为了能离线验证——它是「签到到底生效没有」的唯一依据，
+ * 逻辑漂了用户就会重新看到「签到成功但余额没变」。
+ *
+ * @param {number|null} before 签到前剩余
+ * @param {number|null} after 签到后剩余
+ * @param {number|null} upstreamGained 上游 claim 直接给的数额（通常 null）
+ * @returns {number|null}
+ */
+function computeGained(before, after, upstreamGained) {
+  if (before != null && after != null) return Number((after - before).toFixed(4));
+  return upstreamGained != null ? Number(upstreamGained) : null;
+}
+
+/**
+ * 签到并回写账号（含额度刷新）。供 task-runner 调用。
+ *
+ * **签到前后各取一次余额**，用差值算「本次实际到账多少」。
+ * 上游 claim 只回 {code:0, message:"success"}，不告诉发放数额；status 的
+ * credits 是「签到可得」的固定值，也不等于实际入账。只报总额时用户看到
+ * 「签到成功 + 余额」无从判断签到是否生效——上游 status 与 usage 不同步时
+ * （status 说没签、usage 已含奖励）还会出现「签到成功但余额没变」，
+ * 被读成「显示的是旧积分」。快照失败不影响签到本身，拿不到就如实 null。
+ */
 async function checkinAndSave(auth, authStore) {
   const st = await status(auth);
   if (!st.ok) return { ok: false, error: st.error, stage: 'status' };
@@ -161,6 +235,7 @@ async function checkinAndSave(auth, authStore) {
     authStore.patch(auth.id, fields);
     return { ok: true, already: true, credits: u.ok ? u.remain : null };
   }
+  const before = await usage(auth);
   const cl = await claim(auth);
   if (!cl.ok) {
     authStore.patch(auth.id, { lastError: cl.error });
@@ -172,7 +247,15 @@ async function checkinAndSave(auth, authStore) {
     lastError: '',
     ...(u.ok ? { credits: u.remain } : {}),
   });
-  return { ok: true, already: false, gained: cl.gained, credits: u.ok ? u.remain : null };
+  const creditsBefore = before.ok ? before.remain : null;
+  const credits = u.ok ? u.remain : null;
+  return {
+    ok: true,
+    already: false,
+    gained: computeGained(creditsBefore, credits, cl.gained),
+    creditsBefore,
+    credits,
+  };
 }
 
-module.exports = { status, claim, usage, checkinAndSave };
+module.exports = { status, claim, usage, checkinAndSave, computeGained };

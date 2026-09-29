@@ -120,10 +120,18 @@ function dailyUsageFromBalance(balance, accountKey) {
   const limit = Math.max(configured || 0, peak);
   // calibrated=true 表示峰值已经追平或超过配置值（说明已观测到接近满额的状态）
   const calibrated = peak >= (configured || 0);
+  // 今日消耗 = 上限 − 余额。**但未校准时这个差值不可信**：
+  // limit 此时是配置兜底（100），若余额为 0（账号欠费 / 额度被扣穿），
+  // 差值会算出「今日已用 100」——而真相是「没观测到满额，推不出消耗」。
+  // 实测账号 示例账号 就是这样：一次请求都没走，却报已用 100。
+  // 所以未校准一律给 null，界面显示 — 并注明无法推算，而不是编一个数。
+  const freeUsed = calibrated
+    ? Math.max(0, Number((limit - (balance || 0)).toFixed(4)))
+    : null;
   return {
     limit,
     limitSource: calibrated ? 'observed' : 'config-lower-bound',
-    freeUsed: Math.max(0, Number((limit - (balance || 0)).toFixed(4))),
+    freeUsed,
     peak: Number(peak.toFixed(4)),
     calibrated,
   };
@@ -201,11 +209,30 @@ async function fetchWallets(opts = {}) {
     daily: num((d.daily_credits || {}).total_balance),
     monthly: num((d.monthly_credits || {}).total_balance),
     longterm: num((d.longterm_credits || {}).total_balance),
-    // 最近到期的钱包（免费额度每天重置，这里能看到 valid_to）
+    // 最近到期的钱包。**注意这不是「积分要作废」**：daily 池每天 00:00 重置，
+    // 所以 valid_to 就是明天的重置时刻——它每天都「即将到期」，不是风险。
+    // 真正会作废的是 expiring_soon 那段（付费积分按有效期，过期即消失），
+    // 两者语义不同，界面上必须分开说，否则会天天误报「积分要过期了」。
     expiring: wallets.slice(0, 5).map((w) => ({
       balance: num(w.balance),
       valid_to: String(w.valid_to || ''),
+      // 标注来源：reset = 每日额度重置（不是损失），expire = 真要作废
+      kind: 'reset',
     })),
+    // 上游自己给的「即将过期」列表——这才是会作废的那部分。
+    // count/total_balance 为 0 时是空数组，界面据此判断「有无风险」。
+    expiringSoon: (() => {
+      const es = d.expiring_soon || {};
+      const ws = Array.isArray(es.wallets) ? es.wallets : [];
+      return {
+        count: num(es.count),
+        total: num(es.total_balance),
+        wallets: ws.map((w) => ({
+          balance: num(w.balance),
+          valid_to: String(w.valid_to || ''),
+        })),
+      };
+    })(),
     fetchedAt: Date.now(),
   };
   out.total = out.daily + out.monthly + out.longterm;

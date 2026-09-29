@@ -167,6 +167,29 @@ function newResponseId() {
   return 'resp_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
 }
 
+/**
+ * 工具调用的参数是不是**被截断的半截 JSON**？
+ *
+ * 千问上游在「一次写多章」这类长任务里，实测会出现 `finish_reason=length`
+ * 时 arguments 停在半句（例：`{"cmd": "... @('第三章　第七户','',`，字符串都没闭合）。
+ * 网关若把它当正常工具调用交给 Codex，Codex 会**执行一条语法残缺的命令**——
+ * 命令必然失败，模型看到失败后往往直接收尾「下一步：写入第 3 章」就结束回合，
+ * 用户看到的就是「没做完就退出」。所以这种参数必须判成不完整。
+ *
+ * 判据：JSON 解析失败，或解析出来不是对象/数组。
+ * 注意 arguments 为空串是**合法**的（无参工具，OpenAI 规范允许），不能判成截断。
+ */
+function truncatedArguments(args) {
+  const s = String(args == null ? '' : args).trim();
+  if (!s) return false;
+  try {
+    const v = JSON.parse(s);
+    return !v || typeof v !== 'object';
+  } catch (e) {
+    return true;
+  }
+}
+
 function usageFrom(openaiUsage) {
   const u = openaiUsage || {};
   return {
@@ -462,8 +485,20 @@ function translateStreamToResponses(upstreamRes, res, model, onDone) {
     // 任务成功结束并停止等待，用户看到的是「完成了但没内容」，
     // 比明说 incomplete 更难排查。所以两种都标 incomplete。
     const hitLength = finishReason === 'length';
-    const emptyButTruncated = !fullText && !!finishReason && finishReason !== 'stop';
-    const incomplete = hitLength || emptyButTruncated;
+    // 「空正文但被截断」原本只排除 `stop`，于是把 `tool_calls` 也算了进来——
+    // 而纯工具调用轮次**本来就没有正文**（模型直接调工具），实测 Codex 里
+    // 大量轮次都是 finish_reason=tool_calls + 正文 0，那些轮次会被整轮标成
+    // incomplete。上游不发 usage 帧时（末帧才带 usage，部分路径拿不到）
+    // reasoning 判据也失效，就会真的误报。这里把正常的工具调用收尾排除。
+    const emptyButTruncated = !fullText && !!finishReason
+      && finishReason !== 'stop' && finishReason !== 'tool_calls';
+    // 工具参数被截断：上游在 length 收尾（或中途断流）时把 arguments 停在半句。
+    // 实测（Codex「一次写 3 章」）：最后一轮参数停在 `@('第三章　第七户','',`，
+    // 网关当正常工具调用发给 Codex，Codex 执行半截命令失败，模型随即放弃任务、
+    // 只留一句「下一步：写入第 3 章」——用户看到的就是「没做完就退出」。
+    // 标成 incomplete 后客户端至少知道这一轮不可信，不会把它当成任务正常结束。
+    const truncatedCall = [...callItems.values()].find((e) => truncatedArguments(e.args));
+    const incomplete = hitLength || emptyButTruncated || !!truncatedCall;
 
     // 思维链失控：整轮预算全部烧在 reasoning 上、正文一个字都没产出。
     // 实测（Codex 写小说，一次 3 章 + 完整项目上下文）：
@@ -513,7 +548,7 @@ function translateStreamToResponses(upstreamRes, res, model, onDone) {
     });
     ended = true;
     res.end();
-    finish(200);
+    finish(200, truncatedCall ? { error: 'tool_arguments_truncated' } : undefined);
   });
 
   upstreamRes.on('error', () => {
@@ -527,4 +562,4 @@ function translateStreamToResponses(upstreamRes, res, model, onDone) {
   });
 }
 
-module.exports = { responsesToOpenAI, openAIToResponse, translateStreamToResponses };
+module.exports = { responsesToOpenAI, openAIToResponse, translateStreamToResponses, truncatedArguments };
