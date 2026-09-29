@@ -50,6 +50,21 @@ check('null → 空串', displayName(null), '');
 check('undefined → 空串', displayName(undefined), '');
 
 console.log('');
+console.log('== toPublic：所有访问器必须给出同一个名字 ==');
+
+// 这是「改了 9 个模块漏了 3 个调用点」那个 bug 的根因：
+// list() 解析了显示名而 get() 没有，同一个账号两个名字。
+// 现在收敛到 toPublic，这个契约必须成立。
+const { toPublic } = require('../src/accounts');
+const rec = { id: 1, name: '账号 1', nickname: '张三', cookie: 'BDUSS=secret' };
+const pub = toPublic(rec);
+check('toPublic 覆盖 name 为显示名', pub.name, '张三');
+check('toPublic 保留原始标签到 label', pub.label, '账号 1');
+check('toPublic 抹掉 cookie', pub.cookie, undefined);
+check('toPublic 保留 cookie_len', pub.cookie_len, 'BDUSS=secret'.length);
+check('toPublic(null) → null', toPublic(null), null);
+
+console.log('');
 if (failures) {
   console.log(`✗ ${failures} 项失败`);
   process.exit(1);

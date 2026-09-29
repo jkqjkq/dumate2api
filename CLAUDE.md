@@ -146,10 +146,16 @@ sanguo 项目的 `novel-creator` 技能把写作拆成分阶段门控（「起�
 
 两半修法，缺一不可：
 
-1. **自愈回填**（`backfillNickname`，`admin/routes/accounts.js`）：任何触达上游的路径顺手补一次 `nickname`/`uid`，**幂等**（已有昵称直接返回，不打上游）。不用写迁移脚本，老账号会在下次进仪表盘时自动补上。
-2. **显示名解析**（`displayName`，`accounts.js`）：优先级 **用户填的名字 > 上游昵称 > 占位名**。关键是识别占位名 `^账号\s*\d+$` 并跳过——**只匹配这一种形态**，用户真想起名叫「账号 1 号机」时不该被覆盖。
+1. **自愈回填**（`backfillNickname` / `backfillAll`，`admin/routes/accounts.js`）：触达上游的路径顺手补一次 `nickname`/`uid`。**三层保护，都因为这是读路径**：幂等（已有昵称不打上游）、**负缓存**（取不到昵称的账号 10 分钟内不重试——桌面凭证失效的账号永远取不到，没有这层每次进仪表盘都要白等一次超时）、**并发去重**（同账号并发只打一次）、**显式超时 8s**（`userInfo` 自身 20s 而前端 axios 30s，几个失效账号叠加就能把整页拖垮）。挂载点：`/dashboard`、`/checkin-all`、`/points-all`——只挂一处的话，「只签到不开仪表盘」的账号昵称永远补不上，`activity.jsonl` 会一直记「账号 N」。
+2. **显示名解析**（`displayName` + `toPublic`，`accounts.js`）：优先级 **用户填的名字 > 上游昵称 > 占位名**。关键是识别占位名 `^账号\s*\d+$` 并跳过——**只匹配这一种形态**，用户真想起名叫「账号 1 号机」时不该被覆盖。
 
-`list()` / `create()` / `update()` 返回的 `name` 字段**已被覆盖成显示名**（原始标签留在 `label`），这样列表页、请求日志、任务记录、仪表盘拿到的名字一致。**所有后端显示点都改用 `displayName()`**：`admin/routes/{accounts,usage,reqlogs,chatlab}.js`、`web-pool.js`、`web-gateway.js`、`fallback-web.js`、`task-runner.js`、`task-scheduler.js`。前端直接渲染 `a.name` 即可，**不要再写 `nickname || name` 兜底**——那会把优先级反过来（昵称压过用户填的名字）。
+**`accounts.js` 的所有访问器必须经过 `toPublic()`**，这是「改了 9 个模块漏了 3 个调用点」的根因所在：早先 `list()` 解析了显示名而 `get()` 没有，同一个账号在两个接口里叫两个名字。收敛到一处后 `list`/`get`/`create`/`update` 必然给出同一个 `name`（原始标签在 `label`）。
+
+**`get()` 现在返回对外形状（cookie 被抹掉），内部改盘一律用 `getRaw()`**——拿 `get()` 的返回值回写会把显示名写进 `name`、把 cookie 抹成 undefined。两者不要混用。
+
+前端直接渲染 `a.name` 即可，**不要再写 `nickname || name` 兜底**——那会把优先级反过来（昵称压过用户填的名字）。
+
+**历史记录（`activity.jsonl`）里的 `account` 是写入当时冻结的字符串**，改昵称前写的行会永远停在占位名。记录本身是既成事实不该改写，但**显示名是账号的属性**——所以 `/records` 读取时按 `account_id` 重解析一次（账号已删除则回落到冻结值）。
 
 注意 TRAE/千问账号是另一套存储（`traework/auth.js`、`qwenwork/auth.js`），它们的 `nickname || uid` 兜底是合法的，不要一起改。离线验证：`node test/verify-display-name.js`。
 

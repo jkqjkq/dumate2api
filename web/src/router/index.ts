@@ -30,6 +30,12 @@ const router = createRouter({
         { path: 'usage', component: Usage, meta: { title: '用量统计', key: 'usage' } },
         { path: 'reqlogs', component: ReqLogs, meta: { title: '请求日志', key: 'reqlogs' } },
         { path: 'chatlab', component: ChatLab, meta: { title: '聊天测试台', key: 'chatlab' } },
+        // 「任务记录」已并入「积分明细」（见 CLAUDE.md）。这里保留重定向：
+        // 旧书签、浏览器历史、后退键都会命中 #/records，没有它会渲染成空白页
+        // （MainLayout 在、<router-view/> 空），只有一个 console 警告。
+        { path: 'records', redirect: '/points' },
+        // 兜底：任何未知路径回仪表盘。不加的话同样是白屏。
+        { path: ':pathMatch(.*)*', redirect: '/' },
       ],
     },
   ],

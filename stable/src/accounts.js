@@ -78,21 +78,25 @@ function normalizeCookie(raw) {
   return s.trim();
 }
 
-function list() {
-  const { accounts } = load();
-  return accounts.map((a) => ({
+/**
+ * 把一个账号记录转成**对外形状**。
+ *
+ * **所有访问器（list/get/create/update）都必须经过这里**，否则同一个账号
+ * 会因为「用了哪个访问器」而叫两个名字——这正是之前的 bug：list() 解析了
+ * 显示名而 get() 没有，`accounts.get(id).name` 拿到的是占位名「账号 N」。
+ * 收敛到一处就不再有「改了 9 个模块漏了 3 个调用点」这种漂移。
+ *
+ * 关键约定：
+ *   - `name` **覆盖**成解析后的显示名（调用方直接渲染即可）
+ *   - `label` 保留用户填的原始标签
+ *   - `cookie` 一律不外传（明文凭证不出接口）
+ */
+function toPublic(a) {
+  if (!a) return null;
+  return {
     ...a,
-    // 界面上该显示的名字。**不要直接用 a.name**：create() 在用户没填名字时
-    // 会写入占位名「账号 N」，而那个名字会一直留着，哪怕上游早就返回了真实
-    // 昵称——界面上就是「为什么显示账号 1 而不是用户名」。
-    //
-    // 这里把 name **覆盖**成解析后的显示名，而不是另加一个字段：调用方
-    // （列表页、请求日志、任务记录）拿到的 name 必须和仪表盘接口一致，
-    // 否则同一个账号在两个接口里叫两个名字。用户自己填的原始标签留在
-    // label 里，需要区分时可用。
     label: a.name,
     name: displayName(a),
-    // cookie 不整体出接口：界面只需要知道「有没有」和「是不是同一个账号」
     cookie: undefined,
     cookie_len: (a.cookie || '').length,
     cookie_summary: cookieSummary(a.cookie),
@@ -100,7 +104,11 @@ function list() {
     // 与「会员剩余天数」是两回事，那个是额度有效期，这是账号用了多久。
     // 没有 created_at（很早以前加的账号）就 null，界面显示 —
     daysAlive: a.created_at ? Math.floor((Date.now() - a.created_at) / 86400000) : null,
-  }));
+  };
+}
+
+function list() {
+  return load().accounts.map(toPublic);
 }
 
 /**
@@ -124,9 +132,19 @@ function displayName(a) {
   return name || `账号 ${a.id}`;
 }
 
+/**
+ * 取单个账号（**对外形状**，已解析显示名）。
+ *
+ * 需要**原始记录**（拿去改盘、读 cookie）时用 `getRaw()`——两者不要混用：
+ * toPublic 会把 name 换成显示名、把 cookie 抹掉，拿它回写会污染数据。
+ */
 function get(id) {
-  const { accounts } = load();
-  return accounts.find((a) => a.id === Number(id)) || null;
+  return toPublic(getRaw(id));
+}
+
+/** 原始账号记录（含 cookie）。仅供内部改盘使用，不出接口 */
+function getRaw(id) {
+  return load().accounts.find((a) => a.id === Number(id)) || null;
 }
 
 function create(opts = {}) {
@@ -180,9 +198,7 @@ function create(opts = {}) {
   };
   data.accounts.push(account);
   save(data);
-  // name 给显示名（新建时若没填名字，占位名会被昵称顶掉——此刻昵称通常还空，
-  // 所以多半仍是占位名，等回填后由 list() 给出真实名字）
-  return { ...account, label: account.name, name: displayName(account), cookie: undefined, cookie_len: cookie.length, cookie_summary: sum };
+  return toPublic(account);
 }
 
 function update(id, patch = {}) {
@@ -199,7 +215,7 @@ function update(id, patch = {}) {
   }
   a.updated_at = Date.now();
   save(data);
-  return { ...a, label: a.name, name: displayName(a), cookie: undefined, cookie_len: (a.cookie || '').length, cookie_summary: cookieSummary(a.cookie) };
+  return toPublic(a);
 }
 
 // 内部使用：直接改账号记录（签到结果、积分缓存等），不回显 cookie
@@ -228,6 +244,8 @@ module.exports = {
   save,
   list,
   get,
+  getRaw,
+  toPublic,
   create,
   update,
   patchInternal,

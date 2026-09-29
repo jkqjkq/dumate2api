@@ -184,7 +184,7 @@ const routes = [
           // 只是凭证来自网页 cookie。不标会让这条行在界面上被归成
           // 「分通道前的历史记录」——而它其实不是历史，是当下跑的
           channel: 'dumate',
-          account: acct ? acct.name : '',
+          account: acct ? accounts.displayName(acct) : '',
           error: r.ok ? '' : (r.error || 'upstream_error'),
         });
         if (!r.ok) {
@@ -196,7 +196,7 @@ const routes = [
           ok: true,
           model: model || mapped,
           mapped_model: mapped,
-          account: acct ? acct.name : '',
+          account: acct ? accounts.displayName(acct) : '',
           content: msg.content || '',
           reasoning: msg.reasoning_content || '',
           usage: u,

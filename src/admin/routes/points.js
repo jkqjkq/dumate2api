@@ -85,7 +85,7 @@ function listAccounts() {
       // 网页端凭证状态。null 表示没在账号管理里添加过这个账号。
       web: web ? {
         id: web.id,
-        name: web.name,
+        name: webAccounts.displayName(web),
         enabled: web.enabled,
         has_error: !!web.last_error,
         last_error: web.last_error || '',

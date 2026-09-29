@@ -28,6 +28,12 @@ export interface ChannelInfo {
   refreshExpired?: boolean
   /** 账号数。TRAE Work 是多账号自持凭证，徽标与仪表盘要显示「可用几个」 */
   accounts?: number
+  /**
+   * 搭子的凭证回落状态（桌面凭证不可用时自动走网页池，见 fallback-web.js）。
+   * 只有搭子通道有——直连通道没有「桌面/网页」两套凭证。
+   * `available` 才决定「回落能不能救」，`ready` 只说明桌面凭证本身。
+   */
+  fallback?: { enabled: boolean; available: boolean } | null
 }
 
 const STORAGE_KEY = 'lab-channel'

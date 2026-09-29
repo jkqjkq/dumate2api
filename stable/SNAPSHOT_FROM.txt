@@ -1,65 +1,44 @@
 快照指纹 sha256（stable/src 下 36 个 .js，按路径+内容计算）：
-8850729fdcccd240fc05baeee46e61dd0d568e0580a1f9098ef40db918c9182f
+96a22d7c24ce2fbb9f772d82f6e0e9f869b112737245d3a8e61170206980f613
 
 指纹算法（本文件从本次起显式写明，便于下次比对）：
   对 stable/src 下所有 .js 文件，按相对路径排序，
   拼接 [相对路径 + LF + 文件内容]，以 UTF-8 编码后取 sha256。
   上一版记录的值 f7e7a810… 用的是未记录的算法，已无法复现——本次起固定。
 
-来源：dev 分支提交 50ef0d7（工作区干净，无未提交改动）
-  50ef0d7 docs: 记录本轮四项决策与坑
-  2026-09-29
-  本轮 6 个提交（0e72e47..50ef0d7）全部进入快照。
+来源：dev 分支提交（代码评审修复后）
+  基线 8c98c80 chore(stable): 同步快照到 50ef0d7
+  2026-09-30
 
-本次同步覆盖的改动：
+本次同步的改动（代码评审 15 项发现中影响网关闭包的部分）：
 
-  【新增 2 个文件】快照此前只有 34 个，缺凭证回落机制所需的两份：
-    - src/web-pool.js        网页凭证账号池（轮询 + 故障转移）
-    - src/fallback-web.js    桌面凭证不可用时自动回落到网页池
-    这两份是 2026-09-27 加的，上一版快照（09-25）没有带上。缺了它们
-    网关能启动但 fallback-web 的 require 会失败。
+  accounts.js  新增 toPublic() 统一序列化，get() 也解析显示名。
+               根因是「改了 9 个模块漏了 3 个调用点」——list() 解析了
+               显示名而 get() 没有，同一个账号在两个接口里叫两个名字。
+               收敛到一处后，所有访问器（list/get/create/update）
+               必然给出同一个 name。同时新增 getRaw() 供内部改盘使用
+               （get() 现在返回对外形状，cookie 被抹掉，不能拿来回写）。
 
-  【更新 9 个文件】
-    - budget.js          输出预算下限 32768 → 65536（上一版已含，本次为
-                         与主目录逐字节对齐）
-    - responses.js       工具参数截断判为 incomplete（error=
-                         tool_arguments_truncated）；顺带修掉 emptyButTruncated
-                         把纯工具调用轮次误判成截断的问题
-    - qwenwork/chat.js   给带工具的请求注入「执行纪律」（withAgentDiscipline），
-                         幂等，DUMATE_QWENWORK_AGENT_DISCIPLINE=0 可关
-    - qwenwork/credits.js 通道状态改读账号池
-    - accounts.js        新增 displayName()：账号显示名优先级
-                         用户填的名字 > 上游昵称 > 占位名「账号 N」
-    - traework/checkin.js 签到报「到账差值」（签到前后余额快照之差），
-                         不再只报总额
-    - traework/auth.js / traework/credits.js / server.js  与主目录对齐
-
-  【本次未进快照】管理端（admin/）、前端（web/）、任务调度与登录器——
-    不是 9080 网关运行所必需。注意 admin/routes/accounts.js 的
-    backfillNickname（自愈回填昵称）属于管理端，**不在快照内**，
-    它对 9080 无影响（网关不调它）。
+  说明：其余修复位于管理端与前端（admin/routes/accounts.js 的
+  backfillNickname 三层保护与历史名重解析、task-runner.js 与
+  points.js 的显示名、前端路由与错误态），**不属于网关闭包**，
+  因此不在本快照内。快照仍严格等于网关依赖闭包（36 个文件）。
 
 验证记录（2026-09-29，全部实测）：
-  - 36 个文件与主目录 src 逐字节一致（含闭包完整性：36 = 闭包大小）
-  - 36 个文件 node --check 全通过
-  - 快照在临时端口 19099 独立启动成功，三条通道全部就绪
-    （dumate ready / qwenwork 2 账号 / traework 2 账号）
-  - /v1/models 返回 25 个模型
-  - 真实中文请求经网关返回正常（glm-5 →「收到」，finish_reason=stop）
-  - budget.resolveMaxTokens(0) = 65536（下限生效）
-  - test/smoke.js 32 项断言全部通过
-  - **未启动 9080**：本次只更新快照文件，按用户要求 9080 保持停止状态
+  - 36 个文件与主目录 src 逐字节一致（闭包 36 = 快照 36）
+  - node test/verify-display-name.js 17 项断言通过
+  - 其余 4 个离线验证脚本 + smoke.js 32 项全部通过
+  - **未启动 9080**：本次只更新快照文件，9080 保持停止状态
 
-启动方式的重要说明（沿用上一版）：
+启动方式的重要说明：
   9080 此前是**手工启动**的（未设 DUMATE_ADMIN_DATA），埋点会落在
-  `stable/data/`。该目录当前**不存在**（上次清理时已移除），但风险仍在：
-  若手工启动且不设 DUMATE_ADMIN_DATA，网关会退回到这个空目录，
-  里面**没有任何凭证**，千问与 TRAE 通道将无法工作。
+  `stable/data/`。该目录当前**不存在**，但风险仍在：若手工启动且不设
+  DUMATE_ADMIN_DATA，网关会退回到这个空目录，里面**没有任何凭证**，
+  千问与 TRAE 通道将无法工作。
   所以发布时必须按 start-stable.bat 启动（DUMATE_ADMIN_DATA=<repo>/data）。
-  已实测：用 <repo>/data 启动后三条通道全部就绪。
 
 上一版快照来源：
-  8cc53142d9718c7268792ac38dee5c5c93b0f3ff
-  8cc5314 feat(admin): TRAE Work 管理端集成 + 定时签到
-  2026-09-25 00:53:40 +0800
-  指纹 f7e7a810afc43e4cef4586c1f7ef1a2f2de2586ed98da1c8dcae34ae839368b6
+  8c98c80 chore(stable): 同步快照到 50ef0d7
+  2026-09-29
+  指纹 8850729fdcccd240fc05baeee46e61dd0d568e0580a1f9098ef40db918c9182f
+

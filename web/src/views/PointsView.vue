@@ -517,7 +517,8 @@
         <span class="text-xs text-slate-400">已签日来自上游 sign_in_days，是权威数据</span>
       </template>
       <a-spin :spinning="calLoading">
-        <a-empty v-if="!calendar?.accounts?.length" description="还没有账号" />
+        <a-alert v-if="calError" type="error" show-icon :message="calError" class="mb-2" />
+        <a-empty v-else-if="!calendar?.accounts?.length" description="还没有账号" />
         <div v-for="a in calendar?.accounts ?? []" :key="a.account_id" class="mb-4">
           <div class="flex items-center justify-between mb-2">
             <div>
@@ -557,7 +558,8 @@
 
       <!-- 按天聚合：一眼看出哪天做了什么。只标类型不显示次数——
            「哪天做过什么」是这张表要回答的，次数在下面明细里能数。 -->
-      <a-empty v-if="!ops?.daily?.length" description="还没有操作记录" />
+      <a-alert v-if="opError" type="error" show-icon :message="opError" class="mb-2" />
+      <a-empty v-else-if="!ops?.daily?.length" description="还没有操作记录" />
       <a-table
         v-else
         size="small"
@@ -770,6 +772,10 @@ const ops = ref<RecordsData | null>(null)
 const calendar = ref<CheckinCalendarData | null>(null)
 const opLoading = ref(false)
 const calLoading = ref(false)
+// 拉取失败与「确实没有记录」必须分开：前者是故障，后者是正常空态。
+// 折成一个空态等于把一次失败断言成「确实没签到过」。
+const opError = ref('')
+const calError = ref('')
 const opType = ref('')
 const opAccount = ref<number | null>(null)
 const opDays = ref(30)
@@ -833,6 +839,7 @@ function monthDays(a: { sign_in_days: string[] }) {
 
 async function loadOps() {
   opLoading.value = true
+  opError.value = ''
   try {
     const params = new URLSearchParams()
     if (opType.value) params.set('type', opType.value)
@@ -845,23 +852,44 @@ async function loadOps() {
       ...data,
       rows: (data.rows || []).map((r: any, i: number) => ({ ...r, rowKey: `${r.ts}-${r.type}-${i}` })),
     }
-    // 用记录里出现的账号补全筛选选项，避免额外请求
-    if (opAccountOptions.value.length === 1 && data.daily?.length) {
-      opAccountOptions.value = [
-        { label: '全部账号', value: null },
-        ...data.daily.map((d: any) => ({ label: d.account, value: d.account_id })),
-      ]
-    }
+  } catch (e: any) {
+    // 取不到要如实说「拉取失败」，不能渲染成「还没有操作记录」——
+    // 那是把一次失败断言成「确实没签到过」，用户会据此以为账号没问题
+    opError.value = e?.response?.data?.error || e?.message || '操作流水加载失败'
+    ops.value = null
   } finally {
     opLoading.value = false
   }
 }
 
+/**
+ * 账号筛选选项**独立拉取**，不从记录里反推。
+ *
+ * 原来是从 /records 的 daily 里补全，且只在 `length===1 && daily?.length`
+ * 时填一次。两个后果：首次响应没有记录（默认 30 天窗口内无活动）就永远
+ * 停在「全部账号」；窗口外有记录的账号也选不到。账号列表本来就有一个
+ * 现成接口，直接用它更准也更简单。
+ */
+async function loadOpAccounts() {
+  try {
+    const { data } = await client.get('/web-accounts')
+    opAccountOptions.value = [
+      { label: '全部账号', value: null },
+      ...(data.accounts || []).map((a: any) => ({ label: a.name, value: a.id })),
+    ]
+  } catch (e) { /* 取不到就保持「全部账号」，不影响主列表 */ }
+}
+
 async function loadCalendar() {
   calLoading.value = true
+  calError.value = ''
   try {
     const { data } = await client.get('/web-accounts/checkin-calendar')
     calendar.value = data
+  } catch (e: any) {
+    // 同上：拉取失败与「没有账号」是两回事
+    calError.value = e?.response?.data?.error || e?.message || '签到日历加载失败'
+    calendar.value = null
   } finally {
     calLoading.value = false
   }
@@ -1097,6 +1125,7 @@ onMounted(() => {
   else {
     load()
     loadOps()
+    loadOpAccounts()
     loadCalendar()
   }
   window.addEventListener('resize', onResize)
@@ -1109,6 +1138,7 @@ watch(() => channelStore.current, () => {
   else {
     load()
     loadOps()
+    loadOpAccounts()
     loadCalendar()
   }
 })

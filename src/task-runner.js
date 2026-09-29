@@ -210,7 +210,7 @@ async function listTasks() {
     const draw = await web.api.drawStatus(a.cookie);
     out.push({
       account_id: a.id,
-      name: a.name,
+      name: accounts.displayName(a),
       nickname: a.nickname || '',
       ok: t.ok,
       error: t.ok ? '' : t.error,

@@ -36,23 +36,74 @@ const detailCache = new Map();
  * 只补 `nickname` 与 `uid` 两个**上游权威字段**，不动用户自己填的 `name`
  * ——`name` 是用户可见可改的标签，覆盖它等于替用户做决定。
  *
+ * 三层保护，缺一不可（都针对「这是个读路径，不能拖慢主流程」）：
+ *   1. **负缓存**：取不到昵称的账号在 TTL 内不重试。桌面凭证失效的账号
+ *      永远取不到昵称，没有这层的话每次进仪表盘都要为它白等一次超时。
+ *   2. **并发去重**：同一账号的并发请求只打一次上游（仪表盘 + 积分明细
+ *      可能同时开火）。
+ *   3. **显式超时**：`userInfo` 自身超时 20s，而前端 axios 是 30s——几个
+ *      失效账号叠加就能把整页拖垮。这里压到 8s，失败即走负缓存。
+ *
  * @returns {Promise<string>} 补到的昵称；取不到时返回已有的（可能为 ''）
  */
+const NICK_FAIL_TTL_MS = 10 * 60 * 1000;
+const NICK_TIMEOUT_MS = 8000;
+// 最近一次补昵称失败的时刻（按账号 id）。TTL 内不重试
+const nickFailAt = new Map();
+// 正在飞的补昵称请求（按账号 id），并发去重
+const nickInflight = new Map();
+
+function withTimeout(promise, ms) {
+  return Promise.race([
+    promise,
+    new Promise((resolve) => setTimeout(() => resolve(null), ms)),
+  ]);
+}
+
 async function backfillNickname(account) {
   if (!account) return '';
   if (account.nickname) return account.nickname;
-  try {
-    const info = await web.api.userInfo(account.cookie);
-    if (!info || !info.ok || !info.nickname) return account.nickname || '';
-    accounts.patchInternal(account.id, {
-      nickname: info.nickname,
-      ...(info.uid ? { uid: info.uid } : {}),
-    });
-    return info.nickname;
-  } catch (e) {
-    // 补昵称失败绝不能影响主流程（签到、查积分都不该因此中断）
-    return account.nickname || '';
-  }
+  const id = account.id;
+  const failedAt = nickFailAt.get(id);
+  if (failedAt && Date.now() - failedAt < NICK_FAIL_TTL_MS) return account.nickname || '';
+  const flying = nickInflight.get(id);
+  if (flying) return flying;
+
+  const task = (async () => {
+    try {
+      const info = await withTimeout(web.api.userInfo(account.cookie), NICK_TIMEOUT_MS);
+      if (!info || !info.ok || !info.nickname) {
+        nickFailAt.set(id, Date.now());
+        return account.nickname || '';
+      }
+      accounts.patchInternal(id, {
+        nickname: info.nickname,
+        ...(info.uid ? { uid: info.uid } : {}),
+      });
+      nickFailAt.delete(id);
+      return info.nickname;
+    } catch (e) {
+      // 补昵称失败绝不能影响主流程（签到、查积分都不该因此中断）
+      nickFailAt.set(id, Date.now());
+      return account.nickname || '';
+    } finally {
+      nickInflight.delete(id);
+    }
+  })();
+  nickInflight.set(id, task);
+  return task;
+}
+
+/**
+ * 批量补昵称，**只对启用且昵称为空的账号**打上游。
+ *
+ * 抽出来是因为挂载点不止一处（仪表盘、账号详情、积分明细），
+ * 各写一遍必然漏掉某个保护。禁用账号不必补——它不参与任何操作。
+ */
+async function backfillAll(list) {
+  const need = (list || []).filter((a) => a && a.enabled !== false && !a.nickname);
+  if (!need.length) return;
+  await Promise.all(need.map((a) => backfillNickname(a)));
 }
 
 // 服务端自动发放的登录奖励，补记到操作流里。
@@ -307,11 +358,15 @@ const routes = [
             });
           }
           require('../../admin/auth').audit('admin', 'web_account_create', accounts.displayName(created), 'via browser');
+          // 回包用**对外形状**：created 是 create() 的返回值，其中的 name
+          // 已是显示名；但 uid/nickname 是这次刚拿到的，要合进去再序列化，
+          // 否则新账号的回包会漏掉昵称（下一个接口才补上）。
+          const fresh = accounts.getRaw(created.id) || created;
           return sendJSON(res, 200, {
             ...s, status: 'saved', has_cookie: false,
-            account: accounts.get(created.id) ? {
-              ...created, uid: info?.uid || '', nickname: info?.nickname || '',
-            } : created,
+            account: accounts.toPublic({
+              ...fresh, uid: info?.uid || '', nickname: info?.nickname || '',
+            }),
           });
         } catch (e) {
           // 已存在同账号等：如实报错，但不把 cookie 丢掉——用户可改用粘贴方式
@@ -405,7 +460,7 @@ const routes = [
     method: 'POST',
     path: '/:id/checkin',
     handler: async ({ res, params }) => {
-      const acc = accounts.get(params[0]);
+      const acc = accounts.getRaw(params[0]);
       if (!acc) return sendJSON(res, 404, { error: '账号不存在' });
       const result = await doCheckin(acc);
       require('../../admin/auth').audit('admin', 'web_checkin', accounts.displayName(acc), result.ok ? 'ok' : result.error);
@@ -419,6 +474,8 @@ const routes = [
     handler: async ({ res }) => {
       const targets = accounts.load().accounts.filter((a) => a.enabled);
       if (!targets.length) return sendJSON(res, 200, { results: [], ok_count: 0, fail_count: 0 });
+      // 签到记录里要写账号名，先补昵称——否则 activity.jsonl 会冻结占位名
+      await backfillAll(targets);
       const results = await Promise.all(targets.map((a) => doCheckin(a)));
       const ok = results.filter((r) => r.ok).length;
       require('../../admin/auth').audit('admin', 'web_checkin_all', '', `${ok}/${results.length}`);
@@ -430,7 +487,7 @@ const routes = [
     method: 'GET',
     path: '/:id/status',
     handler: async ({ res, params }) => {
-      const acc = accounts.get(params[0]);
+      const acc = accounts.getRaw(params[0]);
       if (!acc) return sendJSON(res, 404, { error: '账号不存在' });
 
       const [bonus, draw, points, tasks] = await Promise.all([
@@ -492,7 +549,7 @@ const routes = [
     method: 'POST',
     path: '/:id/draw',
     handler: async ({ res, params, body }) => {
-      const acc = accounts.get(params[0]);
+      const acc = accounts.getRaw(params[0]);
       if (!acc) return sendJSON(res, 404, { error: '账号不存在' });
       const times = Math.max(1, Math.min(10, parseInt((body && body.times) || 1, 10)));
 
@@ -528,7 +585,7 @@ const routes = [
     method: 'POST',
     path: '/:id/claim-prize',
     handler: async ({ res, params, body }) => {
-      const acc = accounts.get(params[0]);
+      const acc = accounts.getRaw(params[0]);
       if (!acc) return sendJSON(res, 404, { error: '账号不存在' });
       const prizeId = body && body.prize_id;
       if (!prizeId) return sendJSON(res, 400, { error: '缺少 prize_id' });
@@ -540,7 +597,7 @@ const routes = [
     method: 'GET',
     path: '/:id/points',
     handler: async ({ res, params }) => {
-      const acc = accounts.get(params[0]);
+      const acc = accounts.getRaw(params[0]);
       if (!acc) return sendJSON(res, 404, { error: '账号不存在' });
       const [points, charge, usage] = await Promise.all([
         web.api.quotaOverview(acc.cookie),
@@ -568,6 +625,9 @@ const routes = [
       const force = /[?&]refresh=1/.test(req.url || '');
       const list = accounts.load().accounts.filter((a) => a.enabled);
 
+      // 回包要带显示名，先补昵称——这条路径也触达上游，没理由不顺手补
+      await backfillAll(list);
+
       const results = await Promise.all(list.map(async (a) => {
         // name 给**解析后的显示名**（占位名会被真实昵称顶掉），
         // nickname 保持原义（上游真实昵称，可能为空）——两个都留着，
@@ -577,7 +637,10 @@ const routes = [
         // 会让账号文件无谓膨胀。磁盘上仍然只留 left/total/used 摘要。
         const hit = detailCache.get(a.id);
         if (!force && hit && Date.now() - hit.at < DETAIL_CACHE_TTL_MS) {
-          return { ...base, ...hit.data, cached: true };
+          // **base 后展开**：缓存里冻着入缓存那一刻的 name，而 base 是本次
+          // 刚解析的显示名。反过来写会让 60s 内改好的昵称被旧名盖回去——
+          // 仪表盘显示「张三」、积分明细显示「账号 1」。
+          return { ...hit.data, ...base, cached: true };
         }
 
         const r = await web.api.quotaOverview(a.cookie);
@@ -657,7 +720,7 @@ const routes = [
       const only = body && body.account_id ? Number(body.account_id) : null;
       let results;
       if (only) {
-        const acc = accounts.get(only);
+        const acc = accounts.getRaw(only);
         if (!acc) return sendJSON(res, 404, { error: '账号不存在' });
         results = [await taskRunner.runForAccount(acc)];
       } else {
@@ -811,12 +874,24 @@ const routes = [
       const since = Date.now() - days * 86400000;
 
       const { rows, total } = records.read({ limit, account_id: accountId, type, since });
+      const daily = records.dailySummary(days);
+      // 历史记录里的 account 是**写入当时冻结的字符串**：改昵称前写的那些行
+      // 会永远停在占位名「账号 N」，而签到日历（实时解析）已经显示「张三」
+      // ——同一页两个名字。记录本身是既成事实不该改写，但**显示名是账号的
+      // 属性**，所以读取时按 account_id 重解析一次。账号已删除时回落到
+      // 冻结值（那时它确实只剩这个名字了）。
+      const nameOf = (id, fallback) => {
+        const raw = accounts.getRaw(id);
+        return raw ? accounts.displayName(raw) : (fallback || '');
+      };
+      for (const r of rows) r.account = nameOf(r.account_id, r.account);
+      for (const d of daily) d.account = nameOf(d.account_id, d.account);
       return sendJSON(res, 200, {
         rows,
         total,
         days,
         // 日历视图要的按天聚合
-        daily: records.dailySummary(days),
+        daily,
         // 记录类型与含义，前端据此渲染标签，避免各处自己硬编码
         types: {
           checkin: '签到',
@@ -868,9 +943,9 @@ const routes = [
       const gatewayPort = parseInt(process.env.DUMATE_WEB_GATEWAY_PORT || '9084', 10);
 
       // 先补昵称再算指标：下面各处（健康快照、即将过期明细）都要用显示名，
-      // 补完这一轮后续全部拿到真实昵称。**并发且幂等**——已有昵称的账号
-      // 不会打上游，所以对已修好的账号这条语句是零成本。
-      await Promise.all(list.map((a) => backfillNickname(a)));
+      // 补完这一轮后续全部拿到真实昵称。**只对启用且昵称为空的账号**打上游，
+      // 失败走负缓存——见 backfillAll 的注释。
+      await backfillAll(list);
 
       // 网关的实时池状态（token 缓存、冷却）只在网关进程里，能读到就用，
       // 读不到也不影响其余指标
@@ -1054,7 +1129,7 @@ const routes = [
     method: 'POST',
     path: '/:id/probe-model',
     handler: async ({ res, params }) => {
-      const acc = accounts.get(params[0]);
+      const acc = accounts.getRaw(params[0]);
       if (!acc) return sendJSON(res, 404, { error: '账号不存在' });
       const r = await webPool.probe(acc.id);
       return sendJSON(res, r.ok ? 200 : 502, r);

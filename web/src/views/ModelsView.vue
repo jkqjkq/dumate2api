@@ -230,21 +230,38 @@
       </div>
       <div class="qw-channel-cell">
         <div class="cell-label">桌面登录账号</div>
-        <div class="cell-value">{{ dumateMeta.account }}</div>
+        <div class="cell-value">
+          <!-- 桌面凭证失效时 activeProfile() 就是 null，这里必然显示 —。
+               与「凭证来源：网页凭证回落」并排时容易被读成「桌面账号丢了」，
+               所以补一句说明：此刻请求走的是网页池，— 是预期而不是故障。 -->
+          <template v-if="dumateMeta.account">{{ dumateMeta.account }}</template>
+          <template v-else>
+            <span class="text-slate-400">—</span>
+            <span v-if="dumateOnWebFallback" class="cell-sub">桌面凭证失效，当前走网页池</span>
+          </template>
+        </div>
       </div>
       <div class="qw-channel-cell">
         <div class="cell-label">凭证来源</div>
         <div class="cell-value">
-          <!-- 桌面凭证不可用时会自动回落到网页池（见 fallback-web.js），
-               排障时必须知道请求走的是哪条链路。**只在状态已知时下结论**：
-               infos 还没加载时显示「—」，不能默认成「桌面凭证」或
-               「网页回落」——那会把一次未加载说成一个确定的故障。 -->
-          <template v-if="channelStore.infos['dumate']">
-            <a-tag :color="channelStore.infos['dumate']!.ready ? 'green' : 'orange'">
-              {{ channelStore.infos['dumate']!.ready ? '桌面凭证' : '网页凭证回落' }}
-            </a-tag>
+          <!-- 桌面凭证不可用时会自动回落到网页池（见 fallback-web.js）。
+               **两种「不可用」必须分开**：ready=false 且 fallback.available=true
+               → 请求仍能成功（走网页池）；两者都不可用 → 请求真的全失败。
+               把后者说成「网页凭证回落」会把排查引向错误方向。
+               infos 未加载时显示 —，不下任何结论。 -->
+          <template v-if="!channelStore.infos['dumate']">
+            <span class="text-slate-400">—</span>
           </template>
-          <span v-else class="text-slate-400">—</span>
+          <template v-else-if="channelStore.infos['dumate']!.ready">
+            <a-tag color="green">桌面凭证</a-tag>
+          </template>
+          <template v-else-if="channelStore.infos['dumate']!.fallback?.available">
+            <a-tag color="orange">网页凭证回落</a-tag>
+          </template>
+          <template v-else>
+            <a-tag color="red">凭证不可用</a-tag>
+            <span class="cell-sub">回落也不可用</span>
+          </template>
         </div>
       </div>
     </div>
@@ -477,8 +494,16 @@ const dumateMeta = computed(() => {
   return {
     port: s?.upstream?.port ?? ch?.port ?? null,
     managed: s?.upstream?.managed ?? !!ch?.managed,
-    account: s?.account?.name || '—',
+    // **保留 null**，不要在这里折成 '—'：模板要据此区分「有账号」与
+    // 「桌面凭证失效」，折成字符串就把两种情况抹平了
+    account: s?.account?.name || null,
   }
+})
+
+// 桌面凭证失效、但回落可用——此刻请求走网页池，是正常状态不是故障
+const dumateOnWebFallback = computed(() => {
+  const ch = channelStore.infos['dumate']
+  return !!ch && !ch.ready && !!ch.fallback?.available
 })
 
 const twVisible = computed(() => twModels.value.filter((m) => m.visible))

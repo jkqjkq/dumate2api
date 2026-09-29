@@ -117,10 +117,38 @@ const routes = [
         // 千问办公是进程内直连（无端口，靠 wasm + 登录态）。
         // 分开报是为了让界面能回答「qwen/ 请求会在哪一步失败」。
         channels: (() => {
+          // 搭子的账号信息与回落状态。
+          //
+          // 为什么必须报这两样：桌面凭证不可用时网关会**自动回落到网页凭证池**
+          // （fallback-web.js），此时 ready=false 但请求仍然成功——界面若只看
+          // ready，会把「正在用网页池」说成「凭证坏了」；而桌面凭证失效且回落
+          // 也不可用时请求是真的全失败，此时又必须能说出来。
+          // 网关的 /health 已经有 channels.dumate.fallback，这里补上同一口径。
+          const dumateExtra = (() => {
+            const out = { fallback: null, account: null, accounts: 0 };
+            try {
+              const launcher = require('../../upstream-launcher');
+              const p = launcher.activeProfile();
+              if (p) out.account = p.name || p.userId || '';
+            } catch (e) { /* 读不到就留 null */ }
+            try {
+              // 网页凭证池：可用账号数 + 回落开关。回落可用性看「有没有可用账号」
+              // 与开关状态，与网关 /health 的 fallback.available 同口径
+              const pool = require('../../web-pool');
+              const state = pool.snapshot ? pool.snapshot() : [];
+              out.accounts = state.filter((a) => a.enabled).length;
+              out.fallback = {
+                enabled: process.env.DUMATE_WEB_FALLBACK !== '0',
+                available: state.some((a) => a.enabled),
+              };
+            } catch (e) { /* 池读不到就留 null */ }
+            return out;
+          })();
           const out = {
             dumate: {
               id: 'dumate', label: '百度搭子', kind: 'http',
               port: upstreamPort, ready: !!upstreamPort, managed: upstreamManaged,
+              ...dumateExtra,
             },
           };
           try {
