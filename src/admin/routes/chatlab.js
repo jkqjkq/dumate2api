@@ -239,7 +239,7 @@ const routes = [
         try {
           res.write(`data: ${JSON.stringify({
             type: 'meta', model: model || mapped, mapped_model: mapped,
-            account: account ? account.name : '',
+            account: account ? accounts.displayName(account) : '',
           })}\n\n`);
         } catch (e) { /* 忽略 */ }
       };
@@ -325,14 +325,14 @@ const routes = [
         key_id: 0, key: '', upstream: 'web',
         // 同非流式分支：走的是搭子上游，凭证来自网页 cookie
         channel: 'dumate',
-        account: account.name,
+        account: accounts.displayName(account),
         error: upstreamErr,
       });
       // 与请求日志同一条余额游标链：「本次消耗」和日志里的实测值才能对上
-      if (!upstreamErr) pointsCursor.capture(Date.now(), account.name);
+      if (!upstreamErr) pointsCursor.capture(Date.now(), accounts.displayName(account));
 
       if (upstreamErr) sendFinal({ type: 'error', error: upstreamErr });
-      sendFinal({ type: 'done', usage, account: account.name, cost });
+      sendFinal({ type: 'done', usage, account: accounts.displayName(account), cost });
       res.end();
     },
   },

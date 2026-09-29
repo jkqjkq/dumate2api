@@ -159,21 +159,21 @@ const routes = [
       for (const a of list) {
         const r = await web.api.usageRecords(a.cookie, { startAt, endAt: now, page, limit });
         if (!r.ok) {
-          perAccount.push({ id: a.id, name: a.name, nickname: a.nickname || '', ok: false, error: r.error, rows: [] });
+          perAccount.push({ id: a.id, name: accounts.displayName(a), nickname: a.nickname || '', ok: false, error: r.error, rows: [] });
           continue;
         }
         totalCount += Number(r.total_count || 0);
         totalConsumed += Number(r.consumed_points || 0);
         perAccount.push({
           id: a.id,
-          name: a.name,
+          name: accounts.displayName(a),
           nickname: a.nickname || '',
           ok: true,
           total_count: Number(r.total_count || 0),
           consumed_points: Number(r.consumed_points || 0),
           rows: (r.list || []).map((it) => ({
             account_id: a.id,
-            account: a.nickname || a.name,
+            account: accounts.displayName(a),
             // 上游给的是秒级时间戳，这里统一成毫秒，前端与请求日志同口径
             ts: Number(it.createdAt || 0) * 1000,
             // pointsChange 是字符串且带负号（"-5.58"），转成数值便于排序与着色

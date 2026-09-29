@@ -37,6 +37,7 @@
 // 本项目在别处踩过同样的坑（见 server.js 里 writeSSEHead 的注释）。
 const { EventEmitter } = require('events');
 const pool = require('./web-pool');
+const accounts = require('./accounts');
 
 // 回落开关。默认开启——它存在的理由（桌面凭证过期）是常态而非例外。
 // 设 0 可关掉，便于排查「是不是回落导致的怪现象」。
@@ -112,9 +113,9 @@ function callWebPool(body, opts = {}) {
       if (r && r.account) {
         // 挂到 emitter 上：调用方在回调里读它写埋点。
         // 多账号轮询下「实际用了哪个」只有池子知道，在埋点处猜必然是错的。
-        emitter._account = r.account.name;
+        emitter._account = accounts.displayName(r.account);
         if (typeof opts.onAccount === 'function') {
-          try { opts.onAccount(r.account.name); } catch (e) { /* 归因失败不影响转发 */ }
+          try { opts.onAccount(accounts.displayName(r.account)); } catch (e) { /* 归因失败不影响转发 */ }
         }
       }
       if (!r) {

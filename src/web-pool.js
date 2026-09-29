@@ -268,7 +268,7 @@ async function callWithFailover(path, method, body, opts = {}) {
     }
 
     markFailure(item.account.id, r.error || (r.json && r.json.error && r.json.error.message) || `HTTP ${r.status}`);
-    errors.push({ account: item.account.name, status: r.status, error: r.last_error || r.error });
+    errors.push({ account: accounts.displayName(item.account), status: r.status, error: r.last_error || r.error });
   }
 
   return {
@@ -321,7 +321,7 @@ async function callStreamWithFailover(path, method, body, onChunk, opts = {}) {
       return { ...r, attempts: i + 1, no_retry: true };
     }
     markFailure(item.account.id, r.error || `HTTP ${status}`);
-    errors.push({ account: item.account.name, status, error: r.error });
+    errors.push({ account: accounts.displayName(item.account), status, error: r.error });
   }
 
   return {
@@ -340,7 +340,8 @@ function snapshot() {
     const st = stateOf(a.id);
     return {
       id: a.id,
-      name: a.name,
+      // 显示名统一走 displayName：占位名「账号 N」会被真实昵称顶掉
+      name: accounts.displayName(a),
       nickname: a.nickname || '',
       enabled: a.enabled,
       has_token: !!st.token,

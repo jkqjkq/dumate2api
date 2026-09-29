@@ -27,14 +27,14 @@ async function pointsUsage(days) {
     // 明细列表这个页面用不上，取全量只是白白多传数据
     const r = await web.api.usageRecords(a.cookie, { startAt: start, endAt: now, page: 1, limit: 1 });
     if (!r.ok) {
-      perAccount.push({ id: a.id, name: a.name, ok: false, error: r.error });
+      perAccount.push({ id: a.id, name: accounts.displayName(a), ok: false, error: r.error });
       continue;
     }
     const consumed = Number(r.consumed_points || 0);
     const cnt = Number(r.total_count || 0);
     total += consumed;
     count += cnt;
-    perAccount.push({ id: a.id, name: a.name, ok: true, consumed_points: consumed, count: cnt });
+    perAccount.push({ id: a.id, name: accounts.displayName(a), ok: true, consumed_points: consumed, count: cnt });
   }
 
   return { total_consumed: Math.round(total * 100) / 100, total_records: count, accounts: perAccount };

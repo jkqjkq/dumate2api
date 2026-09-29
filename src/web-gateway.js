@@ -10,6 +10,7 @@ const http = require('http');
 const https = require('https');
 const crypto = require('crypto');
 const pool = require('./web-pool');
+const accounts = require('./accounts');
 const keysvc = require('./keys');
 const reqlog = require('./reqlog');
 const pointsCursor = require('./points-cursor');
@@ -144,7 +145,7 @@ async function handleOpenAIChat(req, res) {
     return streamOpenAI(r, req, res, startedAt, info);
   }
 
-  logRequest(req, res, startedAt, info, 200, pickUsage(r.json && r.json.usage), { account: r.account.name });
+  logRequest(req, res, startedAt, info, 200, pickUsage(r.json && r.json.usage), { account: accounts.displayName(r.account) });
   return sendJSON(res, 200, r.json);
 }
 
@@ -178,7 +179,7 @@ function streamOpenAI(r, req, res, startedAt, info) {
   }
   res.write('data: [DONE]\n\n');
   res.end();
-  logRequest(req, res, startedAt, info, 200, pickUsage(j.usage), { account: r.account.name });
+  logRequest(req, res, startedAt, info, 200, pickUsage(j.usage), { account: accounts.displayName(r.account) });
 }
 
 // ==================== Anthropic 兼容 ====================
@@ -220,7 +221,7 @@ async function handleAnthropicMessages(req, res) {
   }
 
   const anthropicResp = openAIToAnthropic(r.json || {}, anthropicReq.model);
-  logRequest(req, res, startedAt, info, 200, pickUsage(r.json && r.json.usage), { account: r.account.name });
+  logRequest(req, res, startedAt, info, 200, pickUsage(r.json && r.json.usage), { account: accounts.displayName(r.account) });
   return sendJSON(res, 200, anthropicResp);
 }
 
@@ -273,7 +274,7 @@ function translateStreamToAnthropic(r, req, res, startedAt, info, originalModel)
   send('message_stop', { type: 'message_stop' });
   res.end();
 
-  logRequest(req, res, startedAt, info, 200, usage, { account: r.account.name });
+  logRequest(req, res, startedAt, info, 200, usage, { account: accounts.displayName(r.account) });
 }
 
 // ==================== Google 兼容 ====================
@@ -360,7 +361,7 @@ async function handleGoogleGenerate(req, res, pathModel, isStream) {
   } else {
     sendJSON(res, 200, out);
   }
-  logRequest(req, res, startedAt, info, 200, pickUsage(j.usage), { account: r.account.name });
+  logRequest(req, res, startedAt, info, 200, pickUsage(j.usage), { account: accounts.displayName(r.account) });
 }
 
 // ==================== 服务 ====================

@@ -849,7 +849,7 @@
         <a-col v-for="a in dash.accounts" :key="a.id" :span="8">
           <div class="p-3 border border-slate-200 rounded">
             <div class="flex items-center justify-between mb-2">
-              <span class="font-medium">{{ a.nickname || a.name }}</span>
+              <span class="font-medium">{{ a.name }}</span>
               <a-tag :color="a.last_error ? 'red' : a.enabled ? 'green' : 'default'">
                 {{ a.last_error ? '异常' : a.enabled ? '在线' : '停用' }}
               </a-tag>

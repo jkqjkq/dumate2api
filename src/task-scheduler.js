@@ -88,13 +88,13 @@ async function runOnce(trigger) {
       try {
         const r = await taskRunner.runForAccount(a);
         results.push({
-          name: a.name, ok: r.ok, done: r.done_count || 0,
+          name: accounts.displayName(a), ok: r.ok, done: r.done_count || 0,
           already: r.already_count || 0, fail: r.fail_count || 0,
           not_automatable: (r.not_automatable || []).length,
           error: r.error || '',
         });
       } catch (e) {
-        results.push({ name: a.name, ok: false, error: e.message });
+        results.push({ name: accounts.displayName(a), ok: false, error: e.message });
       }
     }
 

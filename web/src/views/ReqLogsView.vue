@@ -165,7 +165,7 @@
       />
       <div v-if="points?.accounts?.length" class="mb-3 flex flex-wrap gap-2">
         <a-tag v-for="a in points.accounts" :key="a.id" :color="a.ok ? 'blue' : 'red'">
-          {{ a.nickname || a.name }}
+          {{ a.name }}
           <template v-if="a.ok">：{{ fmtNum(a.consumed_points ?? 0) }} 积分 / {{ a.total_count ?? 0 }} 笔</template>
           <template v-else>：{{ a.error }}</template>
         </a-tag>
@@ -434,7 +434,7 @@ const pointsColumns = [
 const accountFilterOptions = computed(() => {
   const opts = [{ label: '全部账号', value: null as number | null }]
   for (const a of points.value?.accounts ?? []) {
-    opts.push({ label: a.nickname || a.name, value: a.id })
+    opts.push({ label: a.name, value: a.id })
   }
   return opts
 })

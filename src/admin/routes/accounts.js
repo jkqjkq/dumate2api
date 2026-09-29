@@ -21,6 +21,40 @@ const LOGIN_URL = 'https://login.bce.baidu.com/?redirect=' +
 const DETAIL_CACHE_TTL_MS = 60 * 1000;
 const detailCache = new Map();
 
+/**
+ * 从上游补回账号的真实昵称与 uid（**幂等，已有昵称时不打上游**）。
+ *
+ * 为什么需要它：`nickname` 早先只在**浏览器登录**那条路径（`/login/poll`）回填，
+ * 而手动粘贴 cookie 添加的账号走 `POST /web-accounts`，那条路径从不写 nickname
+ * ——于是这些账号的显示名永久停在 `create()` 生成的占位名「账号 N」，
+ * 即使上游明明返回了「张三」。界面上就是「为什么显示账号 1 而不是用户名」。
+ *
+ * 修法是**自愈而不是一次性迁移**：任何一次触达上游的路径顺手补一次，
+ * 已经补过的直接返回，不打上游。这样不用写迁移脚本，老账号也会在
+ * 下次签到/刷新状态时自动补上。
+ *
+ * 只补 `nickname` 与 `uid` 两个**上游权威字段**，不动用户自己填的 `name`
+ * ——`name` 是用户可见可改的标签，覆盖它等于替用户做决定。
+ *
+ * @returns {Promise<string>} 补到的昵称；取不到时返回已有的（可能为 ''）
+ */
+async function backfillNickname(account) {
+  if (!account) return '';
+  if (account.nickname) return account.nickname;
+  try {
+    const info = await web.api.userInfo(account.cookie);
+    if (!info || !info.ok || !info.nickname) return account.nickname || '';
+    accounts.patchInternal(account.id, {
+      nickname: info.nickname,
+      ...(info.uid ? { uid: info.uid } : {}),
+    });
+    return info.nickname;
+  } catch (e) {
+    // 补昵称失败绝不能影响主流程（签到、查积分都不该因此中断）
+    return account.nickname || '';
+  }
+}
+
 // 服务端自动发放的登录奖励，补记到操作流里。
 //
 // 为什么需要它：实测 login_bonus 的 granted_at 是当天 00:00:00，服务端按天
@@ -60,7 +94,7 @@ async function recordAutoGrant(account, beforeSnapshot) {
     records.append({
       type: 'grant',
       account_id: account.id,
-      account: account.name,
+      account: accounts.displayName(account),
       ok: true,
       result: 'auto_login_bonus',
       source: pkg.source,
@@ -103,10 +137,10 @@ async function doCheckin(account) {
       last_login_ok_at: info.expired ? null : account.last_login_ok_at,
     });
     records.append({
-      type: 'checkin', account_id: account.id, account: account.name,
+      type: 'checkin', account_id: account.id, account: accounts.displayName(account),
       ok: false, result: 'failed', error: info.error,
     });
-    return { id: account.id, name: account.name, ok: false, error: info.error, expired: !!info.expired };
+    return { id: account.id, name: accounts.displayName(account), ok: false, error: info.error, expired: !!info.expired };
   }
 
   // 已签到就不再打上游：签到接口本身幂等，但重复调用没有意义，
@@ -132,7 +166,7 @@ async function doCheckin(account) {
     // 不是这次调用带来的，记到这次头上会把两件事混成一件事。
     const cur = account._pointsBefore ? account._pointsBefore.left : null;
     const ret = {
-      id: account.id, name: account.name, ok: true, already: true, info,
+      id: account.id, name: accounts.displayName(account), ok: true, already: true, info,
       points_delta: null, points_before: cur, points_after: cur,
     };
 
@@ -142,7 +176,7 @@ async function doCheckin(account) {
     if (grant) ret.auto_grant = grant;
 
     records.append({
-      type: 'checkin', account_id: account.id, account: account.name,
+      type: 'checkin', account_id: account.id, account: accounts.displayName(account),
       ok: true, result: 'already', total_times: info.total_times,
       total_points: info.total_points,
       points_delta: null, points_before: cur, points_after: cur,
@@ -169,7 +203,7 @@ async function doCheckin(account) {
     },
   });
   records.append({
-    type: 'checkin', account_id: account.id, account: account.name,
+    type: 'checkin', account_id: account.id, account: accounts.displayName(account),
     ok: res.ok, result: res.ok ? 'claimed' : 'failed',
     total_times: info.total_times,
     total_points: info.total_points,
@@ -179,7 +213,7 @@ async function doCheckin(account) {
     error: res.error || '',
   });
   return {
-    id: account.id, name: account.name, ok: res.ok, error: res.error, info,
+    id: account.id, name: accounts.displayName(account), ok: res.ok, error: res.error, info,
     points_delta: pd.delta, points_before: pd.before, points_after: pd.after,
   };
 }
@@ -272,7 +306,7 @@ const routes = [
               last_error: '',
             });
           }
-          require('../../admin/auth').audit('admin', 'web_account_create', created.name, 'via browser');
+          require('../../admin/auth').audit('admin', 'web_account_create', accounts.displayName(created), 'via browser');
           return sendJSON(res, 200, {
             ...s, status: 'saved', has_cookie: false,
             account: accounts.get(created.id) ? {
@@ -323,7 +357,7 @@ const routes = [
     handler: ({ res, body }) => {
       try {
         const created = accounts.create(body || {});
-        require('../../admin/auth').audit('admin', 'web_account_create', created.name);
+        require('../../admin/auth').audit('admin', 'web_account_create', accounts.displayName(created));
         return sendJSON(res, 200, created);
       } catch (e) {
         return sendJSON(res, 400, { error: e.message });
@@ -374,7 +408,7 @@ const routes = [
       const acc = accounts.get(params[0]);
       if (!acc) return sendJSON(res, 404, { error: '账号不存在' });
       const result = await doCheckin(acc);
-      require('../../admin/auth').audit('admin', 'web_checkin', acc.name, result.ok ? 'ok' : result.error);
+      require('../../admin/auth').audit('admin', 'web_checkin', accounts.displayName(acc), result.ok ? 'ok' : result.error);
       return sendJSON(res, result.ok ? 200 : 502, result);
     },
   },
@@ -430,7 +464,7 @@ const routes = [
 
       return sendJSON(res, 200, {
         id: acc.id,
-        name: acc.name,
+        name: accounts.displayName(acc),
         expired,
         checkin: bonus.ok ? {
           has_issued: bonus.has_issued,
@@ -481,7 +515,7 @@ const routes = [
           last_result: results.every((r) => r.ok) ? 'ok' : 'failed',
         },
       });
-      require('../../admin/auth').audit('admin', 'web_draw', acc.name, `${results.length} 次`);
+      require('../../admin/auth').audit('admin', 'web_draw', accounts.displayName(acc), `${results.length} 次`);
       return sendJSON(res, 200, {
         results,
         ok_count: results.filter((r) => r.ok).length,
@@ -535,7 +569,10 @@ const routes = [
       const list = accounts.load().accounts.filter((a) => a.enabled);
 
       const results = await Promise.all(list.map(async (a) => {
-        const base = { id: a.id, name: a.name, nickname: a.nickname || '' };
+        // name 给**解析后的显示名**（占位名会被真实昵称顶掉），
+        // nickname 保持原义（上游真实昵称，可能为空）——两个都留着，
+        // 前端与操作记录各自按需取用
+        const base = { id: a.id, name: accounts.displayName(a), nickname: a.nickname || '' };
         // 明细只缓存在内存里：额度包可能有上百个，写回 web-accounts.json
         // 会让账号文件无谓膨胀。磁盘上仍然只留 left/total/used 摘要。
         const hit = detailCache.get(a.id);
@@ -647,7 +684,7 @@ const routes = [
 
       for (const a of list) {
         const st = await web.api.drawStatus(a.cookie);
-        if (!st.ok) { out.push({ id: a.id, name: a.name, ok: false, error: st.error }); continue; }
+        if (!st.ok) { out.push({ id: a.id, name: accounts.displayName(a), ok: false, error: st.error }); continue; }
 
         // 抽奖前后的积分快照：抽到积分类奖品会让总量上涨，
         // 差值就是这一轮实际到手的积分。
@@ -698,7 +735,7 @@ const routes = [
         for (let i = 0; i < wonPrizes.length; i++) {
           const w = wonPrizes[i];
           records.append({
-            type: 'draw', account_id: a.id, account: a.name,
+            type: 'draw', account_id: a.id, account: accounts.displayName(a),
             ok: true, prize: w.name, prize_type: w.type, prize_value: w.value,
             points_delta: i === 0 ? dp.delta : null,
             points_before: i === 0 ? dp.before : null,
@@ -707,14 +744,14 @@ const routes = [
         }
         if (!wonPrizes.length && draws.length) {
           records.append({
-            type: 'draw', account_id: a.id, account: a.name,
+            type: 'draw', account_id: a.id, account: accounts.displayName(a),
             ok: draws.some((d) => d.ok), count: draws.filter((d) => d.ok).length,
             points_delta: dp.delta, points_before: dp.before, points_after: dp.after,
           });
         }
 
         out.push({
-          id: a.id, name: a.name, ok: true,
+          id: a.id, name: accounts.displayName(a), ok: true,
           before: remaining,
           drawn: draws.filter((d) => d.ok).length,
           remaining_after: draws.length ? draws[draws.length - 1].remaining_draws : remaining,
@@ -804,7 +841,7 @@ const routes = [
         const info = await web.api.loginBonusInfo(a.cookie);
         out.push({
           account_id: a.id,
-          name: a.name,
+          name: accounts.displayName(a),
           nickname: a.nickname || '',
           ok: info.ok,
           error: info.ok ? '' : info.error,
@@ -829,6 +866,11 @@ const routes = [
     handler: async ({ res }) => {
       const list = accounts.load().accounts;
       const gatewayPort = parseInt(process.env.DUMATE_WEB_GATEWAY_PORT || '9084', 10);
+
+      // 先补昵称再算指标：下面各处（健康快照、即将过期明细）都要用显示名，
+      // 补完这一轮后续全部拿到真实昵称。**并发且幂等**——已有昵称的账号
+      // 不会打上游，所以对已修好的账号这条语句是零成本。
+      await Promise.all(list.map((a) => backfillNickname(a)));
 
       // 网关的实时池状态（token 缓存、冷却）只在网关进程里，能读到就用，
       // 读不到也不影响其余指标
@@ -893,7 +935,7 @@ const routes = [
         const daysLeft = d.expire_at ? Math.ceil((d.expire_at - now) / 86400000) : null;
         return {
           id: a.id,
-          name: a.name,
+          name: accounts.displayName(a),
           nickname: a.nickname || '',
           enabled: a.enabled,
           points: p.left !== undefined ? p.left : null,
@@ -925,7 +967,7 @@ const routes = [
         const d = byId.get(a.id) || {};
         for (const x of (d.expiring || [])) {
           expiringPoints.push({
-            account: a.name || a.nickname || `账号 ${a.id}`,
+            account: accounts.displayName(a),
             accountId: a.id,
             date: x.date,
             points: x.points,
@@ -978,7 +1020,7 @@ const routes = [
       const gatewayPort = parseInt(process.env.DUMATE_WEB_GATEWAY_PORT || '9084', 10);
       const list = accounts.load().accounts.map((a) => ({
         id: a.id,
-        name: a.name,
+        name: accounts.displayName(a),
         nickname: a.nickname || '',
         enabled: a.enabled,
         last_error: a.last_error || '',

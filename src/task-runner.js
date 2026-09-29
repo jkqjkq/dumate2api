@@ -129,7 +129,7 @@ async function runTask(account, task) {
 // 跑一个账号的所有可自动任务
 async function runForAccount(account) {
   const t = await web.api.tasks(account.cookie);
-  if (!t.ok) return { account_id: account.id, name: account.name, ok: false, error: t.error, expired: !!t.expired };
+  if (!t.ok) return { account_id: account.id, name: accounts.displayName(account), ok: false, error: t.error, expired: !!t.expired };
 
   const pending = t.tasks.filter((x) => !x.done && AUTO_TYPES.has(x.task_type));
   const skipped = t.tasks.filter((x) => !x.done && !AUTO_TYPES.has(x.task_type));
@@ -146,7 +146,7 @@ async function runForAccount(account) {
     }
     results.push(r);
     appendLog({
-      ts: Date.now(), account_id: account.id, account: account.name,
+      ts: Date.now(), account_id: account.id, account: accounts.displayName(account),
       task_id: r.task_id, title: r.title, ok: r.ok, via: r.via,
       task_type: r.task_type || '',
       // 耗时：总耗时 + 其中发消息的耗时（QUERY_INPUT 任务的大头）
@@ -162,7 +162,7 @@ async function runForAccount(account) {
   // 在记录页看起来一样——而这两件事的含义完全不同。
   if (!pending.length) {
     appendLog({
-      ts: Date.now(), account_id: account.id, account: account.name,
+      ts: Date.now(), account_id: account.id, account: accounts.displayName(account),
       title: skipped.length ? `无可自动任务（${skipped.length} 个需手动）` : '无可自动任务',
       ok: true, via: 'noop', noop: true,
       points_delta: 0, points_before: null, points_after: null,
@@ -175,7 +175,7 @@ async function runForAccount(account) {
 
   return {
     account_id: account.id,
-    name: account.name,
+    name: accounts.displayName(account),
     ok: true,
     done_count: results.filter((r) => r.ok && !r.already).length,
     already_count: results.filter((r) => r.already).length,
@@ -195,7 +195,7 @@ async function runAll() {
     try {
       results.push(await runForAccount(a));
     } catch (e) {
-      results.push({ account_id: a.id, name: a.name, ok: false, error: e.message });
+      results.push({ account_id: a.id, name: accounts.displayName(a), ok: false, error: e.message });
     }
   }
   return results;

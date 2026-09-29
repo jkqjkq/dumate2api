@@ -82,6 +82,16 @@ function list() {
   const { accounts } = load();
   return accounts.map((a) => ({
     ...a,
+    // 界面上该显示的名字。**不要直接用 a.name**：create() 在用户没填名字时
+    // 会写入占位名「账号 N」，而那个名字会一直留着，哪怕上游早就返回了真实
+    // 昵称——界面上就是「为什么显示账号 1 而不是用户名」。
+    //
+    // 这里把 name **覆盖**成解析后的显示名，而不是另加一个字段：调用方
+    // （列表页、请求日志、任务记录）拿到的 name 必须和仪表盘接口一致，
+    // 否则同一个账号在两个接口里叫两个名字。用户自己填的原始标签留在
+    // label 里，需要区分时可用。
+    label: a.name,
+    name: displayName(a),
     // cookie 不整体出接口：界面只需要知道「有没有」和「是不是同一个账号」
     cookie: undefined,
     cookie_len: (a.cookie || '').length,
@@ -91,6 +101,27 @@ function list() {
     // 没有 created_at（很早以前加的账号）就 null，界面显示 —
     daysAlive: a.created_at ? Math.floor((Date.now() - a.created_at) / 86400000) : null,
   }));
+}
+
+/**
+ * 账号在界面上该显示的名字。**优先级：用户填的名字 > 上游昵称 > 占位名**。
+ *
+ * 关键是把 `create()` 自动生成的占位名「账号 N」识别出来并跳过——它只是
+ * 为了「name 非空」而写的，不代表用户真的想叫这个账号。不跳过的话，
+ * 手动粘贴添加（没填名字）的账号会永久显示「账号 1」，即使上游返回了
+ * 「张三」也不会被用上。
+ *
+ * 只匹配 `账号 <数字>` 这一种形态（含全角空格），不做模糊匹配——
+ * 用户真想起名叫「账号 1」时不该被我们覆盖掉。
+ */
+function displayName(a) {
+  if (!a) return '';
+  const name = String(a.name || '').trim();
+  const isPlaceholder = /^账号\s*\d+$/.test(name);
+  if (name && !isPlaceholder) return name;
+  const nick = String(a.nickname || '').trim();
+  if (nick) return nick;
+  return name || `账号 ${a.id}`;
 }
 
 function get(id) {
@@ -149,7 +180,9 @@ function create(opts = {}) {
   };
   data.accounts.push(account);
   save(data);
-  return { ...account, cookie: undefined, cookie_len: cookie.length, cookie_summary: sum };
+  // name 给显示名（新建时若没填名字，占位名会被昵称顶掉——此刻昵称通常还空，
+  // 所以多半仍是占位名，等回填后由 list() 给出真实名字）
+  return { ...account, label: account.name, name: displayName(account), cookie: undefined, cookie_len: cookie.length, cookie_summary: sum };
 }
 
 function update(id, patch = {}) {
@@ -166,7 +199,7 @@ function update(id, patch = {}) {
   }
   a.updated_at = Date.now();
   save(data);
-  return { ...a, cookie: undefined, cookie_len: (a.cookie || '').length, cookie_summary: cookieSummary(a.cookie) };
+  return { ...a, label: a.name, name: displayName(a), cookie: undefined, cookie_len: (a.cookie || '').length, cookie_summary: cookieSummary(a.cookie) };
 }
 
 // 内部使用：直接改账号记录（签到结果、积分缓存等），不回显 cookie
@@ -202,4 +235,5 @@ module.exports = {
   parseCookie,
   cookieSummary,
   normalizeCookie,
+  displayName,
 };
