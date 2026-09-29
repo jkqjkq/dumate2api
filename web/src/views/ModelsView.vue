@@ -218,6 +218,37 @@
     <!-- 以下全部是搭子专用：别名映射、上游原生模型、对外暴露、网关实际返回。
          切到千问时不显示——它们描述的是搭子那条链路。 -->
     <template v-if="!isQw && !isTw">
+    <!-- 通道元信息行：与 TRAE 模型页同构（上游端口 / 托管 / 登录账号）。
+         放在模型表上方是因为这些是**通道级**的，不随模型变 -->
+    <div class="qw-channel-row">
+      <div class="qw-channel-cell">
+        <div class="cell-label">上游端口</div>
+        <div class="cell-value">
+          {{ dumateMeta.port ?? '—' }}
+          <a-tag v-if="dumateMeta.managed" color="blue" class="ml-1">自建</a-tag>
+        </div>
+      </div>
+      <div class="qw-channel-cell">
+        <div class="cell-label">桌面登录账号</div>
+        <div class="cell-value">{{ dumateMeta.account }}</div>
+      </div>
+      <div class="qw-channel-cell">
+        <div class="cell-label">凭证来源</div>
+        <div class="cell-value">
+          <!-- 桌面凭证不可用时会自动回落到网页池（见 fallback-web.js），
+               排障时必须知道请求走的是哪条链路。**只在状态已知时下结论**：
+               infos 还没加载时显示「—」，不能默认成「桌面凭证」或
+               「网页回落」——那会把一次未加载说成一个确定的故障。 -->
+          <template v-if="channelStore.infos['dumate']">
+            <a-tag :color="channelStore.infos['dumate']!.ready ? 'green' : 'orange'">
+              {{ channelStore.infos['dumate']!.ready ? '桌面凭证' : '网页凭证回落' }}
+            </a-tag>
+          </template>
+          <span v-else class="text-slate-400">—</span>
+        </div>
+      </div>
+    </div>
+
     <!-- 模型信息：上下文 / 输出上限 / 类型。**没有倍率**——搭子的计费在
          上游账单里，本地拿不到单价，如实显示「无此数据」而不是估算一个 -->
     <a-card :bordered="false">
@@ -229,6 +260,55 @@
         <a-button size="small" class="ghost-btn" :loading="loading" @click="load">刷新</a-button>
       </template>
       <ModelInfoTable :channel="'dumate'" :preloaded="dumateInfoRows" />
+    </a-card>
+
+    <!-- 搭子的积分：与 TRAE 的额度卡同构，回答「这些模型花的是哪份额度」。
+         与千问的三池、TRAE 的 credits 是三套账，数字不能相加 -->
+    <a-card title="搭子积分" :bordered="false" class="mt-4">
+      <a-empty v-if="!dumatePoints" description="取不到搭子积分" />
+      <template v-else>
+        <a-row :gutter="[16, 16]">
+          <a-col :span="8">
+            <div class="qw-pool">
+              <div class="qw-pool-head">
+                <span class="qw-pool-label">可用余额</span>
+                <a-tag class="qw-mini">上游账单</a-tag>
+              </div>
+              <div class="qw-pool-value num">
+                {{ fmtQw(dumatePoints.left) }}
+                <span class="qw-pool-cap">/ {{ fmtQw(dumatePoints.total) }}</span>
+              </div>
+              <div class="qw-pool-sub">已用 {{ fmtQw(dumatePoints.used) }}</div>
+            </div>
+          </a-col>
+          <a-col :span="8">
+            <div class="qw-pool">
+              <div class="qw-pool-head">
+                <span class="qw-pool-label">额度包</span>
+              </div>
+              <div class="qw-pool-value num">{{ dumatePoints.packages?.length ?? '—' }}</div>
+              <div class="qw-pool-sub">订阅 + 增量包</div>
+            </div>
+          </a-col>
+          <a-col :span="8">
+            <div class="qw-pool">
+              <div class="qw-pool-head">
+                <span class="qw-pool-label">今日消耗</span>
+                <a-tag class="qw-mini">经本网关</a-tag>
+              </div>
+              <div class="qw-pool-value num">
+                {{ dumateTodayCost == null ? '—' : fmtQw(dumateTodayCost) }}
+              </div>
+              <div class="qw-pool-sub">
+                <!-- 上游账单无法逐笔归因，这个数是余额游标差（见 points-cursor.js）。
+                     取不到就显示 —，不补 0——0 会被读成「今天没花钱」 -->
+                <template v-if="dumateTodayCost == null">上游未给出账单</template>
+                <template v-else>来自上游账单</template>
+              </div>
+            </div>
+          </a-col>
+        </a-row>
+      </template>
     </a-card>
 
     <a-card :bordered="false" class="mt-4">
@@ -348,6 +428,8 @@ import { traeworkApi } from '@/api/traework'
 import type { TraeworkCreditRow, TraeworkModel } from '@/api/traework'
 import type { QwCredits } from '@/api/qwenwork'
 import type { ModelMapData, ProbeResult } from '@/api/models'
+import type { SystemStatus } from '@/api/system'
+import type { PointsData } from '@/api/points'
 import { modelInfoApi, type ModelInfoRow } from '@/api/modelinfo'
 import ModelInfoTable from '@/components/ModelInfoTable.vue'
 
@@ -379,6 +461,25 @@ const dumateInfoRows = ref<ModelInfoRow[] | null>(null)
 const twStatus = computed(() => channelStore.infos['traework'] || null)
 const twRows = ref<TraeworkCreditRow[]>([])
 const twUsage = ref<Array<{ model: string; ts: number }>>([])
+
+// 搭子的通道元信息与积分。对齐 TRAE 模型页顶部的「通道信息行 + 额度卡」：
+// 那条通道把「模型花什么」与「还剩多少」放在同一页，搭子原来只有模型表。
+// 数据源与仪表盘/积分页相同（/system/status、/points/points、/usage/overview），
+// 不新造接口——同一件事在三个页面必须给出同一个数。
+const dumateSys = ref<SystemStatus | null>(null)
+const dumatePoints = ref<PointsData | null>(null)
+// 今日经网关的积分消耗。来自上游账单，**只有搭子有**（直连通道为 null）
+const dumateTodayCost = ref<number | null>(null)
+// 通道信息行：上游端口 / 托管方式 / 桌面登录账号
+const dumateMeta = computed(() => {
+  const s = dumateSys.value
+  const ch = channelStore.infos['dumate'] || null
+  return {
+    port: s?.upstream?.port ?? ch?.port ?? null,
+    managed: s?.upstream?.managed ?? !!ch?.managed,
+    account: s?.account?.name || '—',
+  }
+})
 
 const twVisible = computed(() => twModels.value.filter((m) => m.visible))
 
@@ -523,13 +624,21 @@ async function load() {
       qwInfoRows.value = info.data.rows || []
       return
     }
-    // 搭子：映射表 + 统一模型信息（上下文 / 输出上限）
-    const [mapRes, info] = await Promise.all([
+    // 搭子：映射表 + 统一模型信息（上下文 / 输出上限）+ 通道元信息与积分。
+    // 后三样是为了与 TRAE 的模型页对齐——那条通道的模型页把「这个模型花什么」
+    // 和「还剩多少」放在一起，搭子这边缺的正是这个视角。
+    const [mapRes, info, sys, pts, usg] = await Promise.all([
       client.get('/models/map'),
       modelInfoApi.list({ channel: 'dumate' }).catch(() => ({ data: { rows: [] } })),
+      client.get('/system/status').catch(() => ({ data: null })),
+      client.get('/points/points').catch(() => ({ data: null })),
+      client.get('/usage/overview?days=1&channel=dumate').catch(() => ({ data: null })),
     ])
     const data = mapRes.data
     dumateInfoRows.value = info.data.rows || []
+    dumateSys.value = sys.data
+    dumatePoints.value = pts.data
+    dumateTodayCost.value = usg.data?.cards?.today?.consumed_points ?? null
     map.value = data
     upstreamModels.value = data.upstream_models
     exposed.value = data.exposed
