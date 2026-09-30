@@ -197,10 +197,48 @@ async function fetchWallets(opts = {}) {
     const hit = caches.get(key);
     if (hit && Date.now() - hit.at < CACHE_MS) return hit.data;
   }
-  const r = await httpGet(WALLETS_PATH, token);
+
+  let r = await httpGet(WALLETS_PATH, token);
   if (r.status !== 200 || !r.data) {
     return { ok: false, error: r.error || `HTTP ${r.status}`, daily: null, monthly: null, longterm: null };
   }
+
+  // 「三池全 0 + active_wallets 空」要**重试一次**再下结论。
+  //
+  // 为什么不能直接当成「用完了」：实测（2026-09-30）同一时刻打两个接口，
+  // `/user/wallets` 报全 0 而 `account-context` 的 quota.remaining 报 100——
+  // 两者矛盾，说明那次是**读失败**（上游/边缘节点的一次瞬时状态）。
+  // 而界面把 0 读成「今天用光了」，于是用户以为「每天得用一下才刷新」。
+  //
+  // 为什么也不能一律当成读失败：真·额度耗尽时三池确实都是 0，那种情况
+  // 显示 0 是**正确的**。历史归因里没有全 0 记录只是因为还没遇到过真的耗尽
+  // （95 条 daily=0 都伴随付费池 >0，即免费扣完转扣付费）。
+  //
+  // 所以用重试来区分：瞬时抖动重试即恢复；真实归零重试仍是 0，如实上报。
+  const allZero = (x) => {
+    const dd = x && x.data && x.data.data;
+    if (!dd) return false;
+    const w = (dd.active_wallets && Array.isArray(dd.active_wallets.wallets)) ? dd.active_wallets.wallets : [];
+    return num((dd.daily_credits || {}).total_balance) === 0
+      && num((dd.monthly_credits || {}).total_balance) === 0
+      && num((dd.longterm_credits || {}).total_balance) === 0
+      && w.length === 0;
+  };
+  let retried = false;     // 是否发生了重试
+  let retryRecovered = false; // 重试后拿到了非 0（即第一次是抖动）
+  if (allZero(r)) {
+    retried = true;
+    await new Promise((s) => setTimeout(s, 400));
+    const r2 = await httpGet(WALLETS_PATH, token);
+    if (r2.status === 200 && r2.data && !allZero(r2)) {
+      // 重试拿到了非 0 —— 第一次确实是抖动，用第二次的结果
+      r = r2;
+      retryRecovered = true;
+    }
+    // 重试仍是全 0（或重试失败）：落回下面的正常路径，如实上报 0。
+    // 此时无法区分「真耗尽」与「持续抖动」，报 0 是保守且诚实的选择。
+  }
+
   const d = r.data.data || {};
   const wallets = (d.active_wallets && Array.isArray(d.active_wallets.wallets))
     ? d.active_wallets.wallets : [];
@@ -209,6 +247,9 @@ async function fetchWallets(opts = {}) {
     daily: num((d.daily_credits || {}).total_balance),
     monthly: num((d.monthly_credits || {}).total_balance),
     longterm: num((d.longterm_credits || {}).total_balance),
+    // 只有「重试过且仍是全 0」才标出来——那才是值得排查的状态
+    // （可能真耗尽，也可能上游持续异常）。抖动后恢复的不算异常，不标。
+    ...(retried && !retryRecovered ? { retried: true } : {}),
     // 最近到期的钱包。**注意这不是「积分要作废」**：daily 池每天 00:00 重置，
     // 所以 valid_to 就是明天的重置时刻——它每天都「即将到期」，不是风险。
     // 真正会作废的是 expiring_soon 那段（付费积分按有效期，过期即消失），

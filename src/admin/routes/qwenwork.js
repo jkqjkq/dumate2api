@@ -36,6 +36,105 @@ async function walletsOf(account) {
   return w;
 }
 
+function n(v) {
+  return typeof v === 'number' && Number.isFinite(v) ? v : 0;
+}
+
+/**
+ * 全账号合计的三池视图。
+ *
+ * 为什么是「合计」：三池是**账号级**的——每个账号各有一份每日免费额度
+ * （各自 00:00 重置）。池子卡回答的是「这条通道我总共还剩多少」，
+ * 两个账号各 100 就该显示 200。
+ *
+ * 早先这里只读主账号（authStore.preferred()），于是两账号时池子卡显示 100，
+ * 而同一页顶部「积分余额」卡读的是 /accounts 的 summary.pointsTotal，
+ * **本来就是全账号合计** = 200——同页两个数字对不上，被读成「少算了一个账号」。
+ *
+ * 账号范围与 /accounts 保持一致（list() 全量，不只 usable）：两处口径必须同源，
+ * 否则「顶部合计」与「池子合计」还是会差。查余额失败的账号不计入合计，
+ * 但会在 failedAccounts 里如实报出——否则合计被读成全量。
+ *
+ * 每个账号的 limit/freeUsed 仍按**各自**的观测峰值算（credits.dailyUsageFromBalance
+ * 是账号级的，峰值文件也按账号分桶），再相加。只要有一个账号没校准，
+ * freeUsed 整体给 null——部分求和会低估消耗，比不给数字更容易被误读。
+ */
+async function aggregateWallets() {
+  const all = authStore.list();
+  const rows = [];
+  for (const a of all) {
+    let w = null;
+    try { w = await walletsOf(authStore.get(a.id)); } catch (e) { w = null; }
+    rows.push({ a, w });
+  }
+  const ok = rows.filter((r) => r.w && r.w.ok);
+  if (!ok.length) {
+    const bad = rows.find((r) => r.w && r.w.error);
+    return { ok: false, error: (bad && bad.w.error) || NO_ACCOUNT };
+  }
+
+  let daily = 0; let monthly = 0; let longterm = 0;
+  let limit = 0; let peak = 0; let freeUsed = 0;
+  let allCalibrated = true;
+  let reset = null;
+  let expiring = [];
+  let retriedCount = 0;
+  const accounts = [];
+  for (const { a, w } of ok) {
+    // 重试过且仍是全 0（上游持续返回可疑响应）。合计照常算，
+    // 但要标出来——否则用户看到一个「可能是真耗尽、也可能读失败」的 0 却不知情
+    if (w.retried) retriedCount++;
+    daily += n(w.daily); monthly += n(w.monthly); longterm += n(w.longterm);
+    limit += n(w.limit); peak += n(w.peak);
+    if (w.calibrated) freeUsed += n(w.freeUsed);
+    else allCalibrated = false;
+    if (!reset) reset = resetAt(w);
+    if (!expiring.length) expiring = w.expiring || [];
+    accounts.push({
+      id: String(a.id),
+      name: a.nickname || a.uid || `账号 ${a.id}`,
+      daily: n(w.daily),
+      monthly: n(w.monthly),
+      longterm: n(w.longterm),
+      total: n(w.total),
+      limit: n(w.limit),
+      peak: n(w.peak),
+      // 单账号未校准时给 null（与单账号视图同一约定），不补 0
+      freeUsed: w.calibrated ? n(w.freeUsed) : null,
+      calibrated: !!w.calibrated,
+    });
+  }
+
+  const capPerAccount = credits.dailyLimit();
+  // 定点化：浮点累加会给出 199.99349999999998 这种噪声，接口不该外传它。
+  // 4 位小数与归因记录（credits.capture）的口径一致。
+  const r4 = (v) => Number(v.toFixed(4));
+  return {
+    ok: true,
+    error: '',
+    accountCount: ok.length,
+    failedAccounts: rows.length - ok.length,
+    // 上游重试后仍返回全 0 的账号数。这类账号的 0 可能是真·额度耗尽，
+    // 也可能是上游持续异常——无法区分，界面要如实说明
+    retriedAccounts: retriedCount,
+    accounts,
+    daily: r4(daily), monthly: r4(monthly), longterm: r4(longterm),
+    total: r4(daily + monthly + longterm),
+    paid: r4(monthly + longterm),
+    limit: r4(limit),
+    peak: r4(peak),
+    calibrated: allCalibrated,
+    freeUsed: allCalibrated ? r4(Math.max(0, limit - daily)) : null,
+    // 分母分两个：单账号配置上限（账号快照的每账号卡片用）与全账号合计（池子卡用）
+    dailyCapPerAccount: capPerAccount,
+    dailyCapTotal: capPerAccount * ok.length,
+    resetAt: reset,
+    expiring,
+    // 主账号名保留：旧调用方/日志在按它渲染；注意它**不再代表全体**
+    account: accounts[0].name,
+  };
+}
+
 /** 按天聚合归因历史。只聚合有 channel 概念之后的数据 */
 function dailyUsage(days) {
   const c = require('../../qwenwork/credits');
@@ -367,8 +466,7 @@ const routes = [
       // 基准/队列/缓存都按账号存着，删号后清掉，否则 Map 会一直涨
       try { require('../../qwenwork/credits').forget(a); } catch (e) { /* 清理失败不影响 */ }
       cache.data.delete(String(params[0]));
-      return sendJSON(res, 200, { ok: true });
-    },
+      return sendJSON(res, 200, { ok: true });    },
   },
   {
     // 停用/启用 + 指定主账号。preferred 是排他的（authStore.patch 内部会清掉其他）
@@ -422,44 +520,55 @@ const routes = [
     path: '/credits',
     handler: async ({ req, res }) => {
       try {
-        const account = authStore.preferred();
-        if (!account) return sendJSON(res, 200, { ok: false, error: NO_ACCOUNT });
-        const w = await credits.fetchWallets({ account });
-        if (!w.ok) return sendJSON(res, 200, { ok: false, error: w.error || '' });
+        const agg = await aggregateWallets();
+        if (!agg.ok) return sendJSON(res, 200, { ok: false, error: agg.error || NO_ACCOUNT });
         return sendJSON(res, 200, {
           ok: true,
           error: '',
           // 三个池子**平级**上报，不做「免费 vs 付费」的合并——
           // 月度与长期性质不同（订阅套餐 vs 充值赠送），界面要能分开看。
+          // **余额是全账号合计**（每个账号各有一份每日额度）——与 /accounts 的
+          // summary.pointsTotal 同源，同页两个数字必须对得上。
           wallets: [
-            { id: 'daily', label: '每日额度', kind: 'free', balance: w.daily, resetAt: resetAt(w) },
-            { id: 'monthly', label: '月度积分', kind: 'paid', balance: w.monthly, resetAt: null },
-            { id: 'longterm', label: '长期积分', kind: 'paid', balance: w.longterm, resetAt: null },
+            { id: 'daily', label: '每日额度', kind: 'free', balance: agg.daily, resetAt: agg.resetAt },
+            { id: 'monthly', label: '月度积分', kind: 'paid', balance: agg.monthly, resetAt: null },
+            { id: 'longterm', label: '长期积分', kind: 'paid', balance: agg.longterm, resetAt: null },
           ],
           // 汇总：付费 = 月度 + 长期
-          free: w.daily,
-          paid: w.paid,
-          monthly: w.monthly,
-          longterm: w.longterm,
-          total: w.total,
-          // 上限由「观测峰值 + 配置兜底」得出（见 credits.dailyUsageFromBalance）。
-          // 接口本身不给上限，所以 calibrated=false 表示还没观测到接近满额的
-          // 状态，此时消耗值可能偏小——界面要如实标注，别让人当成精确值。
-          limit: w.limit,
-          limitSource: w.limitSource,
-          peak: w.peak,
-          calibrated: w.calibrated,
-          // 每日免费额度的配置上限（默认 100）。界面上「免费额度 X / 100」
-          // 的分子来自接口余额、分母来自配置——接口不给分母，必须标来源。
-          dailyCap: require('../../qwenwork/credits').dailyLimit(),
+          free: agg.daily,
+          paid: agg.paid,
+          monthly: agg.monthly,
+          longterm: agg.longterm,
+          total: agg.total,
+          // 上限由「观测峰值 + 配置兜底」得出（见 credits.dailyUsageFromBalance），
+          // 再按账号相加。接口本身不给上限，所以 calibrated=false 表示还有账号
+          // 没观测到接近满额的状态，此时消耗值可能偏小——界面要如实标注。
+          limit: agg.limit,
+          limitSource: agg.calibrated ? 'observed' : 'config-lower-bound',
+          peak: agg.peak,
+          calibrated: agg.calibrated,
+          // 每日免费额度的上限。**两个口径分开给**，因为界面上有两处：
+          //   dailyCapTotal      = 单账号上限 × 账号数（三个池子卡的分母）
+          //   dailyCapPerAccount = 单账号上限（账号健康快照每张卡的分母）
+          // 接口不给分母，两者都来自配置，界面必须标来源。
+          dailyCap: agg.dailyCapTotal,
+          dailyCapPerAccount: agg.dailyCapPerAccount,
+          accountCount: agg.accountCount,
+          // 余额没查到的账号数。>0 时合计是**部分和**，界面要说明，
+          // 否则会被读成「账号都算进去了」
+          failedAccounts: agg.failedAccounts,
+          // 上游重试后仍返回全 0 的账号数（可能是真耗尽，也可能上游持续异常）
+          retriedAccounts: agg.retriedAccounts,
+          // 每账号明细：池子卡显示合计，这里给「合计由谁构成」
+          accounts: agg.accounts,
           // 今日全部消耗（含客户端/网页里的对话，不只经网关的）
-          freeUsed: w.freeUsed,
+          freeUsed: agg.freeUsed,
           // 今日经本网关的消耗（另一套口径，两者不要相加）
           today: { ...todayUsage(), scope: 'gateway' },
-          expiring: w.expiring || [],
-          fetchedAt: w.fetchedAt,
-          // 是主账号的余额——多账号下必须说清是谁的
-          account: account.nickname || account.uid || String(account.id),
+          expiring: agg.expiring || [],
+          fetchedAt: Date.now(),
+          // 主账号名（保留字段）。合计口径下它不再代表全体，改用 accountCount
+          account: agg.account,
         });
       } catch (e) {
         return sendJSON(res, 200, { ok: false, error: e.message });
@@ -495,4 +604,12 @@ const routes = [
   },
 ];
 
-module.exports = { routes };
+/**
+ * 清空余额缓存。生产路径由 DELETE /accounts/:id 调用（删号后不清会留脏数据）；
+ * 也供离线验证脚本在每个场景之间重置——否则第二个场景读到的是第一个的缓存。
+ */
+function resetCache() {
+  cache = { at: 0, data: new Map() };
+}
+
+module.exports = { routes, resetCache };

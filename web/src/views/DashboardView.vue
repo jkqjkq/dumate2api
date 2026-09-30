@@ -352,7 +352,9 @@
           <a-card :bordered="false" class="h-full">
             <a-statistic title="积分余额" :value="qwSummary?.pointsTotal ?? '—'" :precision="2" />
             <div class="text-xs text-slate-500 mt-2">
-              <template v-if="qwSummary">{{ qwSummary.total }} 个账号合计</template>
+              <!-- 与下方三个池子卡**同一个口径**（全账号合计），两处数字应当相等。
+                   对不上时说明有账号余额没查到——那种情况池子卡会标出失败账号数 -->
+              <template v-if="qwSummary">{{ qwSummary.total }} 个账号合计 · 与下方池子同口径</template>
               <span v-else>—</span>
             </div>
           </a-card>
@@ -415,7 +417,8 @@
       </a-card>
 
       <!-- 三个池子平级展示：月度与长期性质不同（订阅套餐 vs 充值赠送），
-           不能合并成一张「付费额度」卡。 -->
+           不能合并成一张「付费额度」卡。**余额是全账号合计**——每个账号各有
+           一份每日免费额度，两账号各 100 就是 200。与顶部「积分余额」同源。 -->
       <a-row :gutter="[16, 16]">
         <a-col v-for="w in qwWallets" :key="w.id" :span="6">
           <a-card :bordered="false" class="h-full">
@@ -427,7 +430,14 @@
               <a-tag :color="w.kind === 'free' ? 'green' : 'orange'" class="mr-1">
                 {{ w.kind === 'free' ? '免费' : '付费' }}
               </a-tag>
-              <template v-if="w.resetAt">每天 00:00 重置</template>
+              <template v-if="w.id === 'daily'">
+                <!-- 每日额度的分母是**合计**（单账号 100 × 账号数）。分子是全账号
+                     合计余额，所以分母也必须合计，否则「200 / 100」这种读不出来的数 -->
+                <template v-if="qw && qw.accountCount > 1">
+                  {{ qw.accountCount }} 个账号合计 · 每天 00:00 重置
+                </template>
+                <template v-else>每天 00:00 重置</template>
+              </template>
               <template v-else>按有效期</template>
             </div>
             <!-- 今日已用：上限由「观测峰值 + 配置兜底」得出。未校准时**不给数字**
@@ -436,13 +446,28 @@
             <div v-if="w.id === 'daily'" class="text-xs text-slate-500 mt-1">
               <template v-if="qw?.freeUsed != null">
                 今日已用 {{ qw.freeUsed.toFixed(2) }} / {{ qw.limit }}
-                <a-tag v-if="!qw.calibrated" color="orange" class="ml-1" title="尚未观测到接近满额的状态，实际消耗可能更多">
+                <a-tag v-if="!qw.calibrated" color="orange" class="ml-1" title="尚有账号未观测到接近满额的状态，实际消耗可能更多">
                   待校准
                 </a-tag>
               </template>
               <template v-else-if="qw">
                 今日已用 — <span class="text-slate-400">（未观测到满额状态，推不出消耗）</span>
               </template>
+              <!-- 合计由谁构成 + 有没有账号没查到。部分和必须说明，
+                   否则会被读成「所有账号都算进去了」 -->
+              <div v-if="qw && (qw.accountCount > 1 || qw.failedAccounts > 0 || qw.retriedAccounts > 0)" class="text-slate-400">
+                <template v-if="qw.accountCount > 1">{{ qw.accountCount }} 个账号合计</template>
+                <template v-if="qw.failedAccounts > 0">
+                  <span class="text-orange-500">
+                    · {{ qw.failedAccounts }} 个账号余额查询失败，未计入
+                  </span>
+                </template>
+                <template v-if="qw.retriedAccounts > 0">
+                  <span class="text-amber-500">
+                    · {{ qw.retriedAccounts }} 个账号重试后仍为 0（可能已用尽）
+                  </span>
+                </template>
+              </div>
             </div>
           </a-card>
         </a-col>
@@ -558,12 +583,13 @@
               </div>
               <!-- 每账号的每日免费余额单独给一行：这才是「这个号今天还能用多少」。
                    只显示三池合计是不够的——合计含长期/月度，且账号欠费时会是负数，
-                   看不出免费额度还剩多少。上限固定 100，来源见下方说明。 -->
+                   看不出免费额度还剩多少。**分母是单账号上限**（不是合计），
+                   与上面池子卡的合计分母不同——这里问的是「这一个号」。 -->
               <div class="flex items-center justify-between text-xs mb-1">
                 <span class="text-slate-500">每日免费</span>
                 <span :class="dailyClassQw(a)">
                   {{ a.wallets ? fmtQw(a.wallets.daily) : '—' }}
-                  <span class="text-slate-500">/ {{ qwDailyCap }}</span>
+                  <span class="text-slate-500">/ {{ qwDailyCapPerAccount }}</span>
                 </span>
               </div>
               <div class="flex items-center justify-between text-xs">
@@ -1109,9 +1135,11 @@ const qwInfo = computed(() => channelStore.infos['qwenwork'] || null)
 // 一个来自订阅套餐、一个来自充值赠送，合并成一张「付费额度」卡会丢信息。
 const qwWallets = computed(() => qw.value?.wallets || [])
 
-// 每日免费额度的上限。接口不返回分母，来自配置（默认 100，见
-// credits.dailyLimit）。主额度卡片的 limit 也用它，两边同源。
-const qwDailyCap = computed(() => qw.value?.dailyCap ?? 100)
+// 每日免费额度的上限。接口不返回分母，来自配置（默认单账号 100，见
+// credits.dailyLimit）。这里用**单账号**口径——只有账号健康快照的每张卡
+// 需要它（「这个号今天还能用多少」）。池子卡的合计分母在 ModelsView /
+// PointsView 用 qw.dailyCap，仪表盘池子卡不显示分母。
+const qwDailyCapPerAccount = computed(() => qw.value?.dailyCapPerAccount ?? 100)
 
 function fmtExpire(iso?: string | null) {
   if (!iso) return '—'

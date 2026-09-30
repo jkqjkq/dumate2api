@@ -13,9 +13,14 @@ export interface QwWallet {
 export interface QwCredits {
   ok: boolean
   error: string
-  /** 三个池子平级返回，不合并——月度与长期性质不同 */
+  /**
+   * 三个池子平级返回，不合并——月度与长期性质不同。
+   * **余额是全账号合计**：每个账号各有一份每日免费额度（各自 00:00 重置），
+   * 两账号各 100 就是 200。与顶部「积分余额」（/accounts 的 summary.pointsTotal）
+   * 同源，同一页两个数字必须对得上。
+   */
   wallets: QwWallet[]
-  /** 免费额度余额（每日 00:00 重置） */
+  /** 免费额度余额（每日 00:00 重置）——全账号合计 */
   free: number
   /** 付费余额 = monthly + longterm */
   paid: number
@@ -23,22 +28,47 @@ export interface QwCredits {
   longterm: number
   total: number
   /**
-   * 每日上限，**由观测峰值 + 配置兜底得出**（接口本身不给上限）。
-   * 每日额度每天 00:00 重置，当天观测到的最大值即最接近上限的真实值。
+   * 每日上限，**由观测峰值 + 配置兜底得出**（接口本身不给上限），
+   * 再按账号相加。每日额度每天 00:00 重置，当天观测到的最大值即最接近
+   * 上限的真实值。
    */
   limit: number
   limitSource: 'observed' | 'config-lower-bound'
   /**
-   * 每日免费额度的**配置上限**（默认 100）。接口不返回分母，
-   * 这个值来自配置——界面标注「/ 100」时必须说明来源，否则额度政策一变
-   * 就没人知道数字是错的。
+   * 每日免费额度的**合计上限** = 单账号上限 × 账号数（默认单账号 100）。
+   * 接口不返回分母，这个值来自配置——三个池子卡标注「/ N」时用这个，
+   * 且必须说明来源，否则额度政策一变就没人知道数字是错的。
    */
   dailyCap: number
-  /** 当天观测到的每日额度峰值 */
+  /** 单账号的每日上限（账号健康快照每张卡的分母用这个，不是合计） */
+  dailyCapPerAccount: number
+  /** 参与合计的账号数（余额查询成功的） */
+  accountCount: number
+  /** 余额查询失败的账号数。>0 时合计是**部分和**，界面要说明 */
+  failedAccounts: number
+  /**
+   * 上游重试后仍返回「三池全 0」的账号数。这类账号的 0 可能是**真·额度耗尽**，
+   * 也可能是上游持续异常——后端无法区分，界面要如实说明，不要武断下结论。
+   */
+  retriedAccounts: number
+  /** 合计由哪些账号构成（每账号的三池余额与上限） */
+  accounts: Array<{
+    id: string
+    name: string
+    daily: number
+    monthly: number
+    longterm: number
+    total: number
+    limit: number
+    peak: number
+    freeUsed: number | null
+    calibrated: boolean
+  }>
+  /** 当天观测到的每日额度峰值（各账号相加） */
   peak: number
-  /** true = 峰值已追平/超过配置值（已观测到接近满额状态），消耗值可信 */
+  /** true = **每个**账号都已观测到接近满额状态，消耗值可信 */
   calibrated: boolean
-  /** 今日全部消耗 = 上限 − 余额（含客户端/网页里的对话） */
+  /** 今日全部消耗 = 上限 − 余额（含客户端/网页里的对话）。有账号未校准时为 null */
   freeUsed: number | null
   /**
    * 最近到期的钱包。**注意这不是「积分要作废」**：daily 池每天 00:00 重置，
@@ -57,6 +87,8 @@ export interface QwCredits {
    * 不计入这里。与「当天总消耗」是两套口径，不要把两者相加或对比。
    */
   today: { free: number; paid: number; total: number; requests: number; scope: 'gateway' }
+  /** 主账号名（保留字段）。合计口径下它不再代表全体，改用 accountCount */
+  account?: string
 }
 
 export interface QwDailyRow {

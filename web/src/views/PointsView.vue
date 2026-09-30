@@ -152,7 +152,7 @@
                   {{ w.kind === 'free' ? '免费' : '付费' }}
                 </a-tag>
                 <template v-if="w.id === 'daily'">
-                  每日 00:00 重置 · 上限 {{ qwCredits.dailyCap }}
+                  <template v-if="qwCredits.accountCount > 1">{{ qwCredits.accountCount }} 个账号合计 · </template>每日 00:00 重置 · 上限 {{ qwCredits.dailyCap }}
                 </template>
                 <template v-else-if="w.id === 'monthly'">订阅套餐内</template>
                 <template v-else>充值 / 赠送</template>
@@ -190,12 +190,16 @@
                 {{ qwCredits.limitSource === 'observed' ? '观测峰值' : '配置兜底' }}）
               </span>
             </div>
-            <!-- 未校准（没观测到满额状态）时不给数字：差值会变成
+            <!-- 未校准（有账号没观测到满额状态）时不给数字：差值会变成
                  「配置上限 − 当前余额」，余额被扣穿时会算出编造值。
                  后端此时返回 null，这里如实说明推不出来。 -->
             <div v-else>
               「今日全部消耗」= <span class="text-slate-400">无法推算</span>
-              —— 尚未观测到满额状态，上限只能取配置值，差值不可信。
+              —— 尚有账号未观测到满额状态，上限只能取配置值，差值不可信。
+            </div>
+            <div v-if="qwCredits.failedAccounts > 0" class="text-orange-500">
+              注意：{{ qwCredits.failedAccounts }} 个账号余额查询失败，上面各池合计
+              只含查询成功的 {{ qwCredits.accountCount }} 个账号。
             </div>
           </template>
         </a-alert>

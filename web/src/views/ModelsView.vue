@@ -189,10 +189,14 @@
               </div>
               <div class="qw-pool-value num">
                 {{ fmtQw(w.balance) }}
+                <!-- 分母与分子同口径：分子是全账号合计余额，分母就是合计上限。
+                     两账号各 100 时这里显示「200 / 200」，不是「200 / 100」 -->
                 <span v-if="w.id === 'daily'" class="qw-pool-cap">/ {{ qw.dailyCap }}</span>
               </div>
               <div class="qw-pool-sub">
-                <template v-if="w.id === 'daily'">每日 00:00 重置</template>
+                <template v-if="w.id === 'daily'">
+                  <template v-if="qw.accountCount > 1">{{ qw.accountCount }} 个账号合计 · </template>每日 00:00 重置
+                </template>
                 <template v-else-if="w.id === 'monthly'">订阅套餐内</template>
                 <template v-else>充值 / 赠送</template>
               </div>
