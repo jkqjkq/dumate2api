@@ -120,14 +120,78 @@ http://127.0.0.1:<动态端口>/api/qianfanproxy/v1/chat/completions
 同样是**进程内直连**，凭证由本项目自己走 OAuth 换取（`src/traework/login.js`），
 不依赖 TRAE 客户端。单一 credits 体系（签到领取），额度按 `usage_summary` 解析。
 
+### 搭子的两条凭证链路
+
+搭子有两条独立链路，**能力互补但各自有硬伤**——这是本项目最容易误解的地方：
+
+| | 桌面凭证（9080/9082） | 网页凭证（9084） |
+|---|---|---|
+| 凭证 | `%APPDATA%\qianfan-desktop-app\auth.json` | `data/web-accounts.json`（cookie） |
+| 链路 | 经 `dumate-main-server.exe`（8980） | 直连 `dumate-svc.baidu.com` |
+| 账号数 | **同一时刻只有一份登录态** | **可多账号并存、轮换** |
+| 续期 | 过期必须开客户端重登 | token 自动续（约 1 小时一换） |
+| 协议 | OpenAI / Anthropic / **Responses** / Google | OpenAI / Anthropic（**无 Responses**） |
+| 三通道前缀分流 | ✅ | ❌ 只有搭子一条通道 |
+
+**为什么不合并成一条**：桌面链路有三个网页链路没有的能力——`responses`
+（Codex CLI 0.155+ 只认它）、`count_tokens`、三通道前缀分流。整体切到网页凭证
+等于把这些一起丢掉；而桌面凭证唯一的硬伤是「同一时刻只有一份登录态、
+过期必须开客户端重登」，那正好是网页链路能补的。
+
+所以做的是**回落**而不是切换（见下文），另外把网页链路单独开一个端口 9084，
+需要多账号轮换时用。
+
+### 网页凭证网关（9084）
+
+```bash
+start-web-gateway.bat          # 或：node src/web-gateway.js
+```
+
+独立进程，对外协议与 9080 一致（OpenAI / Anthropic），**客户端换个 base_url 即可**。
+用途是「用网页账号池跑模型」：多账号自动轮换、token 自动续期、**不依赖桌面客户端**。
+
+账号在管理端「账号管理」页添加。**与 9080 是两套独立的东西**：
+9080 用桌面凭证（单账号），9084 用网页凭证（多账号），可同时跑。
+
+> 9084 没有 `responses` 端点——Codex CLI 用不了它，请指向 9080。
+
+### 桌面凭证不可用时的自动回落
+
+桌面凭证失效时（cookie 过期），9080 会**自动把请求交给网页凭证池**，
+所以「客户端登录态过期」不再等于「服务全挂」：
+
+- 触发条件严格限定为「**还没交给下游**」：后端连不上，或后端回 4xx/5xx
+- 一旦开始写响应就不再换链路——半截响应再换链路会让客户端收到两段拼接的内容
+- 埋点带 `credential_source`；`/health` 的 `channels.dumate.fallback` 报回落是否可用
+- 用 `DUMATE_WEB_FALLBACK=0` 关闭
+
+> **排障要点**：桌面 `ready=false` 而 `fallback.available=true` 时，请求仍会成功，
+> 但走的是网页池。不看这一项会以为一切正常。
+
 ### 数据流
 
 ```
 Codex CLI ──── OpenAI/Responses ─┐
                                  ├──→ dumate2api :9080 ──┬──→ DuMate main-server :8980 ──→ 百度千帆
-Claude Code ─── Anthropic ───────┤                       ├──→ 千问办公云端网关（进程内直连）
+Claude Code ─── Anthropic ───────┤   （桌面凭证）        ├──→ 千问办公云端网关（进程内直连）
 任意客户端 ──── Google ──────────┘                       └──→ TRAE Work 云端网关（进程内直连）
+                                     └─ 桌面凭证失效时 ──→ 网页凭证池（自动回落）
+
+任意客户端 ──── OpenAI/Anthropic ───→ :9084（网页凭证，多账号轮换）
 ```
+
+### 进程一览
+
+| 进程 | 端口 | 入口 | 职责 |
+|---|---|---|---|
+| 网关（稳定版） | 9080 | `stable/src/server.js` | 对外长期服务，冻结快照 |
+| 网关（开发） | 9082 | `src/server.js` | 开发调试，改动都在这里 |
+| 管理端 | 9083 | `src/admin/server.js` | 管理 API + 托管前端，读 9082 |
+| 网页凭证网关 | 9084 | `src/web-gateway.js` | 多账号轮换跑模型 |
+| DuMate 后端 | 8980 | 由网关拉起 | 真实模型链路 |
+
+> 管理端**不代理模型协议**——网关已经在做，多一跳只会多一个故障点。
+> 所有进程通过 `data/` 目录下的文件通信，不通过 IPC。
 
 ## 使用
 
@@ -167,9 +231,22 @@ DUMATE2API_PORT=9080 node src/server.js   # 自定义端口
 | `DUMATE_QWENWORK_DEFAULT_MAX_TOKENS` | `131072` | 千问默认输出预算（客户端未给 `max_tokens` 时） |
 | `DUMATE_TRAEWORK_AUTOSTART` | `auto` | `auto`=启用 TRAE 通道 / `off`=关闭 |
 | `DUMATE_TRAEWORK_MIN_MAX_TOKENS` | `16384` | TRAE 输出预算下限 |
+| `DUMATE_TRAEWORK_MODELS_CACHE_MS` | `300000` | TRAE 模型表缓存（5 分钟） |
 | `DUMATE_AUTO_CHECKIN_HOUR` / `_MINUTE` | `9` / `17` | 每日自动签到时刻。**两个都要设**，只设 HOUR 不生效 |
 | `DUMATE_TASK_POLL_MINUTES` | `30` | 任务轮询间隔（`0` 关闭）。低于 5 分钟会被拒绝；同时驱动 TRAE 自动签到 |
 | `DUMATE_WEB_FALLBACK` | 未设置（开启） | 设 `0` 关闭「桌面凭证不可用时回落到网页凭证池」 |
+| `DUMATE_WEB_GATEWAY_PORT` / `_HOST` | `9084` / `127.0.0.1` | 网页凭证网关监听 |
+| `DUMATE_QWENWORK_ACCOUNT` | 未设置 | 指定千问用哪个账号（填账号 **id**）。优先级：环境变量 > 账号文件 `preferred` > 池里第一个 |
+| `DUMATE_QWENWORK_AGENT_DISCIPLINE` | 未设置（注入） | 设 `0` 关闭「执行纪律」注入（见下文说明） |
+| `DUMATE_QWENWORK_CREDIT_CACHE_MS` | `30000` | 千问余额缓存时长 |
+| `DUMATE_POINTS_METER` | 未设置（开启） | 设 `0` 关闭搭子的余额游标采集（关闭后请求日志不再有逐条消耗） |
+| `DUMATE_BROWSER_PATH` | 自动探测 Edge/Chrome | 浏览器登录器找不到浏览器时手动指定 |
+| `DUMATE_UPSTREAM_TIMEOUT_MS` | `600000` | 上游请求超时 |
+| `DUMATE_UPSTREAM_CWD` | DuMate 安装根 | 拉起 `dumate-main-server.exe` 时的工作目录 |
+| `DUMATE_ADMIN_SECURE_COOKIE` | 未设置 | 设 `1` 才给会话 cookie 加 `Secure`（本地 http 下会被浏览器丢弃） |
+| `DUMATE_DEBUG` | - | 设为 `1` 输出端口发现过程调试信息 |
+| `DUMATE_WEB_BASE` / `DUMATE_WEB_TIMEOUT` | `https://www.dumate.cn` / `20000` | 搭子网页端基址与超时 |
+| `DUMATE_GATEWAY_HOST` | `dumate-svc.baidu.com` | 网页凭证换模型 token 的目标主机 |
 
 > 完整列表见 [CLAUDE.md](CLAUDE.md)（含网页账号池、任务轮询、自动签到等）。
 
@@ -202,6 +279,42 @@ DUMATE_ADMIN_GATEWAY_PORT=9082 npm run admin
 开发时用 `start-dev.bat`（网关 9082 + 管理端 9083），与稳定版 9080 互不干扰。
 前端开发：`cd web && npm install && npm run dev`。
 
+### 管理端各页做什么
+
+| 页面 | 回答什么问题 |
+|---|---|
+| 仪表盘 | 三个通道的健康、用量、账号状态、即将过期积分 |
+| 模型管理 | 这条通道有哪些模型、上下文/输出上限多大、倍率多少、额度还剩多少 |
+| API Key | 给外部客户端签发密钥（含 IP 白名单、模型白名单、通道绑定） |
+| 登录态 | 当前凭证是谁、什么时候过期 |
+| 积分明细 | 积分从哪来、怎么没的（含签到/任务/抽奖记录、额度包、签到日历） |
+| 账号管理 | 增删账号、跑任务、开轮询（**操作台**，记录在积分明细页） |
+| 用量统计 | 请求量/Token 趋势，按通道、模型、路径拆分 |
+| 请求日志 | 逐条明细：模型映射、耗时、首字延迟、**这条请求花了多少积分** |
+| 聊天测试台 | 不签发密钥直接试调某个模型名能不能跑通 |
+
+**聊天测试台**（`chatlab`）刻意**绕过密钥与 IP 管控**，只要求管理员会话。
+定位是「在管理端里验证某个模型名能不能跑通」，不必先去 API Key 页签发密钥、
+再配客户端。它走的是与 9084 同一套账号池，**消耗真实积分**，返回便于展示的
+结构化数据（含每条回答的实测消耗）。与 9084 的分工：9084 面向外部客户端、
+带鉴权、做协议兼容；测试台是内部试调、不做协议翻译。
+
+### API Key 的能力
+
+密钥形如 `dmk_...`，**只存 sha256**（`data/` 被复制走也无法还原明文），
+明文仅在创建那一次返回。创建时可限定三个维度：
+
+| 维度 | 说明 |
+|---|---|
+| `ip_allowlist` | 允许的来源（支持 CIDR）。**fail-closed**：写错一条会让这把 key 对所有来源拒绝，而非意外放行 |
+| `model_allowlist` | 允许调用的模型名 |
+| `channel` | 绑定通道（`dumate` / `qwenwork` / `traework`，留空不限） |
+
+设了 `channel` 的 key 去调别的通道的模型会返回 **403 `channel_not_allowed`**。
+
+> **鉴权默认关闭**：不设 `DUMATE_REQUIRE_KEY=1` 时任何来源无需 key 即可调用。
+> 本地自用够用，**对外暴露必须打开**。
+
 ### 使用千问办公 / TRAE 通道
 
 模型名加前缀即可，无需额外配置：
@@ -219,6 +332,37 @@ curl http://127.0.0.1:9080/v1/chat/completions \
 ```
 
 可用模型由上游下发，清单见 `GET /v1/models` 或管理端「模型管理」页。
+
+### 添加账号：浏览器登录器
+
+管理端「账号管理」页可**弹出受控浏览器窗口**登录并自动抓取 cookie
+（`src/login-browser.js`，唯一用到 `playwright-core` 的地方）。
+
+**为什么必须自己开窗口**：搭子的登录态载体是浏览器 cookie，而产品上没有面向
+第三方程序的登录票据接口（实测 `qianfanproxy` 下只有秒哒的 `login_ticket`，
+且它校验跳转目标必须是 `miaoda.cn`）。读系统浏览器（Edge/Chrome）的 cookie 库
+也不行——运行中独占文件锁，且新版 Chromium 用了 App-Bound Encryption。
+
+所以程序自己开一个受控窗口：用户在里面登录，我们**从自己这个窗口**读 cookie。
+这是唯一既不依赖外部状态、也不碰用户浏览器数据的做法。它复用系统已装的
+Edge/Chrome（`playwright-core` 不下载 Chromium），因此只多约 14MB 依赖
+而不是 130MB+。找不到浏览器时用 `DUMATE_BROWSER_PATH` 指定。
+
+> 也可以手动粘贴 cookie 添加账号——两条路径都支持。
+
+### 千问的「执行纪律」注入
+
+千问上游是**对话型**产品，其脚手架鼓励「每完成一步汇报一句」；Codex 的
+`AGENTS.md` 里也有同样的进度播报要求。两者叠加后模型会把播报当成一次完整回合：
+只输出 `进度：N/8｜下一步：写第 N 章` 就结束，**不调用任何工具**——Codex 收到
+「无工具调用」的回合即判定任务完成并退出，用户看到的就是「没按要求做完就退出」。
+
+所以网关对**确实带工具**的请求自动注入一段执行纪律（幂等，工具全被过滤掉的
+纯对话不注入，避免干扰正常回答）。用 `DUMATE_QWENWORK_AGENT_DISCIPLINE=0` 关闭。
+
+> 相关但不同的一件事：千问 `flash` 档位做重创作/长任务会失败（推理很长、
+> 只做「核对」这类准备动作就收尾），**这是档位能力差异，不是提示词能修的**。
+> 重创作请用 `qwen/pro`。
 
 ## 积分自动化（签到 / 抽奖 / 任务）
 
@@ -595,7 +739,16 @@ node test/verify-ccswitch.js
 # 单点探针：只打一种协议，把原始 SSE 打到 stdout
 node test/probe-oai.js       # OpenAI 格式
 node test/probe-anth.js      # Anthropic 格式（含 x-api-key / anthropic-version）
+
+# 上下文上限实测：往网关发指定 token 量的填充文本，看能否吃下、耗时多少
+node probe-ctx.js <model> <目标token>
+
+# 千问「独立登录」可行性探针：验证不开客户端也能拿到可用凭证
+node probe-qwen-device-login.js
 ```
+
+> `probe-oai` / `probe-anth` 用来区分「**网关翻译错**」还是「**上游返回错**」——
+> 比跑全套 smoke 更快定位。两者都硬编码打 9080。
 
 **离线验证**（不需要起服务，改完相关代码先跑这些）：
 
@@ -631,6 +784,81 @@ npm test
 - **端口发现**：`dumate-main-server.exe --port=<动态>` 命令行参数
 - **认证**：`Bearer nokey`（服务本身不做 key 校验，依赖 DuMate 登录态）
 - **模型**：`model-text`（Qianfan GLM-5，192K 上下文 / 128K 输出）
+
+## 项目结构
+
+```
+src/
+  server.js              网关主入口（9080/9082），协议路由与鉴权
+  anthropic.js           Anthropic ↔ OpenAI 双向翻译（含 SSE 状态机）
+  responses.js           OpenAI Responses ↔ Chat（Codex CLI）
+  google.js              Google Generative Language ↔ OpenAI
+  budget.js              输出预算策略（三个协议入口共用）
+  discovery.js           端口发现 + 后端拉起
+  upstream-launcher.js   无 GUI 拉起 dumate-main-server.exe（逆向成果）
+  upstream-router.js     模型名前缀 → 通道
+  channels.js            通道 id 的单一来源
+  keys.js / modelmap.js  API Key 与模型映射（按 mtime 失效，改完不用重启）
+  reqlog.js              请求埋点（JSONL，超 32MB 轮转）
+  fallback-web.js        桌面凭证失效时回落到网页池
+  web-pool.js / accounts.js / dumate-web.js   网页凭证池与网页 API 封装
+  points-cursor.js       搭子的余额游标（逐请求成本）
+  qwenwork/              千问办公通道（wasm 编码、OAuth 登录、三池积分）
+  traework/              TRAE Work 通道（OAuth、设备指纹、签到、credits）
+  admin/                 管理端（路由、存储、鉴权）
+stable/                  冻结快照：9080 跑的那一份（见下）
+web/                     管理端前端（Vue 3 + Vite + ant-design-vue）
+test/                    冒烟测试与离线验证脚本
+data/                    运行时数据（**已 gitignore**，含凭证）
+```
+
+### stable/ 是冻结快照
+
+`stable/` 是网关闭包的**逐字节拷贝**（36 个 `.js`），**不随主目录开发改动**，
+保证 9080 不被开发中的代码波及。它有独立启动脚本 `stable/start-stable.bat`。
+
+发布新版时**不要简单地「把 `src/*.js` 覆盖过去」**，两个坑：
+
+1. `src/*.js` 这个 glob **漏掉子目录**——`qwenwork/` 与 `traework/` 共 17 个文件
+   不在里面。漏了它们，网关能启动但通道直接不可用。
+2. **会把管理端一起带进去**——`web-gateway.js`、`task-runner.js`、`login-browser.js`
+   等不属于网关闭包，带进去会让快照无谓膨胀、还引入 playwright 依赖。
+
+正确做法是**按依赖闭包复制**：从 `src/server.js` 出发递归解析 `require('./x')`，
+把闭包内的文件逐个复制到 `stable/src/` 同路径。复制后逐字节比对、跑 `node --check`、
+并用临时端口独立启动一次确认三条通道就绪。
+
+> **手工启动 `stable/` 会退回到一个空数据目录**：`reqlog.js` 的
+> `ROOT = path.resolve(__dirname, '..')`，stable 副本的 `__dirname` 是 `stable/src`，
+> 所以未设 `DUMATE_ADMIN_DATA` 时埋点落 `stable/data/`——**里面没有任何凭证**，
+> 千问与 TRAE 通道直接不可用。所以启动 9080 必须走 `start-stable.bat`
+> （它设了 `DUMATE_ADMIN_DATA=<repo>/data`），或手工带上该变量。
+
+### 数据文件（`data/`，已 gitignore）
+
+| 文件 | 内容 | 敏感度 |
+|---|---|---|
+| `keys.json` | 签发给调用方的 API Key，**只存 sha256** | 低（明文仅在创建时返回一次） |
+| `web-accounts.json` | 网页账号，**cookie 明文存** | **高**（必须原样重放，无法哈希） |
+| `qwenwork-accounts.json` | 千问凭证（含 refresh token） | **高**（等同密码） |
+| `traework-accounts.json` | TRAE 凭证（含轮换的 refreshToken） | **高** |
+| `admin-users.json` / `admin.secret` | 管理员口令（scrypt）与会话签名密钥 | **高** |
+| `model-map.json` | 模型别名、上游模型、对外暴露、兜底 | 低 |
+| `requests.jsonl` | 网关埋点（超 32MB 轮转一次留 `.1`） | 中（含 prompt 元信息） |
+| `activity.jsonl` | 统一操作记录（签到/任务/抽奖） | 中 |
+| `points-cursor.jsonl` | 搭子余额游标（逐请求成本） | 低 |
+| `qwenwork-credits.jsonl` / `traework-credits.jsonl` | 两条通道的逐请求积分归因 | 低 |
+| `task-runs.jsonl` / `task-scheduler.json` / `auto-checkin.json` | 任务历史与定时配置 | 低 |
+| `browser-profile/` | 浏览器登录器用的受控 profile | 中 |
+
+> **三种凭证策略不同，是刻意的**：API Key 只存哈希（可验证不可还原）；
+> 网页 cookie 必须明文（上游要求原样重放）；管理端口令走 scrypt。
+> 所以 `data/` 一旦被复制走，网页与直连通道的凭证是**直接可用**的——
+> 这个目录已在 `.gitignore` 里，**不要提交，也不要放进任何备份镜像**。
+
+> `DUMATE_ADMIN_DATA` 决定数据目录，**管理端与网关必须一致**，否则读到的
+> 账号/埋点不同。开发实例（9082/9083）与稳定版（9080）默认共用 `<repo>/data`
+> ——这是有意的（账号池共用）。
 
 ## 许可证
 
