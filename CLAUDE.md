@@ -19,8 +19,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 > **9080 是生产实例，不是本地调试实例**：它对外持续提供服务，改动或重启会直接影响使用者。
 > 除非明确要发布新版，否则**不要改 `stable/` 下的代码、不要重启 9080**。
 > 所有开发与验证一律在 9082（界面看 9083）进行。
-> 发布新版的唯一途径：主目录验证通过后覆盖 `stable/src/` + 更新 `SNAPSHOT_FROM.txt`，再重启 9080。
+> 发布新版的唯一途径：主目录验证通过后按**依赖闭包**同步 `stable/src/` + 更新 `SNAPSHOT_FROM.txt`（不要用 `src/*.js` 覆盖——会漏掉子目录、多带管理端，详见下文「`stable/` 是冻结快照」）。
 > 原来另有一个 9081 管理端，与 9083 功能完全重复，已停用——不再需要它。
+
+> **9080 不一定在运行**：它是按需启动的对外服务，不是常驻开发环境。动手前先 `netstat -ano | grep ":9080"` 确认。若它没在跑而你被要求「发布新版」，正确做法是**只同步快照文件**，不要顺手把它启动起来——启动一个对外服务是用户的决定，不是发布流程的一部分。
 
 **三条上游通道，靠模型名前缀分流**（`src/upstream-router.js`）：
 
@@ -128,7 +130,20 @@ sanguo 项目的 `novel-creator` 技能把写作拆成分阶段门控（「起�
 用前缀而不是猜模型名的理由：两侧模型名会撞车（搭子有 `glm-5`，千问上游也是 GLM 系），猜错了两侧都返回 200，从响应里根本看不出来；且隐式路由会让同一名字今天走 A 明天走 B。未知前缀若静默跑到搭子，会拿到「看起来成功但完全不是想要的结果」，比直接 400 难查得多。
 
 
-**`stable/` 是冻结快照**——十份网关源码的拷贝，**不随主目录开发改动**，保证 9080 不被开发中的代码波及。要发布新版时把 `src/*.js` 覆盖过去，并把来源提交写进 `stable/SNAPSHOT_FROM.txt`（哈希 + 提交标题 + 日期三行）。快照有自己的启动脚本 `stable/start-stable.bat`，默认用 `<repo>/data`——与开发实例共享同一份数据，这是有意的（账号池共用）。
+**`stable/` 是冻结快照**——网关闭包的拷贝（当前 **36 个 `.js`**：顶层 19 个 + `qwenwork/` 8 个 + `traework/` 9 个），**不随主目录开发改动**，保证 9080 不被开发中的代码波及。快照有自己的启动脚本 `stable/start-stable.bat`，默认用 `<repo>/data`——与开发实例共享同一份数据，这是有意的（账号池共用）。
+
+**发布新版时不要简单地「把 `src/*.js` 覆盖过去」**，两个坑：
+
+1. **`src/*.js` 这个 glob 漏掉子目录**——`qwenwork/` 与 `traework/` 共 17 个文件不在里面。漏了它们，网关能启动但通道直接不可用。
+2. **会把管理端一起带进去**——`login-browser.js`、`task-runner.js`、`task-scheduler.js`、`web-gateway.js`、`records.js`、`points-agg.js` 都不属于网关闭包（快照历来只含网关），带进去会让快照无谓膨胀、还引入 playwright 依赖。
+
+正确做法是**按依赖闭包复制**：从 `src/server.js` 出发递归解析 `require('./x')`，把闭包内的文件逐个复制到 `stable/src/` 同路径。这样既不会漏（`fallback-web.js`、`web-pool.js` 就是靠这个补上的——它们在 09-27 加入后快照漏了两版），也不会多。复制后必须做三件事：
+
+- **逐字节比对**确认 `stable/src` 与 `src` 的闭包完全一致（数量相等且内容相同）
+- 对快照跑 `node --check` 与一次**独立启动**（换个临时端口，如 `DUMATE2API_PORT=19099`），确认三条通道就绪
+- 更新 `stable/SNAPSHOT_FROM.txt`：**指纹 + 算法 + 来源提交 + 本次覆盖了什么 + 验证记录**
+
+**指纹算法必须写进 `SNAPSHOT_FROM.txt`**。历史上记过一个 `f7e7a810…` 但没记算法，后来试了二十多种拼接变体都复现不出来，那个值永久失效。现行算法：`sha256( 按相对路径排序后 [相对路径 + LF + 内容] 拼接 )`，UTF-8 编码。
 
 管理端刻意**不代理模型协议**——网关已经在做，多一跳只会多一个故障点。所有进程通过 `data/` 目录下的文件通信，不通过 IPC。
 
@@ -198,13 +213,18 @@ node test/probe-oai.js         # 只打 OpenAI 格式的流式探测，直接看
 node test/probe-anth.js        # 只打 Anthropic 格式的流式探测（含 x-api-key / anthropic-version 头）
 node src/admin/server.js --reset-admin --password=xxxxxx   # 重设管理员口令
 node src/web-gateway.js    # 启动多账号网关（默认 9084）
+node test/traework-login.js login|checkin|chat   # TRAE 命令行自测（交互式，见下）
 cd web && npm run dev      # 前端开发（Vite 5173，/api 代理到 9081）
 cd web && npm run build    # 前端构建（vue-tsc 类型检查 + vite build → web/dist）
 ```
 
+**`test/traework-login.js` 是不开管理端也能验证 TRAE 通道的入口**：`login` 生成授权链接（粘回调落盘）→ `checkin` 签到并查额度 → `chat "你好"` 发一条对话。凭证由它自己走 OAuth 换取，不依赖 TRAE 客户端。排查「TRAE 到底通不通」时比在界面里点更快。
+
 **`npm test` 只依赖网关**：它直接打 9080，不需要起 mock。先确认 9080 在线（`curl :9080/health`）。
 
 **`npm test` 之外还有两个单点探针**：`test/probe-oai.js` 与 `test/probe-anth.js` 各只打一种协议、把原始 SSE 打到 stdout，用来区分「网关翻译错」还是「上游返回错」——比跑全套 smoke 更快定位。两者都硬编码打 9080。
+
+**这些脚本的端口都写死在 `req()` 里**（smoke / probe-oai / probe-anth 一律打 9080）。要在 9082 上跑同一套断言，临时把 `port: 9080` 换成读环境变量即可——不要改文件本身，那是开发实例与稳定实例共用的。
 
 **开发端口与稳定端口是分开的**：9082/9083 跑主目录代码，9080 跑 `stable/` 快照，互不干扰。开发实例起管理端时**必须带 `DUMATE_ADMIN_GATEWAY_PORT=9082`**，否则管理端会去读 9080（可能没起）而显示空数据——`start-dev.bat` 里设的就是这个变量。
 
@@ -250,6 +270,14 @@ DUMATE2API_PORT=9082 node src/server.js
 另一个搭子专项离线验证（不需要起服务）：
 `node test/verify-display-name.js`（账号显示名解析：占位名识别、优先级、空值边界）。
 
+另一个千问专项离线验证（不需要起服务，假上游按账号返回预设余额）：
+`node test/verify-qwen-daily-aggregate.js`（每日额度多账号合计口径：分子分母同源、
+`/credits` 与 `/accounts` 两处相等、失败账号如实报出、每账号按各自峰值算）。
+
+另一个千问专项离线验证（不需要起服务，拦截 https 层喂预设响应）：
+`node test/verify-qwen-wallets-zero.js`（「三池全 0」响应的重试判据：瞬时抖动
+重试即恢复、真实归零如实上报并标 retried、免费扣完转付费不误判）。
+
 离线自测的完整流程（无需安装 DuMate）：两个终端分别跑 `npm start` → `npm test`。
 
 ## 架构
@@ -262,8 +290,16 @@ server.js ──→ discovery.js ──→ upstream-launcher.js
     ├──────→ google.js ─────→ budget.js
     ├──────→ responses.js ──→ budget.js + anthropic.js(modelmap)
     ├──────→ reqlog.js / modelmap.js / keys.js
-    └──────→ admin/*  ← 管理端独立进程复用同一批模块
+    ├──────→ upstream-router.js ──→ channels.js（通道 id 单一来源）
+    │                    ├──→ qwenwork/（直连，进程内）
+    │                    └──→ traework/（直连，自持凭证）
+    └──────→ fallback-web.js ──→ web-pool.js ──→ accounts.js
+                              （桌面凭证不可用时把网页池包装成伪上游响应）
 ```
+
+**`fallback-web.js` 是「伪上游」而不是第二条链路**：它把网页凭证池包装成带 `statusCode`/`headers` 的 EventEmitter，四个协议处理器原样复用——**不要为它重写翻译层**，那三套 SSE 状态机是踩了十几个坑才稳定的。
+
+**`web-pool.js` 是 9084 与回落机制共用的账号池**，所以它同时被 `web-gateway.js`（独立进程）和 `fallback-web.js`（9080 进程内）依赖。改动它等于同时影响两个入口。
 
 数据流：
 
@@ -328,9 +364,11 @@ Claude Code ── Anthropic ───────┼──→ 网关 :9080 ─�
 
 **模型名兜底是唯一可行的容错。** 上游真实模型只有 `model-text` / `model-artifact-validate` / `glm-5`，传别的名字硬性报 `api not registered`。`mapModel` 查不到一律回落 `fallback`（默认 `model-text`），改 `data/model-map.json` 的 `fallback` 会影响全部未知模型名。
 
-**`DUMATE2API_KEY` 是死变量。** 它在 `src/server.js:14` 被赋值，但代码里从未参与任何校验。真正的鉴权开关是 `DUMATE_REQUIRE_KEY=1` + `data/keys.json`。（README 已加说明标注它是历史遗留。）
+**`DUMATE2API_KEY` 是死变量。** `src/server.js` 顶部把它读进 `API_KEY`，但代码里从未参与任何校验（可以 grep `API_KEY` 确认只有那一处赋值）。真正的鉴权开关是 `DUMATE_REQUIRE_KEY=1` + `data/keys.json`。（README 已加说明标注它是历史遗留。）
 
-**`model_allowlist` 只在配了白名单时才读请求体。** 网关鉴权段（`src/server.js:709`）先判断 `key.model_allowlist` 非空才预读 body 取 `model`——否则给默认路径凭空加一次完整读取。结果存 `req._rawBody`，`readBody` 直接复用，**流只能读一次，重复读会拿到空串**。Google 路径的模型名在 URL 里，走正则从路径提取。
+**`model_allowlist` 只在配了白名单时才读请求体。** 网关鉴权段先判断 `key.model_allowlist` 非空才预读 body 取 `model`——否则给默认路径凭空加一次完整读取。结果存 `req._rawBody`，`readBody` 直接复用，**流只能读一次，重复读会拿到空串**。Google 路径的模型名在 URL 里，走正则从路径提取。
+
+**引用代码位置时不要写行号。** 本文件历史上写过 `src/server.js:14` / `:709` 这类行号，改动几次后全部失效——后来者照着行号去看会读到无关代码。写函数名或常量名（`API_KEY`、`model_allowlist`），它们靠 grep 就能定位且不会漂移。
 
 **请求埋点失败必须吞掉。** `reqlog.record` 是同步写 JSONL，出错只报一次然后自禁用——埋点绝不能影响正在转发的响应。`logRequest` 用 `res._logged` 去重，因为流式路径会同时挂 `end`/`error`/`aborted` 三个收尾点。
 
@@ -357,16 +395,26 @@ Claude Code ── Anthropic ───────┼──→ 网关 :9080 ─�
 | `DUMATE_ADMIN_GATEWAY_PORT` | `9080` | **管理端去读哪个网关的状态**；开发实例应设为 `9082`，否则会显示稳定版的数字 |
 | `DUMATE_WEB_GATEWAY_PORT` / `_HOST` | `9084` / `127.0.0.1` | 多账号网关（网页凭证）监听 |
 | `DUMATE_TASK_POLL_MINUTES` | `30` | 任务自动轮询间隔（`0` 关闭）；**低于 5 分钟会被拒绝**——过密轮询无收益只有封号风险 |
-| `DUMATE_AUTO_CHECKIN_HOUR` / `_MINUTE` | `9` / `17` | 每日自动签到时刻 |
+| `DUMATE_AUTO_CHECKIN_HOUR` / `_MINUTE` | `9` / `17` | 每日自动签到时刻（**两个都要**，只设 HOUR 不生效） |
 | `DUMATE_BROWSER_PATH` | 自动探测 Edge/Chrome | 登录器找不到浏览器时手动指定 |
 | `DUMATE_QWENWORK_AUTOSTART` | `auto` | `auto`=启用千问通道 / `off`=关闭（进程内直连，不拉起外部服务） |
 | `DUMATE_QWENWORK_INSTALL` | 自动探测 | 千问办公安装根（wasm 探测失败时手动指定） |
 | `CB_QWENWORK_WASM` | 自动探测 | 直接指定 `qoder_auth_wasm_bg.wasm` 的完整路径 |
 | `DUMATE_QWENWORK_DAILY_CREDITS` | `100` | 千问每日免费额度的**配置兜底下限**（接口不返回上限，只作推断的下界） |
 | `DUMATE_QWENWORK_MIN_MAX_TOKENS` | `16384` | 千问输出预算下限（与搭子的 `DUMATE_MIN_MAX_TOKENS` 分开） |
-| `DUMATE_QWENWORK_DEFAULT_MAX_TOKENS` | `131072` | 千问**默认**输出预算（客户端未给 `max_tokens` 时；搭子仍用 `DEFAULT_BUDGET=32768`）。取上游上限，见上文实测 |
+| `DUMATE_QWENWORK_DEFAULT_MAX_TOKENS` | `131072` | 千问**默认**输出预算（客户端未给 `max_tokens` 时；搭子用 `DEFAULT_BUDGET=32768`，但会被 FLOOR 抬到 65536——**下限优先于默认值**）。取上游上限，见上文实测 |
 | `DUMATE_QWENWORK_AGENT_DISCIPLINE` | 未设（注入） | 设 `0` 关闭「执行纪律」注入（见上文「千问通道必须给带工具的请求注入执行纪律」） |
 | `DUMATE_QWENWORK_CREDIT_CACHE_MS` | `30000` | 千问余额缓存时长，避免每次请求都打站点接口 |
+| `DUMATE_QWENWORK_ACCOUNT` | 未设 | 千问指定用哪个账号（填账号 **id**）。优先级：**环境变量 > 账号文件里的 `preferred` 标记 > 池里第一个**。环境变量是临时覆盖（改启动参数不改文件），删号后「第一个」会变，所以只作兜底 |
+| `DUMATE_TRAEWORK_AUTOSTART` | `auto` | `auto`=启用 TRAE 通道 / `off`=关闭（与 `DUMATE_QWENWORK_AUTOSTART` 同形） |
+| `DUMATE_TRAEWORK_MIN_MAX_TOKENS` | `16384` | TRAE 输出预算下限（三通道各一套，不要互相套用） |
+| `DUMATE_TRAEWORK_MODELS_CACHE_MS` | `300000` | TRAE 模型表缓存时长（5 分钟）。模型表只在登录/刷新时变，不必每次打上游 |
+| `DUMATE_WEB_FALLBACK` | 未设（开启） | 设 `0` 关闭「桌面凭证不可用时回落到网页池」（见上文回落机制）。关闭后桌面凭证失效即请求全失败 |
+| `DUMATE_POINTS_METER` | 未设（开启） | 设 `0` 关闭搭子的余额游标采集（`points-cursor.js`）。关闭后请求日志不再有逐条消耗 |
+| `DUMATE_WEB_BASE` | `https://www.dumate.cn` | 搭子网页端基址。只在需要指向测试环境时改 |
+| `DUMATE_WEB_TIMEOUT` | `20000` | 搭子网页接口超时（ms）。**注意前端 axios 是 30s**，改大这里会让整页请求先超时 |
+| `DUMATE_GATEWAY_HOST` | `dumate-svc.baidu.com` | 网页凭证换模型 token 的目标主机。上游换域名时改这里 |
+| `DUMATE_UPSTREAM_CWD` | DuMate 安装根 | 拉起 `dumate-main-server.exe` 时的工作目录。后端读相对路径配置时用得上 |
 | `DUMATE_ADMIN_SECURE_COOKIE` | 未设（不置 Secure） | 设 `1` 才给会话 cookie 加 Secure（本地 http 下会被浏览器丢弃） |
 
 ## 数据文件（`data/`，已 gitignore）
@@ -385,10 +433,19 @@ Claude Code ── Anthropic ───────┼──→ 网关 :9080 ─�
 | `auto-checkin.json` | 自动签到配置 |
 | `qwenwork-credits.jsonl` | 千问积分归因（每请求一条，带 `req_id` 与请求日志配对） |
 | `qwenwork-daypeak.json` | 千问每日额度的观测峰值，用于推断「每日上限」 |
+| `qwenwork-accounts.json` | 千问自持凭证账号池（**含 refresh token，等同密码**） |
+| `traework-accounts.json` | TRAE 自持凭证账号池（OAuth 换取，含轮换的 refreshToken） |
+| `traework-credits.jsonl` | TRAE 逐请求积分归因（按账号的 consumed 游标，见 `traework/credits.js`） |
+| `points-cursor.jsonl` | 搭子的余额游标（每请求一条，相邻差值即该请求成本） |
+| `browser-profile/` | 浏览器登录器用的受控 profile 目录（`DUMATE_BROWSER_PATH` 找不到浏览器时才用） |
 
 **两个 `data/` 目录的陷阱**：`DUMATE_ADMIN_DATA` 决定数据目录，管理端与网关必须一致，否则读到的账号/埋点不同。`stable/` 快照若也跑起来，默认用 `<repo>/data`——与开发实例共享同一份数据，这是有意的（账号池共用）。
 
-**但 9080 当前实际跑的是 `stable/data/`，不是 `<repo>/data`**（实测 2026-09-26）。`reqlog.js` 的 `ROOT = path.resolve(__dirname, '..')`——stable 副本的 `__dirname` 是 `stable/src`，所以未设 `DUMATE_ADMIN_DATA` 时落 `stable/data`。而 `start-stable.bat` 里写着 `set DUMATE_ADMIN_DATA=%~dp0..\data`，说明**现在这个 9080 不是用它自己的脚本起的**（手工起的，没有该环境变量）。后果：9083 管理端读 `<repo>/data`，看不到 9080 的流量——排查时若拿管理端数据核对 9080，会得出「请求根本没经过网关」这种错误结论。查 9080 的埋点必须直接看 `stable/data/requests.jsonl`。
+**`stable/` 手工启动会退回到一个空目录。** `reqlog.js` 的 `ROOT = path.resolve(__dirname, '..')`——stable 副本的 `__dirname` 是 `stable/src`，所以**未设 `DUMATE_ADMIN_DATA` 时埋点落 `stable/data/`**。该目录当前不存在（已被清理），但风险仍在：手工启动且不带环境变量时，网关会退回到这个空目录，**里面没有任何凭证**，千问与 TRAE 通道直接不可用，且 9083 管理端读的是 `<repo>/data`、看不到 9080 的流量——排查时会得出「请求根本没经过网关」这种错误结论。
+
+所以启动 9080 **必须**走 `start-stable.bat`（它设了 `DUMATE_ADMIN_DATA=%~dp0..\data`），或手工带上该变量。历史上 9080 曾被手工启动过（没有该变量），埋点因此落在 `stable/data/`——那段数据已合并回 `<repo>/data`。
+
+**核对 9080 的埋点时先确认它用的是哪个目录**：`stable/start-stable.bat` 启动的看 `<repo>/data/requests.jsonl`，手工启动且未设变量的看 `stable/data/requests.jsonl`。
 
 `keys.js` 的 CIDR 匹配是 **fail-closed**：非法条目返回 false（写错一条 CIDR 会让这把 key 对所有来源拒绝，而非意外放行）。token 比对逐条走 `timingSafeEqual`，避免通过响应耗时逐字节猜 token。
 
@@ -401,20 +458,31 @@ Claude Code ── Anthropic ───────┼──→ 网关 :9080 ─�
 
 ## 管理端模块（`src/` 下除网关外的部分）
 
+**先分清两类**，它们的归属决定了改动要不要同步进 `stable/` 快照：
+
+- **属于网关闭包**（会进快照）：`dumate-web.js`、`accounts.js`、`web-pool.js`、`points-cursor.js`。它们被 `server.js` 的依赖闭包引用（回落链路与余额游标都要用），**改这些要同步快照**。
+- **纯管理端**（不进快照）：`web-gateway.js`、`task-runner.js`、`task-scheduler.js`、`login-browser.js`、`records.js`、`points-agg.js`、`admin/`。9080 网关不加载它们。
+
+> 判断某模块属于哪类，**不要凭直觉**——`records.js`（操作记录）和 `points-agg.js`（额度包聚合）看着像核心逻辑，实际只被管理端路由引用，不在快照里。用依赖闭包算一次最可靠（见下文「`stable/` 是冻结快照」）。
+
 | 模块 | 职责 |
 |---|---|
-| `dumate-web.js` | 网页端 API 封装（签到 / 任务 / 抽奖 / 积分） |
-| `accounts.js` | 网页账号存储，cookie **明文存**（必须原样重放） |
-| `web-pool.js` | 网页凭证账号池，轮询 + 故障转移 |
-| `web-gateway.js` | 9084 独立网关，用网页凭证跑模型 |
-| `task-runner.js` / `task-scheduler.js` | 任务自动跑 + 后台轮询 |
-| `records.js` | 统一操作记录（签到/任务/抽奖） |
-| `points-agg.js` | 额度包聚合（按来源 / 按发放日 / 临期 / 已过期未用完）。本地后端与网页账号拿到的是同一份额度包结构但字段来源不同，两份都要得出同样的派生视图——收敛在这里，否则「一边按到期日、一边按发放日判断还在不在发」这种口径漂移必然发生 |
+| `dumate-web.js` | 网页端 API 封装（签到 / 任务 / 抽奖 / 积分）。**网关闭包内**——回落链路靠它调网页接口 |
+| `accounts.js` | 网页账号存储，cookie **明文存**（必须原样重放）。**网关闭包内**（`web-pool.js` 依赖）。显示名解析 `displayName()` / 对外序列化 `toPublic()` 都在这里，见下文约定 |
+| `web-pool.js` | 网页凭证账号池，轮询 + 故障转移。**被两个入口共用**：9084 独立网关 + 9080 的回落链路 |
+| `web-gateway.js` | 9084 独立网关，用网页凭证跑模型（纯管理端，不进快照） |
+| `task-runner.js` / `task-scheduler.js` | 任务自动跑 + 后台轮询（纯管理端） |
+| `records.js` | 统一操作记录（签到/任务/抽奖）。**纯管理端**——网关不加载它 |
+| `points-agg.js` | 额度包聚合（按来源 / 按发放日 / 临期 / 已过期未用完）。**纯管理端**。本地后端与网页账号拿到的是同一份额度包结构但字段来源不同，两份都要得出同样的派生视图——收敛在这里，否则「一边按到期日、一边按发放日判断还在不在发」这种口径漂移必然发生 |
 | `points-cursor.js` | 单请求积分成本（余额游标差）。上游账单无法归因到具体请求（同一时间窗有 1~3 条候选扣费，硬挑一条等于编数字），改用「每条请求结束后记一次余额、相邻两次差值即后一条的成本」。**每账号一条串行队列**——丢一条游标会让下一条的差值跨过两条请求，静默算错，所以宁可排队也不缺档 |
-| `login-browser.js` | 浏览器登录器（唯一依赖 playwright-core 的地方） |
+| `login-browser.js` | 浏览器登录器（唯一依赖 playwright-core 的地方，纯管理端） |
+| `admin/router.js` | `/api/admin/*` 路由分发。**路径匹配锚定整串**，所以 `/models/map` 不会误吞 `/models/map/reset`；注册时 `path: ''` 与前缀拼成 `/api/admin/web-accounts`，`mount` 做了去尾斜杠 |
+| `admin/store.js` | JSON / JSONL 原子持久化（先写 `.tmp` 再 `rename`）。管理端的配置写盘都走它 |
+| `admin/iputil.js` | 客户端来源 IP。管理端只监听 127.0.0.1，所以直接取 TCP 对端；**没有 TRUST_PROXY 判定**——挂反代前必须先补，否则限流/锁定会按代理 IP 统计 |
 | `admin/routes/traework.js` | TRAE Work 通道的管理接口：`/status` 通道健康+账号列表（mode=multi，可增删）、`/models` 模型表（只读）、`/credits` 各账号额度与签到状态、`/checkin` 手动签到（幂等）、**`/login/url` + `/login/callback` 两步 OAuth 登录**、`DELETE/PATCH /accounts/:id` |
 | `admin/routes/qwenwork.js` | 千问办公通道的管理接口：`/status` 通道健康、`/credits` 三个池、`/credits/daily` 按天聚合、`/credits/records` 逐笔明细、`/models` 模型表、**`/account` 登录态详情（只读）**、**`/accounts` 账号（`mode='single'` 表示单账号直连，不可增删）** |
-| `admin/routes/*.js` | 管理 API，按 `mount()` 挂载到 `/api/admin/<前缀>` |
+| `admin/routes/accounts.js` | 搭子网页账号的管理接口（签到/抽奖/积分/记录）。**回填与显示名的逻辑都在这里**（`backfillNickname` / `backfillAll`），属于管理端、不进快照 |
+| `admin/routes/*.js` | 其余管理 API，按 `mount()` 挂载到 `/api/admin/<前缀>` |
 
 **千问登录态只读，管理端绝不写入。** 它存在官方客户端的 `auth-v2.dat` 里（Electron safeStorage：DPAPI 解 `Local State` 的 `encrypted_key` → 32B AES key → AES-256-GCM 解密）。官方客户端和我们各写一次会互相把对方的登录态刷掉，所以换账号必须开客户端操作。**不复制这个文件到 `data/`**——它会过期，复制一份立刻失效。`refresh_token` 过期（`refreshExpired`）要提前告警：access token 到期后无法自动续期。
 
@@ -425,8 +493,6 @@ Claude Code ── Anthropic ───────┼──→ 网关 :9080 ─�
 **`chatlab.js` 刻意绕过密钥与 IP 管控**：它只要求管理员会话，走的是与 9084 同一套账号池、消耗真实积分。定位是「在管理端里验证某个模型名能不能跑通」，不必先去签发密钥。与 9084 的分工是：9084 面向外部客户端、带鉴权、做协议兼容；chatlab 是内部试调、返回便于展示的结构化数据（含每条回答的实测消耗）、不做协议翻译。
 
 **`autotask.js` 只给签到做定时，抽奖只留手动**：签到幂等（当天已签就跳过），多跑无害；抽奖消耗次数且不可逆。定时配置落盘到 `data/auto-checkin.json`——定时器只活在进程内，重启后得知道上次开没开、几点跑。
-
-**路由匹配是锚定整串的**（`router.js` 的 `anchor()`），所以 `/models/map` 不会误吞 `/models/map/reset`。注册时 `path: ''`（如账号列表）会与前缀拼成 `/api/admin/web-accounts`，`mount` 里做了去尾斜杠处理。
 
 ## 前端（`web/`）
 
@@ -454,6 +520,25 @@ Vue 3 + Vite + ant-design-vue 4 + Tailwind + ECharts（按需引入，不用全�
 **各页面必须 `watch` 通道变化并重新拉数据**，不能只在 `onMounted` 读一次——否则顶栏切了、页面还是旧通道的内容。两个数据源结构不同的页面（登录态、积分明细、账号管理、模型管理、API Key）用 `v-if="isQw"` / `<template v-else>` 分开两套模板，共用同一个路由；只差筛选条件的页面（用量统计、请求日志、聊天测试台）同一套模板，只换请求参数。
 
 **千问办公的账与搭子完全不同，界面必须分开显示**：搭子靠上游账单 + 余额游标（`points-cursor.js`），千问是三个积分池（`daily` 免费 / `monthly` 订阅 / `longterm` 充值）按 `req_id` 归因。两边数字**不能相加**。千问的「每日上限」接口不返回，由「观测峰值 + 配置兜底」推断（`credits.js` 的 `dailyUsageFromBalance`），界面要标出 `limitSource` 是 `observed` 还是 `config-lower-bound`。
+
+**千问的每日额度是账号级的，池子卡的余额与分母都必须是全账号合计**（2026-09-30 修）。用户报「两个账号每日额度应该是 200，今天都还没用」——根因是 `/api/admin/qwenwork/credits` 只读**主账号**（`authStore.preferred()`），池子卡显示单个账号的 100；而同一页顶部「积分余额」卡读 `/accounts` 的 `summary.pointsTotal`，**本来就是全账号合计** = 200。同页两个数字口径不同，被读成「少算了一个账号」。
+
+三条不变量，改动时别破坏：
+
+- **分子与分母同口径**。每个账号各有一份每日免费额度（各自 00:00 重置），所以池子卡的余额是合计、分母也必须是合计（`dailyCap = 单账号上限 × 账号数`）。只把分子改成合计会得到「200 / 100」这种读不出来的数。
+- **`/credits` 与 `/accounts` 的账号范围必须同源**（都走 `authStore.list()` 全量，不只 `usable`），否则「顶部合计」与「池子合计」还是会差。余额查询失败的账号不计入合计，但必须在 `failedAccounts` 里如实报出——否则部分和被读成全量。
+- **两个分母分开给**：`dailyCap`（合计，池子卡用）与 `dailyCapPerAccount`（单账号，账号健康快照每张卡用）。账号快照问的是「这一个号今天还能用多少」，那里**不能**用合计分母。
+
+每个账号的 `limit`/`freeUsed` 仍按**各自**的观测峰值算（峰值文件按账号分桶），再相加；只要有一个账号没校准，`freeUsed` 整体给 `null`——部分求和会低估消耗，比不给数字更容易被误读。聚合值统一 4 位小数（与归因记录口径一致），否则浮点累加会外传 `199.99349999999998` 这种噪声。离线验证：`node test/verify-qwen-daily-aggregate.js`。
+
+**每日额度是「每天 00:00 自动重置」，不需要当天先使用一次**（2026-09-30 实测确认）。重置时刻就是 wallet 的 `valid_to`（`2026-10-01T00:00:00+08:00`）。证据：账号 2 当天**零请求**，前一日收尾 `4.9657`，次日读到满额 `100`——中间没有任何请求。所以「必须先跑一次才刷新」这个说法不成立。
+
+但用户看到的那个「0」是**真实存在**的，成因不是「没刷新」，而是 `/user/wallets` 偶尔返回「三池全 0 + `active_wallets` 空」的**瞬时响应**。决定性证据：同一时刻打两个接口，`wallets` 报全 0 而 `account-context` 的 `quota.remaining` 报 100——两者矛盾，说明那次是**读失败**，不是余额归零。`fetchWallets` 现在对这种响应**重试一次**：
+
+- **重试即恢复** → 用重试的结果（瞬时抖动，不标任何标记）
+- **重试仍是全 0** → 如实上报 0 并标 `retried: true`，经 `retriedAccounts` 汇总到界面
+
+为什么不是「一律当读失败」：真·额度耗尽时三池确实都是 0，那时显示 0 是**正确的**（历史上 95 条 `daily=0` 全部伴随付费池 >0，即免费扣完转扣付费；真·全耗尽还没遇到过，但不能因此认为它不可能）。重试是能同时容纳这两种情况的判据——**不要**改成「全 0 就报错」或「全 0 就沿用旧值」，前者会掩盖真实耗尽，后者会长期显示过期数字。离线验证：`node test/verify-qwen-wallets-zero.js`。
 
 **模型管理页的三条通道共用一套骨架，但账各自独立**（2026-09-29 对齐）。页面结构固定为「通道元信息行 → 模型信息表 → 该通道的额度卡 → 通道专有区块」：
 

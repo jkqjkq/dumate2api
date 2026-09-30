@@ -177,7 +177,7 @@ curl http://127.0.0.1:9080/v1/chat/completions \
 ### 第 0 步：先把代理跑起来
 
 ```bash
-cd <repo>
+cd <你克隆仓库的目录>
 npm start
 ```
 
