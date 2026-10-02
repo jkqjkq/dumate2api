@@ -132,4 +132,27 @@ function cachedModelIds() {
   return [c.DEFAULT_MODEL];
 }
 
-module.exports = { fetchModels, listModelIds, cachedModelIds, usableIds, normalize, CACHE_MS };
+/**
+ * 带元信息的模型条目（给 /v1/models 用）。
+ *
+ * 为什么需要：cc-switch 解析模型列表读 `name` / `contextWindow`
+ * （实测其二进制里与 `owned_by` 相邻的字段是 id/name/cost/contextWindow/
+ * maxContextWindow）。只给 id 的话客户端只能显示 `traework/glm-5.2`
+ * 这种内部 key，看不出是哪个模型。
+ */
+function cachedModelEntries() {
+  if (cache.data && cache.data.models.length) {
+    const list = cache.data.models.filter((m) => m.visible && (m.usage === 'chat_completion' || !m.usage));
+    if (list.length) {
+      return list.map((m) => ({
+        id: m.id,
+        name: m.name || m.id,
+        contextWindow: m.contextWindow || null,
+        maxContextWindow: m.contextWindow || null,
+      }));
+    }
+  }
+  return [{ id: c.DEFAULT_MODEL, name: c.DEFAULT_MODEL, contextWindow: null, maxContextWindow: null }];
+}
+
+module.exports = { fetchModels, listModelIds, cachedModelIds, cachedModelEntries, usableIds, normalize, CACHE_MS };

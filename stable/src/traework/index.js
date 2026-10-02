@@ -47,6 +47,11 @@ function listModels() {
   return models.cachedModelIds();
 }
 
+/** 带元信息的模型条目（给 /v1/models 用，客户端据此显示真实模型名） */
+function listModelEntries() {
+  return models.cachedModelEntries();
+}
+
 /** 预热模型表（进程启动时调一次，让 /v1/models 拿到完整列表） */
 function warmupModels() {
   return models.fetchModels().catch(() => null);
@@ -132,6 +137,6 @@ async function send(payload, onChunk, opts = {}) {
 }
 
 module.exports = {
-  status, send, listModels, warmupModels, pickAccount,
+  status, send, listModels, listModelEntries, warmupModels, pickAccount,
   DEFAULT_MODEL: c.DEFAULT_MODEL,
 };

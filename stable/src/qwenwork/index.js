@@ -205,7 +205,16 @@ async function send(payload, onChunk, opts = {}) {
     }
 
     try {
-      return await runOnce(account, payload, onChunk, opts);
+      const result = await runOnce(account, payload, onChunk, opts);
+      // 请求成功就把上次的失败标记清掉。**不能只在换票成功时清**——那样
+      // 一次瞬时失败（上游抖动的 403）会永远挂在账号上，用户看到的是早已
+      // 自愈的旧错误（2026-10-02 实测：账号页显示的 403 其实几小时前就恢复了）。
+      // 只在确实有 lastError 时才写盘，避免每次成功都触发一次文件写入。
+      if (account.lastError) {
+        try { authStore.patch(account.id, { lastError: '' }); }
+        catch (e) { /* 清标记失败不影响请求结果 */ }
+      }
+      return result;
     } catch (e) {
       const code = Number(e.statusCode) || 0;
       markFailure(account, e.message);

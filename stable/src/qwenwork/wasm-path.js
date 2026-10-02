@@ -4,9 +4,9 @@
 // 随客户端版本变化，且不是我们的产物。必须运行时从安装目录读。
 //
 // Buddy2api 自带的探测只找 <ProgramFiles>\QwenWorkCN，而实际安装常在带
-// 中文/空格的两层目录里（本机是 D:\Program Files\code program\qianwenWork\
-// QwenWorkCN），所以这里自己扫，并取**版本号最大的**目录——客户端是多版本
-// 并存的，用旧版本的 wasm 签名会被服务端拒。
+// 中文/空格的两层目录里（如 <ProgramFiles>\<厂商目录>\qianwenWork\QwenWorkCN），
+// 所以这里自己扫，并取**版本号最大的**目录——客户端是多版本并存的，
+// 用旧版本的 wasm 签名会被服务端拒。
 const fs = require('fs');
 const path = require('path');
 

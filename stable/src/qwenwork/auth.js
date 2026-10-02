@@ -70,6 +70,10 @@ function list() {
     refreshExpiresAt: a.refreshExpiresAt || null,
     machineId: a.machineId || '',
     lastError: a.lastError || '',
+    // lastError 的写入时刻。界面据此显示「N 分钟前」——没有它，一条几小时前
+    // 的瞬时错误会被读成「当前故障」（2026-10-02 实测踩到：账号页显示的
+    // 403/402 其实早已自愈）。无 lastError 时为 null。
+    lastErrorAt: a.lastErrorAt || null,
     createdAt: a.createdAt || null,
     // 「账号存活天数」供仪表盘展示——接口里没这字段，由 createdAt 算。
     // 没有 createdAt（旧数据兼容）就 null，界面显示「—」，不编天数
@@ -157,6 +161,17 @@ function patch(id, fields) {
   // 设为主账号是排他的：置 true 时清掉其他账号的同标记
   if (fields && fields.preferred === true) {
     for (const x of data.accounts) if (x.id !== a.id) x.preferred = false;
+  }
+  // lastError 与 lastErrorAt 必须同步移动：所有写 lastError 的调用方
+  // （index.js 的 markFailure、chat.js 的换票失败）都走这里，集中打时间戳
+  // 比在每个调用点各写一次可靠——漏一处就会出现「有时间戳的错误」和
+  // 「没时间戳的错误」两种形状，界面无法统一判断新鲜度。
+  //
+  // 为什么要时间戳：lastError **只在换票成功时才清空**，所以它经常停在
+  // 很久以前的失败上。用户看到「Model is not available」会以为当前坏了，
+  // 其实可能是几小时前那次瞬时抖动的残留。带上时刻才能显示「N 分钟前」。
+  if (fields && fields.lastError !== undefined) {
+    fields.lastErrorAt = fields.lastError ? Date.now() : null;
   }
   Object.assign(a, fields);
   save(data);

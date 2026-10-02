@@ -1,54 +1,82 @@
-快照指纹 sha256（stable/src 下 36 个 .js，按路径+内容计算）：
-8548df35eaa03046a7a8650ff85e7b36b6c6c033cc1de176405f169e73dda07a
+快照指纹 sha256（stable/src 下 43 个 .js，按路径+内容计算）：
+3662af33a5017af3c411a5a723623deed5597f44eaed910da974041eedb37aa9
 
-指纹算法（本文件从本次起显式写明，便于下次比对）：
-  对 stable/src 下所有 .js 文件，按相对路径排序，
+指纹算法：
+  对 stable/src 下所有 .js 文件，按相对路径排序（`/` 分隔），
   拼接 [相对路径 + LF + 文件内容]，以 UTF-8 编码后取 sha256。
-  上一版记录的值 f7e7a810… 用的是未记录的算法，已无法复现——本次起固定。
+  本次已用该算法复算两遍，结果一致。
 
-  **注意**：上面那个 8548df35… 与再上一版的 96a22d7c… 都**复现不出来**。
-  2026-10-01 公开前脱敏时按本文档算法对**旧内容**复算，得到 75fc6f90…
-  而非记录的 96a22d7c…——说明 96a22d7c… 在写入时就与算法不符（与 f7e7a810…
-  同一失效模式）。8548df35… 是按文档算法对**当前** stable/src 实算的结果，
-  但它能否复现同样存疑。**下次同步时请先用旧内容验证算法能复现旧值，
-  再信任新值**；否则这个字段只是又一个无法核对的数字。
+  **关于历史值的说明**：本文件早先记过 f7e7a810…、96a22d7c…、8548df35…
+  三个值，**均无法复现**。本次同步时按上面这个算法对**旧快照内容**实算，
+  得到 395350d0… 而非记录的 8548df35…；又试了 path+CRLF+content、
+  无分隔符、content-only、NUL 分隔、content+path 等 6 种变体，仍无匹配。
+  说明那三个值在写入时就与任何一致算法不符（不是编码/换行问题）。
+  本次起，值由上面算法实算得出，可核对。
 
-来源：dev 分支提交（公开前脱敏后）
-  基线 af288ca chore(stable): 同步快照到 1909759
-  2026-10-01 公开前脱敏：stable/src 下 accounts.js 与 qwenwork/credits.js
-  各有一处真实昵称被换成脱敏示例（张三 / 示例账号），内容因此与
-  1909759 略有不同。另：全部历史已重写（作者身份改 wearetheone777），
-  文档里引用的旧提交号已随之更新。
+来源：dev 分支提交
+  9736b11 feat(qoder): 接入第四条上游通道（阿里 Qoder）
 
-本次同步的改动（代码评审 15 项发现中影响网关闭包的部分）：
+本次同步的改动：
 
-  accounts.js  新增 toPublic() 统一序列化，get() 也解析显示名。
-               根因是「改了 9 个模块漏了 3 个调用点」——list() 解析了
-               显示名而 get() 没有，同一个账号在两个接口里叫两个名字。
-               收敛到一处后，所有访问器（list/get/create/update）
-               必然给出同一个 name。同时新增 getRaw() 供内部改盘使用
-               （get() 现在返回对外形状，cookie 被抹掉，不能拿来回写）。
+  新增 qoder/（7 个文件）——第四条上游通道（阿里 Qoder）：
+    constants.js  cosy.js  auth.js  session.js  login.js  chat.js  index.js
+    grants.js（积分批次账本）
+    与千问办公同一套 COSY 协议，但签名是**纯本地算法**（RSA+AES+MD5，
+    公钥硬编码），因此**不依赖任何客户端安装**（/health 的 needsClient=false）。
+    Qoder 没有逐批积分余额接口，唯一带到期信息的是领取响应本身，所以
+    每次签到落一条 data/qoder-grants.jsonl（幂等键 grantId）。
 
-  说明：其余修复位于管理端与前端（admin/routes/accounts.js 的
-  backfillNickname 三层保护与历史名重解析、task-runner.js 与
-  points.js 的显示名、前端路由与错误态），**不属于网关闭包**，
-  因此不在本快照内。快照仍严格等于网关依赖闭包（36 个文件）。
+  更新（11 个，与主目录逐字节一致）：
+    channels.js        通道 id 加 qoder（单一来源）
+    upstream-router.js qoder/ 前缀 + QODER_PREFIX 导出
+    server.js          路由分支 + /health channels.qoder + /v1/models 四通道带 name
+    budget.js          resolveQoderMaxTokens（独立下限 16384，与千问/TRAE 各一套）
+    model-info.js      qoderRows（自己拉模型表，不读跨进程快照）
+    qwenwork/{auth,credits,index}.js  余额交叉验证与 lastError 时间戳（见下）
+    traework/{index,models}.js        listModelEntries（给 /v1/models 带 name 与上下文）
 
-验证记录（2026-09-29，全部实测）：
-  - 36 个文件与主目录 src 逐字节一致（闭包 36 = 快照 36）
-  - node test/verify-display-name.js 17 项断言通过
-  - 其余 4 个离线验证脚本 + smoke.js 32 项全部通过
+  修正（1 个，**旧快照的陈旧文件**）：
+    qwenwork/wasm-path.js  旧快照里那份**停留在脱敏之前**——注释中还写着本机
+    真实路径 `D:\Program Files\code program\qianwenWork\QwenWorkCN`，而主目录
+    早在 2026-10-01 公开前脱敏时就已换成占位符 `<ProgramFiles>\<厂商目录>\...`。
+    该文件在 git 里自 4262fee 起未再改动，所以历次「按闭包同步」都没发现它
+    ——**闭包同步只复制闭包内的文件，不会检查闭包内文件是否已过期**。
+    本次一并修正。教训：同步时应逐字节比对**全部**闭包文件，而不只比对
+    本次改过的那些（本次正是这样才发现的）。
+
+  顺带修掉两处共用问题（都在闭包内）：
+    - /v1/models 四通道统一带 `name`：cc-switch 解析模型列表读 `name` 字段，
+      只给 {id, owned_by} 只能显示内部 key（`qoder/qfmodel`）。TRAE/Qoder
+      另带 contextWindow，取自上游模型表，不编造。
+    - lastError 新鲜度收敛到 web/src/utils/lastError.ts（无时间戳=陈旧），
+      仪表盘与账号页共用。**注意该文件属前端，不在本快照内**。
+
+  不在本快照内（纯管理端，网关不加载）：
+    admin/routes/qoder.js、admin/routes/system.js、admin/server.js、
+    web/ 下全部前端改动、src/qwenwork/login.js（仅登录器用到）。
+    快照严格等于网关依赖闭包（43 个文件），未多带管理端。
+
+验证记录（2026-10-03，全部实测）：
+
+  - **逐字节比对**：闭包 43 = 快照 43，内容全部一致；反向检查无多余文件
+  - **node --check**：43 个文件全部通过
+  - **独立启动**（临时端口 19099，DUMATE_AUTOSTART=off，指向 <repo>/data）：
+      /health → dumate / qwenwork / traework / qoder **四通道 ready=true**，
+      qoder.needsClient=false
+      /v1/models → 39 个模型，**39/39 带 name**（dumate 3 / dumate-proxy 2 /
+      qwenwork 2 / traework 18 / qoder 14）
+  - 离线验证 10/10 通过：verify-qoder-cosy（签名 22 项）、verify-qoder-channel、
+    verify-qoder-grants、verify-channel、verify-qwen-wallets-zero、
+    verify-qwen-daily-aggregate、verify-qwen-discipline、verify-truncated-toolcall、
+    verify-traework-gained、verify-display-name
   - **未启动 9080**：本次只更新快照文件，9080 保持停止状态
 
-启动方式的重要说明：
-  9080 此前是**手工启动**的（未设 DUMATE_ADMIN_DATA），埋点会落在
-  `stable/data/`。该目录当前**不存在**，但风险仍在：若手工启动且不设
-  DUMATE_ADMIN_DATA，网关会退回到这个空目录，里面**没有任何凭证**，
-  千问与 TRAE 通道将无法工作。
-  所以发布时必须按 start-stable.bat 启动（DUMATE_ADMIN_DATA=<repo>/data）。
+启动方式的重要说明（沿用）：
+  9080 必须按 start-stable.bat 启动（它设了 DUMATE_ADMIN_DATA=<repo>/data）。
+  若手工启动且不设该变量，reqlog.js 的 ROOT 会解析到 stable/data/——
+  那是个**空目录**，里面没有任何凭证，千问/TRAE/Qoder 通道将不可用，
+  且 9083 管理端读的是 <repo>/data、看不到 9080 的流量。
 
 上一版快照来源：
-  af288ca chore(stable): 同步快照到 1909759
-  2026-09-29
-  指纹 8850729fdcccd240fc05baeee46e61dd0d568e0580a1f9098ef40db918c9182f
-
+  af288ca chore(stable): 同步快照到 1909759（2026-09-29）
+  记录指纹 8548df35…（不可复现，实算为 395350d0…）
