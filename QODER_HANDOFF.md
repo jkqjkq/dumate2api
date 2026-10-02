@@ -1,7 +1,11 @@
 # Qoder 通道接入 —— 交接记录
 
 > 记录时间：2026-10-03（会话上下文超 50%，主动交接）
-> 分支：`dev`　｜　状态：**功能完整、已验证，未提交、未发布到 9080**
+> 分支：`dev`　｜　状态：**功能完整、已验证、已提交、快照已同步**
+>
+> **2026-10-03 收尾更新**：交接项全部处理完毕，见文末「九、收尾结果」。
+> 提交 `9736b11`（通道代码）+ `578d8b0`（快照同步）。**9080 未启动**
+> （按约定只同步快照文件，是否启动是对外服务的决定，由用户定）。
 
 ---
 
@@ -286,3 +290,86 @@ curl -s http://127.0.0.1:9082/health | node -e "..."   # 四通道就绪
   协议是事实标准但代码表达受版权保护）
 - API 参考：[alingse/qodercli-reverse](https://github.com/alingse/qodercli-reverse)
 - 项目内文档：`CLAUDE.md` 的「Qoder 是第四条通道」章节
+
+---
+
+## 九、收尾结果（2026-10-03）
+
+### 已提交
+
+| 提交 | 内容 |
+|---|---|
+| `9736b11` | `feat(qoder): 接入第四条上游通道（阿里 Qoder）` |
+| `578d8b0` | `chore(stable): 同步快照到 9736b11（Qoder 通道）` |
+
+均在 `dev`。快照指纹 `3662af33a5017af3c411a5a723623deed5597f44eaed910da974041eedb37aa9`
+（43 文件）。**注意**：历史记录过的 f7e7a810 / 96a22d7c / 8548df35 三个指纹
+**均不可复现**——本次按文档算法对旧快照内容实算得 `395350d0…`，又试了 6 种
+变体仍无匹配，确认那三个值写入时就与任何一致算法不符。已在 `SNAPSHOT_FROM.txt`
+如实标注。
+
+### 快照同步（`578d8b0`）
+
+- 闭包从 `src/server.js` 递归解析，**43 个文件**（36 → 43，新增 `qoder/` 7 个）
+- 逐字节比对：43 = 43，内容全等，反向检查无多余文件
+- `node --check` 43 个全通过
+- 独立启动（临时端口 19099，`DUMATE_AUTOSTART=off`，指向 `<repo>/data`）：
+  `/health` 四通道 `ready=true`、`qoder.needsClient=false`；
+  `/v1/models` 39 个模型、**39/39 带 name**（dumate 3 / proxy 2 / qwen 2 /
+  trae 18 / qoder 14）
+
+**顺带修掉一个旧快照的陈旧文件**：`stable/src/qwenwork/wasm-path.js` 停留在
+脱敏之前——注释里还写着本机真实路径 `D:\Program Files\code program\...`，
+而主目录早在 2026-10-01 公开前脱敏时就已换成占位符。该文件在 git 里自
+`4262fee` 起未再改动，所以**历次「按闭包同步」都漏掉了它**：闭包同步只复制
+闭包内的文件，不检查它们是否已过期。本次逐字节比对**全部**闭包文件才发现。
+
+> **教训**：同步时应逐字节比对全部闭包文件，而不只比对本次改过的那些。
+
+### 待办 1 —— 已解决
+
+cc-switch 已重新激活过（`cc-switch-model-catalog.json` 于 23:43 重新生成）。
+5 条 Qoder 模型均带 `display_name`，与网关输出逐条对上：
+
+| catalog display_name | id | ctx |
+|---|---|---|
+| Qwen3.8-Flash | `qoder/qfmodel` | 180000 |
+| GLM-5.3-Flash | `qoder/gfmodel` | **1000000** |
+| Qwen3.7-Plus | `qoder/qmodel` | 180000 |
+| DeepSeek-Flash | `qoder/dfmodel` | 180000 |
+| Kimi-K3 | `qoder/kmodel_latest` | 180000 |
+
+### 待办 2 —— 已解决（成因与交接时猜测不同）
+
+**provider 级的 `model_context_window = 180000` 确实没生效**——生效的
+`D:\codex-home\config.toml` 是 `1000000`，被 cc-switch 全局 `common_config_codex`
+（写着 `1000000` / `900000`）覆盖了。
+
+但 `config.toml` 里 `model = "qoder/kmodel_latest"` 与 provider 存的
+`qoder/qfmodel` **不一致**，说明 config.toml 被手改过（换模型 + 保留 1M），
+所以不能简单断定「provider 级覆盖必被吃」。
+
+**已按用户决定修**：`D:\codex-home\config.toml` 改为
+`model_context_window = 180000` / `model_auto_compact_token_limit = 153000`
+（备份 `config.toml.bak-ctx180k-20261002162630`）。理由：当前模型
+`kmodel_latest`(Kimi-K3) 实际只有 **180K**，声明 1M 会让 Codex 到 ~900K
+才压缩历史，而上游 180K 就拒——长对话静默失败。
+
+**未验证**：Codex 是否优先读 `model_catalog_json` 里 per-model 的
+`context_window`。若优先读 catalog，则原本就无风险。此点无法离线确认。
+
+### 端到端实跑（2026-10-03）
+
+```
+node test/qoder-cli.js chat "只回复两个字：收到"
+→ HTTP OK (2788ms) | model=gfmodel | credits=0.0056 | 正文「收到」
+```
+
+### 仍未做
+
+- **未发布到 9080**：快照文件已同步，但 9080 未启动。要对外提供就按
+  `stable/start-stable.bat` 启动（它设了 `DUMATE_ADMIN_DATA=<repo>/data`）。
+- 交接里那次「空响应」（`kmodel_latest` 请求 `input=0,output=0`）**仍未复现**，
+  怀疑的两处（catalog 元数据缺失、上下文声明虚高）都已修。
+- 前端未 `npm run build`：`web/dist` 被 gitignore，若要用管理端界面看 Qoder
+  页面，需在 `web/` 下跑一次构建。
