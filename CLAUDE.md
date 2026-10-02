@@ -471,6 +471,38 @@ Claude Code ── Anthropic ───────┼──→ 网关 :9080 ─�
 
 **响应写完后必须停手，否则打挂进程。** `send()` 直接 `res.write()` 时，若 `res.end()` 之后还有收尾逻辑补发事件（如 reasoning 的 done），会触发 `ERR_STREAM_WRITE_AFTER_END`——这是**未捕获的 error 事件，会直接让网关进程退出**（9082 整个挂掉，不是单个请求失败）。修法：`send()` 带 `ended` / `res.writableEnded` / `res.destroyed` 守卫，两处 `res.end()` 都标记 `ended`。
 
+**直连通道失败时必须让翻译器收尾，不能裸 `res.end()`（2026-10-03 修，崩溃级）。**
+`handleDirectChannel` 的 catch 原来无条件 `shim.end()` + `res.end()`，有两处后果，
+且**三个直连通道（千问/TRAE/Qoder）全部中招**——实测触发它的是千问额度耗尽（402）：
+
+1. 翻译器的 `upstreamRes.on('end')` 是**异步**触发的，在 catch 同步 `res.end()` 之后
+   才跑，于是 `sendEvent` 调 `res.write()` 抛 `ERR_STREAM_WRITE_AFTER_END`。
+   流式 res 的 `'error'` 事件**没有监听者** → 未捕获异常 → **网关进程直接退出**。
+   实测：9082 于 23:51 退出、00:03 才重启，期间 cc-switch 连报 8 次
+   「502 上游连接失败」；对旧代码跑 `test/verify-stream-error-termination.js`
+   可稳定复现该崩溃。
+2. 翻译器想补发的终结事件（`response.completed` / `message_stop`）因 res 已结束
+   被丢弃 → Codex 报 `stream disconnected before completion: stream closed before
+   response.completed`，用户看到「思考很久然后失败」，且那一轮记成 0 token
+   （因为没收到任何 item）。
+
+**关键认知：翻译器一进入就 `writeHead(200)` 并写 `response.created`，所以
+`res.headersSent` 恒为 true**——「首帧前失败就回 4xx JSON」那条分支对翻译器路径
+**永远不会走到**（只对 OpenAI 路径有效，它才延迟发头）。
+
+修法（按路径分三种，不要合并成一种）：
+- **有翻译器 + 已发头** → `shim.emit('error', e)`，让翻译器发它自己的失败终结事件
+  （Responses 的 `response.failed`、Anthropic 的 `message_delta`+`message_stop`、
+  Google 的裸关流）。**必须先补一个空 `error` 监听兜底**——翻译器若没有
+  `'error'` 监听者，Node 会抛未捕获异常打挂进程（与上面第 1 条同一机制）。
+- **无翻译器（OpenAI 路径）+ 已发头** → 写 `data: {"error":...}` + `data: [DONE]` 再关流。
+  不写就是裸关闭，客户端只能报「响应未完成」。
+- **未发头** → 回正经的 4xx JSON（只有 OpenAI 路径会走到）。
+
+离线验证：`node test/verify-stream-error-termination.js`（11 项）。支持
+`FAKE_QODER_MODE=post|pre` 两种错误形态——`post` 是「先吐一帧再报错」（与
+`err.sent` 同形），`pre` 是「一帧都不吐就报错」（模拟额度耗尽）。
+
 **上游转发只回调一次。** `forwardToUpstream` 用 `settled` 标志 + `once()` 包装；`collectAndFinish` 把 `end`/`aborted`/`error` 三路收拢到同一入口。上游 socket 出错时 Node 会同时触发 error 与后续事件，重复回调会让响应被写两次、客户端永久挂在半开的流上（表现为「输出突然停止」）。
 
 **模型名兜底是唯一可行的容错。** 上游真实模型只有 `model-text` / `model-artifact-validate` / `glm-5`，传别的名字硬性报 `api not registered`。`mapModel` 查不到一律回落 `fallback`（默认 `model-text`），改 `data/model-map.json` 的 `fallback` 会影响全部未知模型名。

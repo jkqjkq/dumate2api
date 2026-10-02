@@ -40,6 +40,40 @@ function log(...args) {
   console.log(`[${new Date().toISOString()}]`, ...args);
 }
 
+/**
+ * 流式 SSE 的安全写入小工具（Anthropic 翻译器用；Responses 有等价的 send 守卫）。
+ *
+ * **存在的理由**：客户端中途断连、或上游出错后收尾逻辑仍想补发事件时，
+ * `res.write()` 会抛 ERR_STREAM_WRITE_AFTER_END / ERR_STREAM_DESTROYED。
+ * 流式 res 的 'error' 事件若没有监听者就是**未捕获异常，直接把网关进程打挂**
+ * （9082 整个退出，不是单个请求失败）——这是踩过的坑，见 CLAUDE.md。
+ * 所以所有写入都必须先查 `writableEnded/destroyed`。
+ */
+function makeSSEWriter(res) {
+  const head = {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    'Connection': 'keep-alive',
+    'Access-Control-Allow-Origin': '*',
+  };
+  const flushHead = () => {
+    if (res.headersSent) return;
+    try { res.writeHead(200, head); } catch (e) { /* 已结束 */ }
+  };
+  const write = (chunk) => {
+    if (res.writableEnded || res.destroyed) return false;
+    flushHead();
+    try { res.write(chunk); return true; } catch (e) { return false; }
+  };
+  return {
+    flushHead,
+    write,
+    event: (type, payload) => write(`event: ${type}\ndata: ${JSON.stringify(payload)}\n\n`),
+    data: (payload) => write(`data: ${JSON.stringify(payload)}\n\n`),
+    end: () => { try { if (!res.writableEnded) res.end(); } catch (e) { /* 已结束 */ } },
+  };
+}
+
 async function ensureUpstream() {
   const now = Date.now();
   if (upstreamPort && now - lastDiscoveryTime < DISCOVERY_INTERVAL) {
@@ -152,12 +186,18 @@ async function handleDirectChannel(req, res, payload, route, ctx) {
     // 就 writeHead(200)，等发现是错误时头已发出，改不成 4xx，客户端只能看到
     // 一个空的 200 —— 静默失败，最难排查的那种。
     let writeSSEHead = null;
+    // 是否有翻译器负责收尾。翻译器分支失败时会自己发终结事件；
+    // OpenAI 分支没有翻译器，失败时只能自己关流（否则客户端永久挂起）。
+    let translated = false;
 
     if (kind === 'anthropic') {
+      translated = true;
       translateStreamToAnthropic(shim, res, payload.model, done);
     } else if (kind === 'responses') {
+      translated = true;
       translateStreamToResponses(shim, res, payload.model, done);
     } else if (kind === 'google') {
+      translated = true;
       translateStreamToGoogle(shim, res, payload.model, done);
     } else {
       // OpenAI 路径：无翻译，把 shim 直接接到 res。
@@ -216,20 +256,57 @@ async function handleDirectChannel(req, res, payload, route, ctx) {
         // shim 已经 pipe 到 res，若直接 shim.end()，pipe 会把 res 一并结束
         // （发成 200 空响应），等想回 4xx JSON 时头已发出、改不回来了。
         try { shim.unpipe(res); } catch (e2) { /* 未 pipe */ }
-        try { shim.end(); } catch (e2) { /* 已结束 */ }
         const status = e.statusCode || 502;
-        done(null, status);
-        logRequest(req, res, startedAt, info, status, null, { error: e.message });
+        // 已经吐过帧了：不能改状态码，也不能直接 res.end()——那会让客户端
+        // 收到一个**没有终结事件的流**。Codex 对此报
+        // `stream disconnected before completion: stream closed before response.completed`
+        // （用户看到「思考很久然后失败」），且因为没收到任何 item 而
+        // 记成 0 token 的一轮空转。
+        //
+        // 正确做法是让**翻译器自己**发它的失败终结事件（Responses 的
+        // response.failed、Anthropic 的 message_delta+message_stop），
+        // 再把错误透传给翻译器走它的 error 路径。
+        //
+        // **不能只 emit('error') 就完事**：若翻译器没有 'error' 监听者，
+        // Node 会抛未捕获异常打挂进程。所以先补一个空监听兜底，
+        // 再 emit——有监听者时它照常收尾，没有时至少不崩。
         if (!res.headersSent) {
           // 首帧前就失败：回正经的 4xx JSON，客户端能看懂
+          try { shim.end(); } catch (e2) { /* 已结束 */ }
+          done(null, status);
+          logRequest(req, res, startedAt, info, status, null, { error: e.message });
           try {
             sendJSON(res, status, { error: { message: e.message, type: 'api_error' } });
           } catch (e2) { /* 已结束 */ }
-        } else {
-          // 已经吐过帧了，只能在流内收尾——不能再发 JSON 错误体，
-          // 否则客户端会在同一个流里收到半截 SSE + 一段 JSON。
-          try { res.end(); } catch (e2) { /* 已结束 */ }
+          return;
         }
+        if (translated) {
+          // 已经吐过帧、且有翻译器：把错误交给翻译器收尾，让它发**对应的
+          // 失败终结事件**（Responses 的 response.failed、Anthropic 的
+          // message_delta+message_stop、Google 的裸关流）。
+          // **不能只 emit('error') 就完事**：若翻译器没有 'error' 监听者，
+          // Node 会抛未捕获异常打挂进程。先补空监听兜底再 emit。
+          try {
+            if (shim.listenerCount('error') === 0) shim.on('error', () => { /* 兜底：无监听者时不崩 */ });
+            shim.emit('error', e);
+          } catch (e2) {
+            try { shim.end(); } catch (e3) { /* 已结束 */ }
+          }
+        } else {
+          // OpenAI 路径（无翻译器）：直接把错误帧按 OpenAI 规范写进流再关。
+          // 头已发出改不成状态码，但客户端能从这个 error 帧知道失败原因；
+          // 不写的话就是裸关闭，客户端只能报「响应未完成」。
+          try {
+            if (!res.writableEnded && !res.destroyed) {
+              res.write(`data: ${JSON.stringify({ error: { message: e.message, type: 'api_error', code: status } })}\n\n`);
+              res.write('data: [DONE]\n\n');
+            }
+          } catch (e2) { /* 写失败不打断收尾 */ }
+          try { shim.end(); } catch (e2) { /* 已结束 */ }
+          try { if (!res.writableEnded) res.end(); } catch (e2) { /* 已结束 */ }
+        }
+        done(null, status);
+        logRequest(req, res, startedAt, info, status, null, { error: e.message });
       }
     })();
   } catch (e) {
@@ -997,18 +1074,13 @@ function translateStreamToAnthropic(upstreamRes, res, originalModel, onDone) {
     finished = true;
     if (onDone) onDone({ input: inputTokens, output: outputTokens, total: inputTokens + outputTokens }, status);
   };
-  res.writeHead(200, {
-    'Content-Type': 'text/event-stream',
-    'Cache-Control': 'no-cache',
-    'Connection': 'keep-alive',
-    'Access-Control-Allow-Origin': '*',
-  });
+  // 延迟发头 + 安全写：上游在流里报错（402/400）时头还没发，
+  // catch 分支能回正经的 4xx JSON 而不是一个没有终结事件的空流。
+  const w = makeSSEWriter(res);
 
   // Send message_start
   const msgId = 'msg_' + Date.now() + Math.random().toString(36).substring(2, 8);
-  const sendEvent = (event, data) => {
-    res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
-  };
+  const sendEvent = (event, data) => w.event(event, data);
 
   sendEvent('message_start', {
     type: 'message_start',
@@ -1132,7 +1204,7 @@ function translateStreamToAnthropic(upstreamRes, res, originalModel, onDone) {
     });
     sendEvent('message_stop', { type: 'message_stop' });
     finish(200);
-    res.end();
+    w.end();
   });
 
   upstreamRes.on('error', () => {
@@ -1143,7 +1215,7 @@ function translateStreamToAnthropic(upstreamRes, res, originalModel, onDone) {
     });
     sendEvent('message_stop', { type: 'message_stop' });
     finish(502);
-    res.end();
+    w.end();
   });
 }
 
