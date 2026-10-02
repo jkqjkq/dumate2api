@@ -1,5 +1,5 @@
 快照指纹 sha256（stable/src 下 43 个 .js，按路径+内容计算）：
-3662af33a5017af3c411a5a723623deed5597f44eaed910da974041eedb37aa9
+7a0c68b0c323bdd38aced511e6159da56cd3aa0d636eed639c020bbd715d1820
 
 指纹算法：
   对 stable/src 下所有 .js 文件，按相对路径排序（`/` 分隔），
@@ -7,68 +7,49 @@
   本次已用该算法复算两遍，结果一致。
 
   **关于历史值的说明**：本文件早先记过 f7e7a810…、96a22d7c…、8548df35…
-  三个值，**均无法复现**。本次同步时按上面这个算法对**旧快照内容**实算，
-  得到 395350d0… 而非记录的 8548df35…；又试了 path+CRLF+content、
+  三个值，**均无法复现**。2026-10-03 同步时按上面这个算法对**旧快照内容**
+  实算，得到 395350d0… 而非记录的 8548df35…；又试了 path+CRLF+content、
   无分隔符、content-only、NUL 分隔、content+path 等 6 种变体，仍无匹配。
   说明那三个值在写入时就与任何一致算法不符（不是编码/换行问题）。
   本次起，值由上面算法实算得出，可核对。
 
 来源：dev 分支提交
-  9736b11 feat(qoder): 接入第四条上游通道（阿里 Qoder）
+  23a62d0 fix(gateway): 直连通道失败时让翻译器收尾——修「流无终结事件」与网关崩溃
 
-本次同步的改动：
+本次同步的改动（只动了 1 个文件）：
 
-  新增 qoder/（7 个文件）——第四条上游通道（阿里 Qoder）：
-    constants.js  cosy.js  auth.js  session.js  login.js  chat.js  index.js
-    grants.js（积分批次账本）
-    与千问办公同一套 COSY 协议，但签名是**纯本地算法**（RSA+AES+MD5，
-    公钥硬编码），因此**不依赖任何客户端安装**（/health 的 needsClient=false）。
-    Qoder 没有逐批积分余额接口，唯一带到期信息的是领取响应本身，所以
-    每次签到落一条 data/qoder-grants.jsonl（幂等键 grantId）。
+  server.js —— `handleDirectChannel` 的 catch 原来无条件 `shim.end()` +
+  `res.end()`，三条直连通道（千问/TRAE/Qoder）共用它，造成两个后果：
 
-  更新（11 个，与主目录逐字节一致）：
-    channels.js        通道 id 加 qoder（单一来源）
-    upstream-router.js qoder/ 前缀 + QODER_PREFIX 导出
-    server.js          路由分支 + /health channels.qoder + /v1/models 四通道带 name
-    budget.js          resolveQoderMaxTokens（独立下限 16384，与千问/TRAE 各一套）
-    model-info.js      qoderRows（自己拉模型表，不读跨进程快照）
-    qwenwork/{auth,credits,index}.js  余额交叉验证与 lastError 时间戳（见下）
-    traework/{index,models}.js        listModelEntries（给 /v1/models 带 name 与上下文）
+  1. **网关进程崩溃**（崩溃级）。翻译器的 `upstreamRes.on('end')` 是异步
+     触发的，在 catch 同步 `res.end()` 之后才跑，于是 sendEvent 调
+     `res.write()` 抛 `ERR_STREAM_WRITE_AFTER_END`；流式 res 的 'error'
+     事件没有监听者 → 未捕获异常 → 进程直接退出。
+     实测：9082 于 2026-10-02 23:51 退出、次日 00:03 才重启，期间 cc-switch
+     连报 8 次「502 上游连接失败」。触发它的是**千问额度耗尽（402）**。
+  2. 客户端收到没有终结事件的流 → Codex 报 `stream disconnected before
+     completion: stream closed before response.completed`。
 
-  修正（1 个，**旧快照的陈旧文件**）：
-    qwenwork/wasm-path.js  旧快照里那份**停留在脱敏之前**——注释中还写着本机
-    真实路径 `D:\Program Files\code program\qianwenWork\QwenWorkCN`，而主目录
-    早在 2026-10-01 公开前脱敏时就已换成占位符 `<ProgramFiles>\<厂商目录>\...`。
-    该文件在 git 里自 4262fee 起未再改动，所以历次「按闭包同步」都没发现它
-    ——**闭包同步只复制闭包内的文件，不会检查闭包内文件是否已过期**。
-    本次一并修正。教训：同步时应逐字节比对**全部**闭包文件，而不只比对
-    本次改过的那些（本次正是这样才发现的）。
+  修法按路径分三种（详见 CLAUDE.md 同名条目）：有翻译器 + 已发头 →
+  `shim.emit('error')` 让翻译器发自己的失败终结事件（**必须先补空 error
+  监听兜底**，否则同一机制又会打挂进程）；无翻译器（OpenAI）+ 已发头 →
+  写 error 帧 + [DONE]；未发头 → 回正经 4xx JSON。
+  顺带把 anthropic 翻译器的 res.write 收敛到 makeSSEWriter（带
+  writableEnded/destroyed 守卫）——它原来 sendEvent 裸写，正是崩溃点。
 
-  顺带修掉两处共用问题（都在闭包内）：
-    - /v1/models 四通道统一带 `name`：cc-switch 解析模型列表读 `name` 字段，
-      只给 {id, owned_by} 只能显示内部 key（`qoder/qfmodel`）。TRAE/Qoder
-      另带 contextWindow，取自上游模型表，不编造。
-    - lastError 新鲜度收敛到 web/src/utils/lastError.ts（无时间戳=陈旧），
-      仪表盘与账号页共用。**注意该文件属前端，不在本快照内**。
-
-  不在本快照内（纯管理端，网关不加载）：
-    admin/routes/qoder.js、admin/routes/system.js、admin/server.js、
-    web/ 下全部前端改动、src/qwenwork/login.js（仅登录器用到）。
-    快照严格等于网关依赖闭包（43 个文件），未多带管理端。
+  不在本快照内：`test/verify-stream-error-termination.js`（离线验证，不进快照）。
+  快照仍严格等于网关依赖闭包（43 个文件）。
 
 验证记录（2026-10-03，全部实测）：
 
   - **逐字节比对**：闭包 43 = 快照 43，内容全部一致；反向检查无多余文件
   - **node --check**：43 个文件全部通过
   - **独立启动**（临时端口 19099，DUMATE_AUTOSTART=off，指向 <repo>/data）：
-      /health → dumate / qwenwork / traework / qoder **四通道 ready=true**，
-      qoder.needsClient=false
-      /v1/models → 39 个模型，**39/39 带 name**（dumate 3 / dumate-proxy 2 /
-      qwenwork 2 / traework 18 / qoder 14）
-  - 离线验证 10/10 通过：verify-qoder-cosy（签名 22 项）、verify-qoder-channel、
-    verify-qoder-grants、verify-channel、verify-qwen-wallets-zero、
-    verify-qwen-daily-aggregate、verify-qwen-discipline、verify-truncated-toolcall、
-    verify-traework-gained、verify-display-name
+      /health → 四通道 ready=true
+      **真实上游错误路径**（traework 坏模型名）→ 流里有 `response.failed`，
+      且进程存活（这正是本次修的场景，修前会崩）
+  - **离线验证 11/11 通过**：verify-stream-error-termination（11 项，
+    FAKE_QODER_MODE=post）+ 既有 10 个脚本全过
   - **未启动 9080**：本次只更新快照文件，9080 保持停止状态
 
 启动方式的重要说明（沿用）：
@@ -78,5 +59,11 @@
   且 9083 管理端读的是 <repo>/data、看不到 9080 的流量。
 
 上一版快照来源：
-  af288ca chore(stable): 同步快照到 1909759（2026-09-29）
-  记录指纹 8548df35…（不可复现，实算为 395350d0…）
+  578d8b0 chore(stable): 同步快照到 9736b11（Qoder 通道）（2026-10-03）
+  记录指纹 3662af33…
+
+再上一版：
+  9736b11 feat(qoder): 接入第四条上游通道（阿里 Qoder）（2026-10-03）
+  （该版曾修正一处陈旧文件 stable/src/qwenwork/wasm-path.js——它停留在
+   脱敏之前，注释里还写着本机真实路径。教训：同步时要逐字节比对**全部**
+   闭包文件，而不只比对本次改过的那些。）
