@@ -51,6 +51,13 @@ export interface QwCredits {
    * 也可能是上游持续异常——后端无法区分，界面要如实说明，不要武断下结论。
    */
   retriedAccounts: number
+  /**
+   * 其中 daily 已由 account-context 交叉验证**还原出真实值**的账号数
+   * （wallets 偶尔谎报 0，但 account-context 的 quota.remaining 是权威的）。
+   * 这些账号的 0 已确认是上游坏读，不是「今日已用光」——界面要说「已校正」，
+   * 不要与 retriedAccounts 一起说成「可能已用尽」。
+   */
+  correctedAccounts: number
   /** 合计由哪些账号构成（每账号的三池余额与上限） */
   accounts: Array<{
     id: string
@@ -63,6 +70,8 @@ export interface QwCredits {
     peak: number
     freeUsed: number | null
     calibrated: boolean
+    /** 该账号的 daily 是交叉验证校正出来的（wallets 谎报 0） */
+    dailyCorrected?: boolean
   }>
   /** 当天观测到的每日额度峰值（各账号相加） */
   peak: number
@@ -192,6 +201,8 @@ export interface QwAccount {
   refreshExpired: boolean
   machineId: string
   lastError: string
+  /** lastError 的写入时刻。界面据此显示「N 分钟前」并判断新鲜度——无则 null */
+  lastErrorAt: number | null
   /** refresh token 尾 6 位，供人工核对是哪个账号。全量不外传 */
   refreshTail: string
   wallets: { daily: number; monthly: number; longterm: number; total: number } | null

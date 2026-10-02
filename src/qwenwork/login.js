@@ -180,6 +180,7 @@ async function finish(rec) {
     planName: info.planName || '',
     phone: (phone && phone.phone) || '',
     lastError: '',
+    lastErrorAt: null,
   });
   if (!saved.uid) {
     // uid 是 wasm 签名的必需输入。没有它就发不出请求，存下来也是个废账号——

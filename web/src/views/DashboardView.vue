@@ -1,8 +1,9 @@
 <template>
   <div class="page">
-    <PageHeader :title="isTw ? 'TRAE Work' : isQw ? '千问办公' : '仪表盘'">
+    <PageHeader :title="isTw ? 'TRAE Work' : isQd ? 'Qoder' : isQw ? '千问办公' : '仪表盘'">
       <template #sub>
         {{ isTw ? '额度、签到与用量总览'
+          : isQd ? '签到积分、账号健康与用量总览'
           : isQw ? '积分额度、登录态与用量总览' : '账号池健康度、上游状态与今日用量总览' }}
         <template v-if="lastRefresh"> · 更新于 {{ lastRefresh }}</template>
       </template>
@@ -298,6 +299,212 @@
       </a-card>
     </template>
 
+    <!-- ============ Qoder：与 TRAE 同构（多账号 + 签到 + 单 credits），
+         但额度分两块（签到积分 / 套餐内额度），且不需要客户端 ============ -->
+    <template v-else-if="isQd">
+      <a-row :gutter="[16, 16]">
+        <a-col :span="4">
+          <a-card :bordered="false" class="h-full">
+            <a-statistic title="账号总数" :value="qdSummary?.total ?? '—'">
+              <template #suffix><span class="text-sm text-slate-400">个</span></template>
+            </a-statistic>
+            <div class="text-xs text-slate-500 mt-2">
+              <template v-if="qdSummary">启用 {{ qdSummary.enabled }} 个</template>
+              <span v-else>—</span>
+            </div>
+          </a-card>
+        </a-col>
+        <a-col :span="4">
+          <a-card :bordered="false" class="h-full">
+            <a-statistic title="有效期内" :value="qdValid ?? '—'">
+              <template #suffix><span class="text-sm text-slate-400">个</span></template>
+            </a-statistic>
+            <div class="text-xs text-slate-500 mt-2">凭证可用</div>
+          </a-card>
+        </a-col>
+        <a-col :span="4">
+          <a-card :bordered="false" class="h-full">
+            <a-statistic
+              title="签到积分合计"
+              :value="qdTotals.addOn"
+              :precision="4"
+            />
+            <div class="text-xs text-slate-500 mt-2">签到/赠送，免费用户实际可用</div>
+          </a-card>
+        </a-col>
+        <a-col :span="4">
+          <a-card :bordered="false" class="h-full">
+            <a-statistic title="套餐内额度合计" :value="qdTotals.user" :precision="4" />
+            <div class="text-xs text-slate-500 mt-2">订阅套餐内（Free 恒为 0）</div>
+          </a-card>
+        </a-col>
+        <a-col :span="4">
+          <a-card :bordered="false" class="h-full">
+            <a-statistic
+              title="即将过期积分"
+              :value="qdCreditsSummary?.expiringAmount ?? 0"
+              :precision="4"
+              :value-style="(qdCreditsSummary?.expiringAmount ?? 0) > 0 ? 'color:#fbbf24' : ''"
+            />
+            <div class="text-xs text-slate-500 mt-2">
+              <template v-if="qdCreditsSummary?.expiringCount">
+                {{ qdCreditsSummary.expiringCount }} 个批次 7 天内到期
+              </template>
+              <template v-else>暂无即将过期</template>
+            </div>
+          </a-card>
+        </a-col>
+        <a-col :span="4">
+          <a-card :bordered="false" class="h-full">
+            <a-statistic title="今日请求" :value="qdToday.requests">
+              <template #suffix><span class="text-sm text-slate-400">次</span></template>
+            </a-statistic>
+            <div class="text-xs text-slate-500 mt-2">
+              {{ qdToday.tokens }} Token
+            </div>
+          </a-card>
+        </a-col>
+      </a-row>
+
+      <!-- 积分过期明细。
+           Qoder 的积分是**签到领的、30 天后作废**（与千问每日 00:00 重置、
+           搭子按有效期都不同）。上游没有逐批余额接口，所以这里是本地账本记的
+           领取记录——**「领取额」不是剩余额**，界面必须说清，否则会高估。 -->
+      <a-card
+        v-if="qdGrants.length"
+        title="积分过期明细"
+        :bordered="false"
+        class="mt-4"
+      >
+        <template #extra>
+          <span class="text-xs text-slate-400">
+            {{ qdGrantsWindowDays }} 天内到期 · {{ qdGrants.length }} 个批次 ·
+            领取额合计 {{ qdCreditsSummary?.expiringAmount ?? 0 }}
+          </span>
+        </template>
+        <a-table
+          size="small"
+          :pagination="false"
+          :data-source="qdGrants"
+          :columns="qdGrantColumns"
+          row-key="grantId"
+        >
+          <template #bodyCell="{ column, record }">
+            <template v-if="column.key === 'account'">
+              <span class="text-xs">{{ record.accountName || '—' }}</span>
+            </template>
+            <template v-else-if="column.key === 'amount'">
+              <!-- 明确标注这是「领取额」：上游不给逐批剩余，标成剩余会误导 -->
+              <span class="font-medium text-amber-500 num">{{ fmt(record.amount) }}</span>
+              <span class="text-xs text-slate-400 ml-1">领取额</span>
+            </template>
+            <template v-else-if="column.key === 'grantedAt'">
+              <span class="text-xs">{{ new Date(record.grantedAt).toLocaleString('zh-CN', { hour12: false }) }}</span>
+            </template>
+            <template v-else-if="column.key === 'expiresAt'">
+              <span class="text-xs">{{ new Date(record.expiresAt).toLocaleString('zh-CN', { hour12: false }) }}</span>
+            </template>
+            <template v-else-if="column.key === 'daysLeft'">
+              <a-tag :color="record.daysLeft <= 3 ? 'red' : record.daysLeft <= 7 ? 'orange' : 'default'">
+                还剩 {{ record.daysLeft }} 天
+              </a-tag>
+            </template>
+          </template>
+        </a-table>
+        <div class="text-xs text-slate-400 mt-2">
+          Qoder 的签到积分<b>领取后 30 天作废</b>（每日 10:00 UTC+8 刷新领取资格）。
+          <b>「领取额」是这批领到的数量，不是剩余量</b>——上游不提供逐批余额，
+          实际剩余请看上面的额度卡。
+        </div>
+      </a-card>
+
+      <a-alert
+        v-if="qdSummary && qdSummary.refreshExpired > 0"
+        type="warning"
+        show-icon
+        class="mt-4"
+        :message="`${qdSummary.refreshExpired} 个账号的 refresh token 已过期`"
+        description="access token 到期后无法自动续期。请到「账号管理」删除后重新登录。"
+      />
+
+      <!-- 账号健康快照：本地落盘数据，不打上游 -->
+      <a-card title="账号健康快照" :bordered="false" class="mt-4">
+        <template #extra>
+          <a-tag color="green">在线 {{ qdDashAccounts.filter((a) => !a.lastError).length }}</a-tag>
+        </template>
+        <a-empty v-if="!qdDashAccounts.length" description="还没有添加 Qoder 账号，到「账号管理」加一个" />
+        <a-row v-else :gutter="[16, 16]">
+          <a-col v-for="a in qdDashAccounts" :key="a.id" :span="8">
+            <div class="p-3 border border-slate-200 rounded">
+              <div class="flex items-center justify-between mb-2">
+                <span class="font-medium truncate">
+                  {{ a.name }}
+                  <a-tag v-if="a.region === 'cn'" color="blue" class="ml-1" size="small">国内</a-tag>
+                  <a-tag v-else color="purple" class="ml-1" size="small">国际</a-tag>
+                </span>
+                <a-tag :color="errFresh(a) ? 'red' : a.refreshExpired ? 'orange' : a.enabled ? 'green' : 'default'">
+                  {{ errFresh(a) ? '异常' : a.refreshExpired ? '待重登' : a.enabled ? '在线' : '停用' }}
+                </a-tag>
+              </div>
+              <div class="flex items-center justify-between text-xs">
+                <span class="text-slate-500">{{ a.planName || '—' }}</span>
+                <span class="text-slate-500">
+                  {{ a.daysAlive !== null ? a.daysAlive + ' 天' : '天数未知' }}
+                </span>
+              </div>
+
+              <!-- 积分剩余：两份额度**分开显示**，不能相加。
+                   签到积分（addOnQuota）是免费用户实际能用的；
+                   套餐内额度（userQuota）Free 套餐恒为 0。 -->
+              <template v-if="qdCreditOf(a.id)">
+                <!-- 健康条：按签到积分占其总量的比例。与 TRAE 同理——
+                     这里是会被消耗的余额，「还剩多少」才是这个号的寿命指标。 -->
+                <div class="h-1.5 bg-slate-100 rounded overflow-hidden my-2">
+                  <div
+                    class="h-full rounded transition-all"
+                    :class="qdHealthColor(a.id)"
+                    :style="{ width: qdHealthWidth(a.id) }"
+                  />
+                </div>
+                <div class="flex items-center justify-between text-xs">
+                  <span class="text-slate-500">
+                    签到积分
+                    <span class="text-cyan-400 num ml-1">{{ fmtQd(qdCreditOf(a.id)!.addOnQuota?.remaining) }}</span>
+                    <span class="text-slate-500" v-if="qdCreditOf(a.id)!.addOnQuota?.total">
+                      / {{ fmtQd(qdCreditOf(a.id)!.addOnQuota!.total) }}
+                    </span>
+                  </span>
+                  <span class="text-slate-500">
+                    套餐内 <span class="num ml-1">{{ fmtQd(qdCreditOf(a.id)!.userQuota?.remaining) }}</span>
+                  </span>
+                </div>
+                <!-- 最早到期的批次。签到积分领取后 30 天作废，所以「最早到期」
+                     才是要提醒的那个。数据来自本地账本（上游无逐批余额接口）。 -->
+                <div v-if="qdGrantOf(a.id)" class="text-xs mt-1"
+                  :class="qdGrantOf(a.id)!.daysLeft <= 3 ? 'text-red-500' : qdGrantOf(a.id)!.daysLeft <= 7 ? 'text-orange-500' : 'text-slate-500'">
+                  最早到期 {{ new Date(qdGrantOf(a.id)!.expiresAt).toLocaleDateString('zh-CN') }}
+                  （剩 {{ qdGrantOf(a.id)!.daysLeft }} 天）
+                </div>
+                <div v-else-if="(qdCreditOf(a.id)!.addOnQuota?.remaining ?? 0) > 0" class="text-xs mt-1 text-slate-500">
+                  有签到积分但无到期记录（本功能上线前领的）
+                </div>
+              </template>
+              <div v-else class="text-xs mt-2 text-slate-500">额度未查询</div>
+
+              <div v-if="a.lastError" class="text-xs mt-1" :class="errFresh(a) ? 'text-red-500' : 'text-slate-500'">
+                <span class="text-slate-500">{{ errorWhen(a.lastErrorAt) }}</span>{{ a.lastError }}
+              </div>
+            </div>
+          </a-col>
+        </a-row>
+      </a-card>
+
+      <!-- 今日用量：三条通道同一套指标，抽成组件避免各写一份漂移 -->
+      <a-card title="今日用量" :bordered="false" class="mt-4">
+        <TodayUsageCard :today="usage?.cards.today" />
+      </a-card>
+    </template>
+
     <!-- ============ 千问办公：积分卡片。它是另一套账——不消耗搭子积分、不进账号池，
          所以整块替换而不是与搭子的指标卡混排。 ============ -->
     <template v-else-if="isQw">
@@ -455,11 +662,18 @@
               </template>
               <!-- 合计由谁构成 + 有没有账号没查到。部分和必须说明，
                    否则会被读成「所有账号都算进去了」 -->
-              <div v-if="qw && (qw.accountCount > 1 || qw.failedAccounts > 0 || qw.retriedAccounts > 0)" class="text-slate-400">
+              <div v-if="qw && (qw.accountCount > 1 || qw.failedAccounts > 0 || qw.retriedAccounts > 0 || qw.correctedAccounts > 0)" class="text-slate-400">
                 <template v-if="qw.accountCount > 1">{{ qw.accountCount }} 个账号合计</template>
                 <template v-if="qw.failedAccounts > 0">
                   <span class="text-orange-500">
                     · {{ qw.failedAccounts }} 个账号余额查询失败，未计入
+                  </span>
+                </template>
+                <!-- 上游 wallets 偶尔谎报 0，已用 account-context 还原出真实值。
+                     这是「已校正」不是「已用尽」，不要与下面那条混为一谈 -->
+                <template v-if="qw.correctedAccounts > 0">
+                  <span class="text-sky-500">
+                    · {{ qw.correctedAccounts }} 个账号余额已校正（上游瞬时读失败）
                   </span>
                 </template>
                 <template v-if="qw.retriedAccounts > 0">
@@ -564,8 +778,8 @@
                   {{ a.name || a.username || '未命名' }}
                   <a-tag v-if="a.active" color="blue" class="ml-1">主账号</a-tag>
                 </span>
-                <a-tag :color="a.lastError ? 'red' : a.refreshExpired ? 'orange' : a.enabled && a.usable ? 'green' : 'default'">
-                  {{ a.lastError ? '异常' : a.refreshExpired ? '待重登' : a.enabled && a.usable ? '在线' : '停用' }}
+                <a-tag :color="errFresh(a) ? 'red' : a.refreshExpired ? 'orange' : a.enabled && a.usable ? 'green' : 'default'">
+                  {{ errFresh(a) ? '异常' : a.refreshExpired ? '待重登' : a.enabled && a.usable ? '在线' : '停用' }}
                 </a-tag>
               </div>
               <div v-if="a.phone" class="text-xs text-slate-400 font-mono mb-2">
@@ -600,7 +814,9 @@
                   {{ a.wallets ? '合计 ' + fmtQw(a.wallets.total) : '积分未知' }}
                 </span>
               </div>
-              <div v-if="a.lastError" class="text-xs text-red-500 mt-1">{{ a.lastError }}</div>
+              <div v-if="a.lastError" class="text-xs mt-1" :class="errFresh(a) ? 'text-red-500' : 'text-slate-500'">
+                <span class="text-slate-500">{{ errTimeText(a.lastErrorAt) }}</span>{{ a.lastError }}
+              </div>
             </div>
           </a-col>
         </a-row>
@@ -955,8 +1171,10 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import PageHeader from '@/components/PageHeader.vue'
 import TodayUsageCard from '@/components/TodayUsageCard.vue'
-import { channelStore, isTraework, isQwenwork } from '@/stores/channel'
+import { channelStore, isTraework, isQwenwork, isQoder } from '@/stores/channel'
+import { qoderApi, type QoderDashboardAccount, type QoderCreditRow, type QoderGrant } from '@/api/qoder'
 import { qwenworkApi, type QwCredits, type QwDailyRow, type QwAccount, type QwCreditRecord, type QwAccountsSummary } from '@/api/qwenwork'
+import { lastErrorFresh, errorWhen } from '@/utils/lastError'
 import { traeworkApi } from '@/api/traework'
 import type {
   TraeworkCreditRow, TraeworkDashboard, TraeworkCreditRecord, TraeworkDashAccount,
@@ -1031,6 +1249,81 @@ const lastRefresh = ref('')
 // credits、多账号自持。所以页面在「非搭子」的骨架里还要再分一次。
 const isTw = computed(() => isTraework())
 const isQw = computed(() => isQwenwork())
+const isQd = computed(() => isQoder())
+
+// ---- Qoder ----
+// 账号健康快照来自 /qoder/dashboard（本地落盘，不打上游）
+const qdDashAccounts = ref<QoderDashboardAccount[]>([])
+const qdSummary = ref<{ total: number; enabled: number; refreshExpired: number; errored: number } | null>(null)
+// 额度来自 /qoder/credits（打上游）。**两份额度分开合计，不能相加**：
+// addOn 是签到/赠送（免费用户实际可用），user 是订阅套餐内（Free 恒为 0）。
+const qdCreditRows = ref<QoderCreditRow[]>([])
+const qdTotals = computed(() => {
+  let addOn = 0, user = 0
+  for (const r of qdCreditRows.value) {
+    if (r.addOnQuota) addOn += r.addOnQuota.remaining || 0
+    if (r.userQuota) user += r.userQuota.remaining || 0
+  }
+  return { addOn, user }
+})
+const qdValid = computed(() => qdSummary.value
+  ? qdSummary.value.total - qdSummary.value.refreshExpired : null)
+// 额度汇总（来自 /qoder/credits，**与 dashboard 的汇总不是一份**）：
+// 过期批次数与领取额合计在这里，不在 dashboard 的 summary 里。
+const qdCreditsSummary = ref<{
+  addOnTotal: number; userTotal: number; exceeded: number
+  expiringCount: number; expiringAmount: number
+} | null>(null)
+// 今日用量取当前通道的埋点（与其它通道同源）
+const qdToday = computed(() => usage.value?.cards?.today || { requests: 0, tokens: 0 })
+
+// 积分过期明细。数据来自**本地账本**（/qoder/grants），不是上游——
+// Qoder 没有逐批余额接口，只有领取响应带到期信息，所以每次签到落一条本地记录。
+// 注意 amount 是**领取额**不是剩余额（上游不给），界面已标注。
+const qdGrants = ref<QoderGrant[]>([])
+const qdGrantsWindowDays = ref(30)
+const qdGrantColumns = [
+  { title: '账号', key: 'account', width: '16%' },
+  { title: '领取额', key: 'amount', width: '14%' },
+  { title: '领取时间', key: 'grantedAt', width: '24%' },
+  { title: '到期时间', key: 'expiresAt', width: '24%' },
+  { title: '剩余', key: 'daysLeft', width: '22%' },
+]
+
+// 账号健康快照每张卡要的派生数据。与 TRAE 同构：
+//   - 剩余额度按账号取（额度是账号级的，不能用合计）
+//   - 健康条按「签到积分占其总量」的比例——这是会被消耗的余额，
+//     「还剩多少」才是这个号的寿命指标（与 TRAE 的 credits 同理）
+const qdCreditOf = (id: number) => qdCreditRows.value.find((c) => c.id === id) || null
+// 千问的积分单位很小（单次请求 0.0025 级），两位小数会全显示成 0.00，
+// 所以这条通道统一用四位小数（与 PointsView 的口径一致）
+const fmtQd = (n: number | null | undefined) =>
+  n == null ? '—' : n.toLocaleString('zh-CN', { maximumFractionDigits: 4 })
+function qdHealthWidth(id: number) {
+  const c = qdCreditOf(id)
+  const total = c?.addOnQuota?.total ?? 0
+  const remain = c?.addOnQuota?.remaining ?? 0
+  if (!total) return '0%'
+  return Math.max(0, Math.min(100, (remain / total) * 100)) + '%'
+}
+function qdHealthColor(id: number) {
+  const c = qdCreditOf(id)
+  const total = c?.addOnQuota?.total ?? 0
+  const remain = c?.addOnQuota?.remaining ?? 0
+  if (!total) return 'bg-slate-300'
+  const pct = remain / total
+  // 签到积分是**会过期**的（30 天），所以低余额标红——不像 TRAE 只是补充
+  if (pct <= 0.1) return 'bg-red-400'
+  if (pct <= 0.3) return 'bg-orange-400'
+  return 'bg-cyan-400'
+}
+// 该账号最早到期的批次（返回归一化对象，daysLeft 保证是数字）
+const qdGrantOf = (id: number): { daysLeft: number; expiresAt: number } | null => {
+  const list = qdGrants.value.filter((g) => g.accountId === id)
+  if (!list.length) return null
+  const g = list.reduce((m, x) => (x.expiresAt < m.expiresAt ? x : m), list[0])
+  return { daysLeft: g.daysLeft ?? 0, expiresAt: g.expiresAt }
+}
 const twInfo = computed(() => channelStore.infos['traework'] || null)
 // TRAE 的额度（按账号独立）与经网关的用量（/usage 按通道过滤）是两个数据源
 const twRows = ref<TraeworkCreditRow[]>([])
@@ -1184,6 +1477,13 @@ const fmtQw = (n: number | null | undefined) =>
   n == null ? '—' : n.toLocaleString('zh-CN', { maximumFractionDigits: 4 })
 const dateTimeText = (ts: number) =>
   new Date(ts).toLocaleString('zh-CN', { hour12: false })
+
+// lastError 是「最近一次失败的错误串」，**只在换票/请求成功时才清空**，没有
+// 过期机制——所以它经常停在几小时前的一次瞬时抖动上（实测 2026-10-02：账号页
+// 显示的 403/402 其实早已自愈）。新鲜度判定收敛到 utils/lastError.ts：
+// 无时间戳（旧数据）一律当陈旧，有时间戳则过 30 分钟算陈旧。
+const errFresh = (a: { lastError?: string; lastErrorAt?: number | null }) => lastErrorFresh(a)
+const errTimeText = (ts: number | null | undefined) => errorWhen(ts)
 const compact = (n: number) =>
   n >= 1e9 ? (n / 1e9).toFixed(2) + 'B'
     : n >= 1e6 ? (n / 1e6).toFixed(2) + 'M'
@@ -1229,7 +1529,8 @@ function healthWidthQw(a: QwAccount) {
   return pct + '%'
 }
 function healthColorQw(a: QwAccount) {
-  if (a.lastError) return 'bg-red-400'
+  // 只对「新鲜的」错误标红：超过 30 分钟的大概率已自愈，别一直挂着红条
+  if (errFresh(a)) return 'bg-red-400'
   if (a.refreshExpired) return 'bg-orange-400'
   if (!a.enabled || !a.usable) return 'bg-slate-300'
   return 'bg-green-500'
@@ -1406,6 +1707,37 @@ async function refreshQw() {
   }
 }
 
+async function refreshQd() {
+  loading.value = true
+  error.value = ''
+  try {
+    const [d, c, g, u] = await Promise.all([
+      // 账号健康快照：本地落盘，不打上游
+      qoderApi.dashboard().catch(() => ({ data: { accounts: [], summary: null } })),
+      // 额度：打上游。两份额度分开合计，不合并
+      qoderApi.credits().catch(() => ({ data: { rows: [] } })),
+      // 积分过期明细：本地账本，不打上游
+      qoderApi.grants(30).catch(() => ({ data: { rows: [], windowDays: 30 } })),
+      // 今日用量：与其它通道同一数据源
+      client.get(`/usage/overview?days=14&channel=qoder`).catch(() => ({ data: null })),
+    ])
+    qdDashAccounts.value = (d.data.accounts || []) as QoderDashboardAccount[]
+    qdSummary.value = d.data.summary || null
+    qdCreditRows.value = (c.data.rows || []) as QoderCreditRow[]
+    // 过期批次数与领取额合计来自 credits 的 summary（dashboard 的 summary 里没有）
+    qdCreditsSummary.value = (c.data as any).summary || null
+    qdGrants.value = (g.data.rows || []) as QoderGrant[]
+    qdGrantsWindowDays.value = g.data.windowDays || 30
+    usage.value = u.data
+    await channelStore.load()
+    lastRefresh.value = new Date().toLocaleTimeString('zh-CN')
+  } catch (e: any) {
+    error.value = e?.response?.data?.error || e?.message || '未知错误'
+  } finally {
+    loading.value = false
+  }
+}
+
 // TRAE Work 的数据分三路拉：额度（/traework/credits）、用量（/usage 按通道
 // 过滤）、通道元信息（system/status）。与千问分开是因为两者的账完全不同，
 // 混在一个 Promise.all 里会让任一通道故障拖垮整页。
@@ -1445,6 +1777,7 @@ async function refreshTw() {
 async function refresh(force = false) {
   if (isTw.value) return refreshTw()
   if (isQw.value) return refreshQw()
+  if (isQd.value) return refreshQd()
   loading.value = true
   error.value = ''
   try {
@@ -1600,7 +1933,7 @@ onMounted(() => {
 
 // 切通道要重拉数据：三条通道的数据源不同，不重拉会看到上一个通道的残留。
 // 两个 computed 都要 watch——只盯 isQw 的话从搭子切到 TRAE 不触发。
-watch([isQw, isTw], () => { refresh() })
+watch([isQw, isTw, isQd], () => { refresh() })
 
 onBeforeUnmount(() => {
   window.removeEventListener('resize', onResize)

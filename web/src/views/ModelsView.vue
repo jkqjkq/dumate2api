@@ -2,8 +2,9 @@
   <div class="page">
     <PageHeader title="模型管理" :sub="isTw
       ? 'TRAE Work 的模型表由上游下发，本地不可编辑'
-      : isQw ? '千问办公的模型表由上游下发，本地不可编辑'
-        : '客户端传来的模型名 → 上游实际使用的 ID'" />
+      : isQd ? 'Qoder 的模型表由上游下发，带倍率（price_factor）'
+        : isQw ? '千问办公的模型表由上游下发，本地不可编辑'
+          : '客户端传来的模型名 → 上游实际使用的 ID'" />
 
     <!-- ============ TRAE Work：上游下发的完整模型表（含消耗倍率） ============ -->
     <a-card v-if="isTw" :bordered="false">
@@ -219,9 +220,117 @@
       </template>
     </a-card>
 
+    <!-- ============ Qoder：模型表上游下发，带倍率（price_factor） ============ -->
+    <a-card v-if="isQd" :bordered="false">
+      <template #title>
+        <span class="section-title">Qoder 模型</span>
+        <a-tag class="ml-2" color="cyan">只读</a-tag>
+        <span v-if="qdModels.length" class="text-xs text-slate-500 ml-2">
+          共 {{ qdModels.length }} 个 · 低倍率 {{ qdCheapCount }} 个
+        </span>
+      </template>
+      <template #extra>
+        <a-button size="small" class="ghost-btn" :loading="loading" @click="loadQd(true)">刷新</a-button>
+      </template>
+
+      <!-- 通道元信息：账号数 / 当前账号 / token 状态。Qoder 不需要客户端，
+           所以这里没有 wasm 那一栏 -->
+      <div v-if="qdStatus" class="qw-channel-row">
+        <div class="qw-channel-cell">
+          <div class="cell-label">可用账号</div>
+          <div class="cell-value">{{ qdStatus.accounts ?? '—' }}</div>
+        </div>
+        <div class="qw-channel-cell">
+          <div class="cell-label">当前账号</div>
+          <div class="cell-value">
+            {{ qdStatus.account || '—' }}
+            <span class="cell-sub">无需客户端</span>
+          </div>
+        </div>
+        <div class="qw-channel-cell">
+          <div class="cell-label">Token 状态</div>
+          <div class="cell-value">
+            <a-tag :color="qdStatus.refreshExpired ? 'red' : 'green'">
+              {{ qdStatus.refreshExpired ? 'refresh token 已过期' : '有效' }}
+            </a-tag>
+          </div>
+        </div>
+      </div>
+
+      <a-alert v-if="qdError" type="warning" show-icon class="mt-3" :message="qdError" />
+
+      <a-table
+        v-if="qdModels.length"
+        size="small"
+        :pagination="false"
+        :data-source="qdModels"
+        :columns="qdColumns"
+        row-key="key"
+        class="mt-3"
+      >
+        <template #bodyCell="{ column, record }">
+          <template v-if="column.key === 'name'">
+            <div class="font-medium">
+              {{ record.name }}
+              <a-tag v-if="record.isDefault" color="blue" class="ml-1" size="small">默认</a-tag>
+              <a-tag v-if="record.cheap" color="green" class="ml-1" size="small">省额度</a-tag>
+              <a-tag v-if="record.isNew" color="orange" class="ml-1" size="small">新</a-tag>
+            </div>
+            <div class="font-mono text-xs text-slate-400">{{ record.key }}</div>
+          </template>
+          <template v-else-if="column.key === 'prefixed'">
+            <span class="font-mono text-xs">{{ record.prefixed }}</span>
+          </template>
+          <template v-else-if="column.key === 'rate'">
+            <!-- 倍率是**相对值**，不是积分绝对值——必须标出来，否则会被读成单价 -->
+            <span class="num">{{ record.rate == null ? '—' : record.rate }}</span>
+            <div v-if="record.promotion" class="text-xs text-green-500">
+              错峰 {{ record.promotion.windowStart }}–{{ record.promotion.windowEnd }}
+            </div>
+          </template>
+          <template v-else-if="column.key === 'ctx'">
+            <span class="num">{{ record.contextWindow ? (record.contextWindow / 1000) + 'K' : '—' }}</span>
+          </template>
+        </template>
+      </a-table>
+      <a-empty v-else :description="qdError || '未取到模型列表'" />
+
+      <div class="text-xs text-slate-500 mt-3">
+        调用时用前缀名（如 <span class="font-mono">qoder/gfmodel</span>）；不带前缀的名字一律走搭子。
+        <span class="text-amber-500">倍率是相对值（上游 price_factor），实际扣费 = 倍率 × 用量；开发调试请挑「省额度」的 0.1 档。</span>
+      </div>
+    </a-card>
+
+    <!-- Qoder 的额度：userQuota（订阅内）与 addOnQuota（签到/赠送）**分开显示**，
+         不能相加——Free 套餐的 userQuota 恒为 0，免费用户实际能用的就是 addOnQuota -->
+    <a-card v-if="isQd" title="Qoder 额度" :bordered="false" class="mt-4">
+      <a-empty v-if="!qdCredits.length" description="还没有 Qoder 账号" />
+      <template v-else>
+        <a-row :gutter="[16, 16]">
+          <a-col :span="12">
+            <div class="qw-pool">
+              <div class="qw-pool-head"><span class="qw-pool-label">签到积分合计</span></div>
+              <div class="qw-pool-value num text-cyan-400">{{ fmtQw(qdTotals.addOn) }}</div>
+              <div class="qw-pool-sub">签到/赠送得到，免费用户实际可用</div>
+            </div>
+          </a-col>
+          <a-col :span="12">
+            <div class="qw-pool">
+              <div class="qw-pool-head"><span class="qw-pool-label">套餐内额度合计</span></div>
+              <div class="qw-pool-value num">{{ fmtQw(qdTotals.user) }}</div>
+              <div class="qw-pool-sub">订阅套餐内，Free 套餐恒为 0</div>
+            </div>
+          </a-col>
+        </a-row>
+        <div class="text-xs text-slate-500 mt-3">
+          两份额度<b>不可相加</b>：前者是签到/赠送，后者是订阅套餐内。
+        </div>
+      </template>
+    </a-card>
+
     <!-- 以下全部是搭子专用：别名映射、上游原生模型、对外暴露、网关实际返回。
          切到千问时不显示——它们描述的是搭子那条链路。 -->
-    <template v-if="!isQw && !isTw">
+    <template v-if="!isQw && !isTw && !isQd">
     <!-- 通道元信息行：与 TRAE 模型页同构（上游端口 / 托管 / 登录账号）。
          放在模型表上方是因为这些是**通道级**的，不随模型变 -->
     <div class="qw-channel-row">
@@ -443,9 +552,10 @@ import { computed, onMounted, ref, watch } from 'vue'
 import PageHeader from '@/components/PageHeader.vue'
 import { message } from 'ant-design-vue'
 import client from '@/api/client'
-import { channelStore, isTraework, isQwenwork } from '@/stores/channel'
+import { channelStore, isTraework, isQwenwork, isQoder } from '@/stores/channel'
 import { qwenworkApi } from '@/api/qwenwork'
 import { traeworkApi } from '@/api/traework'
+import { qoderApi, type QoderModel, type QoderCreditRow } from '@/api/qoder'
 import type { TraeworkCreditRow, TraeworkModel } from '@/api/traework'
 import type { QwCredits } from '@/api/qwenwork'
 import type { ModelMapData, ProbeResult } from '@/api/models'
@@ -467,6 +577,44 @@ const map = ref<ModelMapData | null>(null)
 // 模型页下半部分的「额度」区块结构也不同。
 const isTw = computed(() => isTraework())
 const isQw = computed(() => isQwenwork())
+const isQd = computed(() => isQoder())
+
+// Qoder 模型表（上游下发，带倍率）与额度
+const qdModels = ref<QoderModel[]>([])
+const qdError = ref('')
+const qdCredits = ref<QoderCreditRow[]>([])
+// 通道元信息（账号数 / 当前账号 / token 到期）来自 /system/status 的 channels.qoder
+const qdStatus = computed(() => channelStore.infos['qoder'] || null)
+const qdCheapCount = computed(() => qdModels.value.filter((m) => m.cheap).length)
+const qdTotals = computed(() => {
+  let addOn = 0, user = 0, ok = 0
+  for (const r of qdCredits.value) {
+    if (r.addOnQuota) { addOn += r.addOnQuota.remaining || 0; ok++ }
+    if (r.userQuota) user += r.userQuota.remaining || 0
+  }
+  return { addOn, user, known: ok }
+})
+const qdColumns = [
+  { title: '模型', key: 'name', width: '30%' },
+  { title: '调用名', key: 'prefixed', width: '26%' },
+  { title: '倍率', key: 'rate', width: '22%' },
+  { title: '上下文', key: 'ctx', width: '22%' },
+]
+
+async function loadQd(force = false) {
+  try {
+    const [m, c] = await Promise.all([
+      qoderApi.models({ refresh: force }),
+      qoderApi.credits().catch(() => ({ data: { rows: [] as QoderCreditRow[] } })),
+    ])
+    qdModels.value = (m.data.models || []).slice().sort((a, b) => (a.rate ?? 99) - (b.rate ?? 99))
+    qdError.value = m.data.error || ''
+    qdCredits.value = (c.data.rows || []) as QoderCreditRow[]
+  } catch (e: any) {
+    qdModels.value = []
+    qdError.value = e?.response?.data?.error || e?.message || '读取 Qoder 模型失败'
+  }
+}
 
 // TRAE 模型表与额度
 const twModels = ref<TraeworkModel[]>([])
@@ -632,6 +780,12 @@ async function load() {
       await loadTwModels(false)
       return
     }
+    // Qoder：模型表（带倍率）+ 额度，同样只取自己的
+    if (isQd.value) {
+      await loadQd(false)
+      await channelStore.load()
+      return
+    }
     // 千问通道只取它自己的模型表，不拉搭子的映射——两者数据结构与
     // 可编辑性都不同，混在一起加载只会白打一次接口
     if (isQw.value) {
@@ -752,14 +906,14 @@ async function reset() {
 
 onMounted(async () => {
   await load()
-  if (!isQw.value && !isTw.value) await loadGateway()
+  if (!isQw.value && !isTw.value && !isQd.value) await loadGateway()
 })
 
 // 切通道重拉：三条通道的数据源不同，切换时必须换成对应那份，
 // 否则会停在上一通道的模型表上
 watch(() => channelStore.current, async () => {
   await load()
-  if (!isQw.value && !isTw.value) await loadGateway()
+  if (!isQw.value && !isTw.value && !isQd.value) await loadGateway()
 })
 </script>
 

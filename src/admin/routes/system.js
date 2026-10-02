@@ -212,6 +212,36 @@ const routes = [
           } catch (e) {
             out.traework = { id: 'traework', label: 'TRAE Work', kind: 'direct', ready: false, error: e.message };
           }
+          // Qoder：与 TRAE 同构（多账号自持凭证），但没有 wasm 依赖——
+          // 签名纯本地，所以顶栏徽标不该显示「wasm 未知」。
+          try {
+            const qoder = require('../../qoder');
+            const authStore = require('../../qoder/auth');
+            const st = qoder.status();
+            const usable = authStore.findUsable();
+            const soonest = usable.reduce((m, a) => {
+              const t = a.expiresAt || Infinity;
+              return t < m ? t : m;
+            }, Infinity);
+            const refreshSoonest = usable.reduce((m, a) => {
+              const t = a.refreshExpiresAt || Infinity;
+              return t < m ? t : m;
+            }, Infinity);
+            out.qoder = {
+              id: 'qoder', label: 'Qoder', kind: 'direct',
+              ready: st.ready, loggedIn: usable.length > 0,
+              accounts: st.accounts || 0,
+              // 明确标记：不需要任何客户端（与千问的 wasm 依赖形成对照）
+              needsClient: false,
+              account: usable[0] ? (usable[0].nickname || usable[0].uid || `账号 ${usable[0].id}`) : '',
+              tokenExpiresAt: Number.isFinite(soonest) ? new Date(soonest).toISOString() : null,
+              refreshExpiresAt: Number.isFinite(refreshSoonest) ? new Date(refreshSoonest).toISOString() : null,
+              refreshExpired: Number.isFinite(refreshSoonest) ? Date.now() >= refreshSoonest : false,
+              error: st.error || '',
+            };
+          } catch (e) {
+            out.qoder = { id: 'qoder', label: 'Qoder', kind: 'direct', ready: false, needsClient: false, error: e.message };
+          }
           return out;
         })(),
       });

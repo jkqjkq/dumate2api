@@ -79,11 +79,15 @@ async function aggregateWallets() {
   let reset = null;
   let expiring = [];
   let retriedCount = 0;
+  let correctedCount = 0;
   const accounts = [];
   for (const { a, w } of ok) {
     // 重试过且仍是全 0（上游持续返回可疑响应）。合计照常算，
     // 但要标出来——否则用户看到一个「可能是真耗尽、也可能读失败」的 0 却不知情
     if (w.retried) retriedCount++;
+    // wallets 谎报 0、由 account-context 交叉验证还原出真实每日额度的账号。
+    // 这类账号的 daily 是**校正后**的值，不是上游谎报的 0。
+    if (w.dailyCorrected) correctedCount++;
     daily += n(w.daily); monthly += n(w.monthly); longterm += n(w.longterm);
     limit += n(w.limit); peak += n(w.peak);
     if (w.calibrated) freeUsed += n(w.freeUsed);
@@ -102,6 +106,8 @@ async function aggregateWallets() {
       // 单账号未校准时给 null（与单账号视图同一约定），不补 0
       freeUsed: w.calibrated ? n(w.freeUsed) : null,
       calibrated: !!w.calibrated,
+      // 该账号的 daily 是交叉验证校正出来的（wallets 谎报 0）
+      dailyCorrected: !!w.dailyCorrected,
     });
   }
 
@@ -117,6 +123,9 @@ async function aggregateWallets() {
     // 上游重试后仍返回全 0 的账号数。这类账号的 0 可能是真·额度耗尽，
     // 也可能是上游持续异常——无法区分，界面要如实说明
     retriedAccounts: retriedCount,
+    // 其中 daily 已由 account-context 交叉验证还原出真实值的账号数。
+    // 这些账号的 0 已确认是 wallets 坏读，不是「今日已用光」。
+    correctedAccounts: correctedCount,
     accounts,
     daily: r4(daily), monthly: r4(monthly), longterm: r4(longterm),
     total: r4(daily + monthly + longterm),
@@ -333,7 +342,11 @@ const routes = [
         try {
           const w = await walletsOf(authStore.get(a.id));
           if (w && w.ok) {
-            wallets = { daily: w.daily, monthly: w.monthly, longterm: w.longterm, total: w.total };
+            wallets = {
+              daily: w.daily, monthly: w.monthly, longterm: w.longterm, total: w.total,
+              // daily 是交叉验证校正出来的（wallets 谎报 0 时）
+              dailyCorrected: !!w.dailyCorrected,
+            };
             if (w.expiringSoon) expiringSoon = w.expiringSoon;
           }
         } catch (e) { /* 余额取不到不影响账号信息 */ }
@@ -362,6 +375,9 @@ const routes = [
           refreshExpired: !!(a.refreshExpiresAt && Date.now() >= a.refreshExpiresAt),
           machineId: a.machineId || '',
           lastError: a.lastError || '',
+          // lastError 的写入时刻，界面显示「N 分钟前」用。没有它会把几小时前
+          // 的瞬时错误误读成当前故障
+          lastErrorAt: a.lastErrorAt || null,
           refreshTail: a.refreshTail || '',
           wallets,
         });
@@ -559,6 +575,9 @@ const routes = [
           failedAccounts: agg.failedAccounts,
           // 上游重试后仍返回全 0 的账号数（可能是真耗尽，也可能上游持续异常）
           retriedAccounts: agg.retriedAccounts,
+          // 其中 daily 已由 account-context 交叉验证还原出真实值的账号数。
+          // 这类账号的 0 已确认是 wallets 坏读——界面要说「已校正」，不是「已用光」。
+          correctedAccounts: agg.correctedAccounts,
           // 每账号明细：池子卡显示合计，这里给「合计由谁构成」
           accounts: agg.accounts,
           // 今日全部消耗（含客户端/网页里的对话，不只经网关的）

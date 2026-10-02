@@ -5,12 +5,13 @@
 // 漏一处就表现为「切到新通道后某项数据永远为空」——很难归因。
 //
 // 所以集中在这里，各处 require 同一份。
-const CHANNELS = ['dumate', 'qwenwork', 'traework'];
+const CHANNELS = ['dumate', 'qwenwork', 'traework', 'qoder'];
 
 const LABELS = {
   dumate: '百度搭子',
   qwenwork: '千问办公',
   traework: 'TRAE Work',
+  qoder: 'Qoder',
 };
 
 function label(id) {

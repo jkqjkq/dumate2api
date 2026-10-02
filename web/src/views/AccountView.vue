@@ -3,11 +3,15 @@
     <PageHeader
       title="登录态"
       :sub="isTw ? 'TRAE Work 登录态（凭证自持）'
+        : isQd ? 'Qoder 登录态（凭证自持，无需客户端）'
         : isQw ? '千问办公客户端登录态（只读）' : '客户端当前状态（只读）'"
     />
 
     <!-- ============ TRAE Work：凭证自持，可自动续期（与千问的只读相反） ============ -->
     <TraeworkLoginState v-if="isTw" />
+
+    <!-- ============ Qoder：凭证自持（device flow），不需要任何客户端 ============ -->
+    <QoderLoginState v-else-if="isQd" />
 
     <!-- ============ 千问办公：单账号直连，登录态在官方客户端的 auth-v2.dat ============ -->
     <template v-else-if="isQw">
@@ -344,8 +348,9 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import PageHeader from '@/components/PageHeader.vue'
 import client from '@/api/client'
-import { channelStore, isTraework, isQwenwork } from '@/stores/channel'
+import { channelStore, isTraework, isQwenwork, isQoder } from '@/stores/channel'
 import TraeworkLoginState from '@/components/traework/TraeworkLoginState.vue'
+import QoderLoginState from '@/components/qoder/QoderLoginState.vue'
 import { qwenworkApi } from '@/api/qwenwork'
 import type { QwLogin } from '@/api/qwenwork'
 import type { AccountData } from '@/api/account'
@@ -359,6 +364,7 @@ const qw = ref<QwLogin | null>(null)
 // 的凭证来源与续期方式完全相反，共用一套模板会把「能不能自动续」说反。
 const isTw = computed(() => isTraework())
 const isQw = computed(() => isQwenwork())
+const isQd = computed(() => isQoder())
 
 const accountColumns = [
   { title: '账号', key: 'name' },

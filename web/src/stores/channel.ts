@@ -61,6 +61,13 @@ export const CHANNELS = [
     // （是 credits 而非额度包），所以不显示搭子的「任务记录」。
     menuKeys: ['dashboard', 'chatlab', 'usage', 'reqlogs', 'models', 'keys', 'account', 'points', 'web-accounts'],
   },
+  {
+    id: 'qoder',
+    label: 'Qoder',
+    // Qoder：凭证自持（device flow 自取），与 TRAE 同构——多账号、有签到、
+    // 单一 credits 结构。签名纯本地，不需要任何客户端。
+    menuKeys: ['dashboard', 'chatlab', 'usage', 'reqlogs', 'models', 'keys', 'account', 'points', 'web-accounts'],
+  },
 ] as const
 
 export function channelLabel(id: string): string {
@@ -76,7 +83,7 @@ export function channelLabel(id: string): string {
  * 都用这个判定而不是逐个比对 id——否则加一条通道就要改八个页面。
  */
 export function isDirectChannel(id: string = channelStore.current): boolean {
-  return id === 'qwenwork' || id === 'traework'
+  return id === 'qwenwork' || id === 'traework' || id === 'qoder'
 }
 
 /**
@@ -94,13 +101,19 @@ export function isQwenwork(id: string = channelStore.current): boolean {
   return id === 'qwenwork'
 }
 
+/** 当前是不是 Qoder。与 TRAE 同构（多账号 + 签到 + 单一 credits） */
+export function isQoder(id: string = channelStore.current): boolean {
+  return id === 'qoder'
+}
+
 /**
  * 服务端通道筛选参数。usage / reqlogs / keys 三个接口都按它过滤，
  * 默认搭子——不传就返回全通道，卡片与表格会对不上。
  */
-export function channelParam(): 'dumate' | 'qwenwork' | 'traework' {
+export function channelParam(): 'dumate' | 'qwenwork' | 'traework' | 'qoder' {
   const id = channelStore.current
-  return id === 'qwenwork' ? 'qwenwork' : id === 'traework' ? 'traework' : 'dumate'
+  if (id === 'qwenwork' || id === 'traework' || id === 'qoder') return id
+  return 'dumate'
 }
 
 function initial(): string {

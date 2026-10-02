@@ -23,6 +23,11 @@ const constants = require('./constants');
 
 const SITE_ORIGIN = 'https://qwenwork.cn';
 const WALLETS_PATH = '/user/wallets';
+// 权威余额（免费额度是否已刷新）在 gateway 的 account-context 上。
+// 它的 quota.remaining **等于三池之和**（实测：100 + (−4.8222) = 95.1778），
+// 所以当 wallets 报 daily=0 时，remaining 减去付费池即可还原真实的 daily。
+// 注意它在 gateway 域名，不在 qwenwork.cn——两者不可互换。
+const ACCOUNT_CONTEXT_HOST = 'gateway.qwenwork.cn';
 
 // ---------------------------------------------------------------------------
 // 每日额度上限的推断
@@ -148,10 +153,10 @@ function tokenOf(account) {
   return account.accessToken || account.token || '';
 }
 
-function httpGet(path, token, timeout = 15000) {
+function httpGet(path, token, timeout = 15000, hostname = 'qwenwork.cn') {
   return new Promise((resolve) => {
     const req = https.request({
-      hostname: 'qwenwork.cn',
+      hostname,
       path,
       method: 'GET',
       headers: {
@@ -176,6 +181,21 @@ function httpGet(path, token, timeout = 15000) {
 
 function num(v) {
   return typeof v === 'number' && Number.isFinite(v) ? v : 0;
+}
+
+/**
+ * 读 gateway 的 account-context，取 `quota.remaining`。
+ *
+ * 这是余额的**权威口径**：它等于三池之和（实测 100 + (−4.8222) = 95.1778）。
+ * 只在 wallets 报可疑的 0 时才调用——正常路径不该为一次查询多打一个上游。
+ * 取不到（网络错 / 结构变了）返回 null，调用方据此回落，不编数字。
+ */
+async function fetchQuotaRemaining(token) {
+  const r = await httpGet(constants.ACCOUNT_CONTEXT_PATH, token, 15000, ACCOUNT_CONTEXT_HOST);
+  if (r.status !== 200 || !r.data) return null;
+  const q = (r.data.data || {}).quota;
+  if (!q || typeof q.remaining !== 'number' || !Number.isFinite(q.remaining)) return null;
+  return q.remaining;
 }
 
 /**
@@ -213,16 +233,20 @@ async function fetchWallets(opts = {}) {
   // 为什么也不能一律当成读失败：真·额度耗尽时三池确实都是 0，那种情况
   // 显示 0 是**正确的**。历史归因里没有全 0 记录只是因为还没遇到过真的耗尽
   // （95 条 daily=0 都伴随付费池 >0，即免费扣完转扣付费）。
-  //
-  // 所以用重试来区分：瞬时抖动重试即恢复；真实归零重试仍是 0，如实上报。
-  const allZero = (x) => {
+  const walletBalances = (x) => {
     const dd = x && x.data && x.data.data;
-    if (!dd) return false;
+    if (!dd) return null;
     const w = (dd.active_wallets && Array.isArray(dd.active_wallets.wallets)) ? dd.active_wallets.wallets : [];
-    return num((dd.daily_credits || {}).total_balance) === 0
-      && num((dd.monthly_credits || {}).total_balance) === 0
-      && num((dd.longterm_credits || {}).total_balance) === 0
-      && w.length === 0;
+    return {
+      daily: num((dd.daily_credits || {}).total_balance),
+      monthly: num((dd.monthly_credits || {}).total_balance),
+      longterm: num((dd.longterm_credits || {}).total_balance),
+      walletCount: w.length,
+    };
+  };
+  const allZero = (x) => {
+    const b = walletBalances(x);
+    return !!b && b.daily === 0 && b.monthly === 0 && b.longterm === 0 && b.walletCount === 0;
   };
   let retried = false;     // 是否发生了重试
   let retryRecovered = false; // 重试后拿到了非 0（即第一次是抖动）
@@ -235,21 +259,55 @@ async function fetchWallets(opts = {}) {
       r = r2;
       retryRecovered = true;
     }
-    // 重试仍是全 0（或重试失败）：落回下面的正常路径，如实上报 0。
-    // 此时无法区分「真耗尽」与「持续抖动」，报 0 是保守且诚实的选择。
   }
 
   const d = r.data.data || {};
   const wallets = (d.active_wallets && Array.isArray(d.active_wallets.wallets))
     ? d.active_wallets.wallets : [];
+  const monthlyVal = num((d.monthly_credits || {}).total_balance);
+  const longtermVal = num((d.longterm_credits || {}).total_balance);
+  const walletsDaily = num((d.daily_credits || {}).total_balance);
+
+  // 交叉验证（2026-10-02 加）：wallets 报 daily=0 时，拿 gateway 的
+  // `account-context` 的 `quota.remaining` 核对——它是**权威口径**，且恰好
+  // 等于三池之和，所以 `daily = remaining − monthly − longterm` 能还原真实值。
+  //
+  // 触发条件是「**daily 读数为 0**」，比 allZero 更宽：账号 2 的坏读形态是
+  // 「daily=0 但 longterm 为负」（三池不全是 0），根本不进 allZero 分支，
+  // 却同样把每日额度显示成了 0——用户报的正是这个。
+  //
+  // 判据：还原出的 daily > 0.005 才认定是 wallets 坏读并采用。
+  //   - remaining 也≈0（真·耗尽）→ 差值不 > 0.005 → 不校正，如实报 0
+  //   - remaining 取不到（account-context 失败）→ 不校正，如实报 0 + retried
+  // 这样既能纠错，又不会把真实的「用光」粉饰成「还有额度」。
+  let authoritativeDaily = null;
+  let dailyCorrected = false;
+  if (walletsDaily === 0) {
+    const remaining = await fetchQuotaRemaining(token);
+    if (remaining != null && Number.isFinite(remaining)
+        && remaining - (monthlyVal + longtermVal) > 0.005) {
+      authoritativeDaily = remaining - (monthlyVal + longtermVal);
+      dailyCorrected = true;
+      // 已校正 ⇒ 这次的 0 已解释清楚，不是「无法判定的异常」，不标 retried
+      retried = false;
+    }
+  }
+
+  // daily 以交叉验证为准（当 wallets 谎报 0 而 account-context 给出正数时）。
+  const dailyVal = dailyCorrected
+    ? Number(authoritativeDaily.toFixed(4))
+    : walletsDaily;
   const out = {
     ok: true,
-    daily: num((d.daily_credits || {}).total_balance),
-    monthly: num((d.monthly_credits || {}).total_balance),
-    longterm: num((d.longterm_credits || {}).total_balance),
+    daily: dailyVal,
+    monthly: monthlyVal,
+    longterm: longtermVal,
     // 只有「重试过且仍是全 0」才标出来——那才是值得排查的状态
     // （可能真耗尽，也可能上游持续异常）。抖动后恢复的不算异常，不标。
     ...(retried && !retryRecovered ? { retried: true } : {}),
+    // 交叉验证纠正了 wallets 的谎报 0。界面据此显示「已校正」，
+    // 而不是把一次坏读的 0 当成「今日已用光」。
+    ...(dailyCorrected ? { dailyCorrected: true } : {}),
     // 最近到期的钱包。**注意这不是「积分要作废」**：daily 池每天 00:00 重置，
     // 所以 valid_to 就是明天的重置时刻——它每天都「即将到期」，不是风险。
     // 真正会作废的是 expiring_soon 那段（付费积分按有效期，过期即消失），

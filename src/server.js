@@ -4,7 +4,7 @@ const { discoverPort, verifyPort } = require('./discovery');
 const { mapModel, anthropicToOpenAI, openAIToAnthropic, mapFinishReason } = require('./anthropic');
 const { googleToOpenAI, openAIToGoogle, translateStreamToGoogle } = require('./google');
 const { responsesToOpenAI, openAIToResponse, translateStreamToResponses } = require('./responses');
-const { resolveMaxTokens, resolveQwenMaxTokens, resolveTraeworkMaxTokens } = require('./budget');
+const { resolveMaxTokens, resolveQwenMaxTokens, resolveTraeworkMaxTokens, resolveQoderMaxTokens } = require('./budget');
 const webFallback = require('./fallback-web');
 
 // 按通道选用预算策略。收敛在这里而不是在四个调用点各写一遍 if——
@@ -15,6 +15,7 @@ function resolveBudget(target, requested) {
   const kind = target && target.budgetKind;
   if (kind === 'qwenwork') return resolveQwenMaxTokens(requested);
   if (kind === 'traework') return resolveTraeworkMaxTokens(requested);
+  if (kind === 'qoder') return resolveQoderMaxTokens(requested);
   return resolveMaxTokens(requested);
 }
 const reqlog = require('./reqlog');
@@ -70,10 +71,15 @@ async function ensureUpstream() {
  */
 async function handleDirectChannel(req, res, payload, route, ctx) {
   const { startedAt, info, kind } = ctx;
-  // 按通道选 provider：两者都是 direct，但一个走 wasm 封装、一个走自持凭证
+  // 按通道选 provider：三条直连通道各有各的凭证与签名方式
+  //   qwenwork → 官方 wasm 封装请求体（依赖客户端安装的 wasm）
+  //   traework → 自持凭证，直接调上游
+  //   qoder    → 纯本地签名（cosy.js），连 wasm 都不需要
   const provider = route.channel === 'traework'
     ? require('./traework')
-    : require('./qwenwork');
+    : route.channel === 'qoder'
+      ? require('./qoder')
+      : require('./qwenwork');
   const wantStream = !!payload.stream;
 
   // 请求 id 在这里就定下来：埋点与积分归因两边都要用同一个值才能配对。
@@ -487,29 +493,67 @@ async function handleOpenAIModels(req, res) {
     // 区分「上游直接认识」与「靠别名转换」——后者换名字也能用，
     // 但前者才是上游真实模型，界面与客户端据此判断
     owned_by: upstream.has(id) ? 'dumate' : 'dumate-proxy',
+    // name 与 id 相同：搭子的模型名就是别名表里的名字（`glm-5` 等），
+    // 没有独立的显示名。带上是为了与其它通道形状一致——cc-switch 读 `name`。
+    name: id,
   }));
 
   // 千问办公的模型带 qwen/ 前缀列出来，否则客户端无从发现这个通道
   // （它们不在 modelmap 里——那套别名是搭子专用的）。
   // 列不出来时静默跳过：通道不可用不该让整个 /v1/models 失败。
+  // **带 name**：cc-switch 解析模型列表读 `name` 字段，只给 {id} 只能显示内部 key。
+  // 千问上游的模型列表接口是空的（回落到静态表 pro/flash），**没有显示名**——
+  // 所以 name 就用 key 本身，不编一个上游没给的名字。
   if ((process.env.DUMATE_QWENWORK_AUTOSTART || 'auto') !== 'off') {
     try {
       const qw = require('./qwenwork');
       const models = await qw.listModels();
       for (const m of router.exposedFor('qwenwork', models)) {
-        data.push({ id: m, object: 'model', created, owned_by: 'qwenwork' });
+        data.push({ id: m, object: 'model', created, owned_by: 'qwenwork', name: m.slice('qwen/'.length) });
       }
     } catch (e) { /* 通道不可用，不列 */ }
   }
 
   // TRAE Work 同理：模型名带 traework/ 前缀。凭证是我们自持的，
   // 没有账号时 listModels 仍返回静态表，但通道不可用就不列。
+  // **带 name 与上下文**：TRAE 的上游模型表有完整元信息（display_name / 上下文），
+  // 客户端据此显示真实模型名而不是内部 key。
   if ((process.env.DUMATE_TRAEWORK_AUTOSTART || 'auto') !== 'off') {
     try {
       const tw = require('./traework');
       if (tw.status().ready) {
-        for (const m of router.exposedFor('traework', tw.listModels())) {
-          data.push({ id: m, object: 'model', created, owned_by: 'traework' });
+        for (const m of tw.listModelEntries()) {
+          data.push({
+            id: `traework/${m.id}`,
+            object: 'model',
+            created,
+            owned_by: 'traework',
+            name: m.name,
+            ...(m.contextWindow ? { contextWindow: m.contextWindow, maxContextWindow: m.maxContextWindow } : {}),
+          });
+        }
+      }
+    } catch (e) { /* 通道不可用，不列 */ }
+  }
+
+  // Qoder 同理：模型名带 qoder/ 前缀。签名纯本地、不需要客户端。
+  // **带 name 与上下文**：cc-switch 解析模型列表读 `name` 字段
+  // （实测其二进制里与 owned_by 相邻的字段是 id/name/cost/contextWindow/
+  // maxContextWindow）。只给 {id, owned_by} 的话客户端只能显示内部 key
+  // （`qoder/qfmodel`），看不出是哪个模型。
+  if ((process.env.DUMATE_QODER_AUTOSTART || 'auto') !== 'off') {
+    try {
+      const qd = require('./qoder');
+      if (qd.status().ready) {
+        for (const m of await qd.listModelEntries()) {
+          data.push({
+            id: m.id,
+            object: 'model',
+            created,
+            owned_by: 'qoder',
+            name: m.name,
+            ...(m.contextWindow ? { contextWindow: m.contextWindow, maxContextWindow: m.maxContextWindow } : {}),
+          });
         }
       }
     } catch (e) { /* 通道不可用，不列 */ }
@@ -1172,6 +1216,16 @@ const server = http.createServer(async (req, res) => {
               return { direct: true, ready: st.ready, accounts: st.accounts, error: st.error || '' };
             } catch (e) {
               return { direct: true, ready: false, accounts: 0, error: e.message };
+            }
+          })(),
+          // Qoder：凭证自持（device flow 换取），**连 wasm 都不需要**
+          // （签名是纯本地算法）。needsClient=false 明确表示不依赖任何客户端安装。
+          qoder: (() => {
+            try {
+              const st = require('./qoder').status();
+              return { direct: true, ready: st.ready, needsClient: false, accounts: st.accounts, error: st.error || '' };
+            } catch (e) {
+              return { direct: true, ready: false, needsClient: false, accounts: 0, error: e.message };
             }
           })(),
         },

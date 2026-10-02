@@ -120,6 +120,75 @@ function qwenworkCachedKeys() {
   return qwenKeysCache;
 }
 
+// Qoder 模型表的缓存快照（上游下发，带倍率）。由 qoder/index.js 写入。
+// **注意跨进程问题**：网关进程调 listModels 会写这里，但 /models/info 跑在
+// 管理端进程，两者模块状态独立——所以 qoderRows 不能只依赖这个快照，
+// 必须自己拉一次（见下面的实现）。这与 traeworkRows 直接 fetchModels 同理。
+let qoderModelsCache = null;
+function setQoderModels(list) {
+  qoderModelsCache = Array.isArray(list) && list.length ? list.slice() : null;
+}
+function qoderCachedModels() {
+  return qoderModelsCache;
+}
+
+/**
+ * Qoder 的行：上游下发，带倍率（price_factor）。
+ *
+ * **自己拉而不是读快照**：快照由网关进程写入，管理端进程看不到。
+ * 取不到时回落静态表（rate 给 null，如实标「无此数据」，不估算）。
+ */
+async function qoderRows() {
+  const constants = require('./qoder/constants');
+  const budget = require('./budget');
+  let list = qoderCachedModels();
+  let fromUpstream = !!list;
+  if (!list) {
+    // 直接问上游（进程内），与 traeworkRows 同一策略
+    try {
+      const authStore = require('./qoder/auth');
+      const session = require('./qoder/session');
+      const acc = authStore.preferred();
+      if (acc) {
+        const r = await session.fetchModels(acc);
+        if (r.ok && r.models.length) { list = r.models; fromUpstream = true; }
+      }
+    } catch (e) { /* 拿不到就回落静态表 */ }
+  }
+  // 两种形状都要接受：session.fetchModels 给的是归一化形状（rate/contextWindow），
+  // 而 setQoderModels 可能收到原始上游形状（price_factor/max_input_tokens）。
+  // 只认一种会让其中一条路径静默给出 null。
+  const items = fromUpstream && list
+    ? list.map((m) => ({
+      key: m.key,
+      name: m.name || m.display_name || m.key,
+      rate: typeof m.rate === 'number' ? m.rate : (typeof m.price_factor === 'number' ? m.price_factor : null),
+      ctx: typeof m.contextWindow === 'number' ? m.contextWindow : (typeof m.max_input_tokens === 'number' ? m.max_input_tokens : null),
+    }))
+    : constants.FALLBACK_MODELS.map((k) => ({ key: k, name: k, rate: null, ctx: null }));
+  return items.map((m) => ({
+    id: m.key,
+    name: m.name || m.key,
+    prefixed: `qoder/${m.key}`,
+    channel: 'qoder',
+    native: true,
+    target: m.key,
+    // 倍率是相对值（price_factor），不是积分绝对值——与 TRAE 同理
+    rate: typeof m.rate === 'number' ? m.rate : null,
+    rateSource: typeof m.rate === 'number' ? 'upstream' : null,
+    contextWindow: typeof m.ctx === 'number' ? m.ctx : null,
+    contextWindowMin: null,
+    contextSource: typeof m.ctx === 'number' ? 'upstream' : null,
+    contextNote: '',
+    maxTokens: budget.resolveQoderMaxTokens(0),
+    maxTokensSource: 'config',
+    capability: 'chat_model',
+    multimodal: false,
+    // 便宜档标记：0.1 倍率的适合调试（省额度）
+    note: (typeof m.rate === 'number' && m.rate <= 0.1) ? '低倍率，适合开发调试' : '',
+  }));
+}
+
 /** TRAE 的行：唯一有完整上游元信息的通道 */
 async function traeworkRows({ visibleOnly = false, force = false } = {}) {
   const models = require('./traework/models');
@@ -163,7 +232,7 @@ async function traeworkRows({ visibleOnly = false, force = false } = {}) {
 async function allRows({ force = false } = {}) {
   const tw = await traeworkRows({ force });
   return {
-    rows: [...dumateRows(), ...qwenworkRows(), ...tw.rows],
+    rows: [...dumateRows(), ...qwenworkRows(), ...tw.rows, ...(await qoderRows())],
     errors: { traework: tw.error || '' },
   };
 }
@@ -172,6 +241,7 @@ async function allRows({ force = false } = {}) {
 async function rowsFor(channel, opts = {}) {
   if (channel === 'dumate') return { rows: dumateRows(), error: '' };
   if (channel === 'qwenwork') return { rows: qwenworkRows(), error: '' };
+  if (channel === 'qoder') return { rows: await qoderRows(), error: '' };
   if (channel === 'traework') {
     const r = await traeworkRows(opts);
     return { rows: r.rows, error: r.error };
@@ -180,6 +250,6 @@ async function rowsFor(channel, opts = {}) {
 }
 
 module.exports = {
-  SRC, allRows, rowsFor, dumateRows, qwenworkRows, traeworkRows,
-  setQwenKeys, DUMATE_NOTE, DUMATE_CONTEXT, QW_CONTEXT, CHANNELS: channels.CHANNELS,
+  SRC, allRows, rowsFor, dumateRows, qwenworkRows, traeworkRows, qoderRows,
+  setQwenKeys, setQoderModels, DUMATE_NOTE, DUMATE_CONTEXT, QW_CONTEXT, CHANNELS: channels.CHANNELS,
 };

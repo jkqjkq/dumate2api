@@ -79,8 +79,8 @@
 
             <a-alert
               v-if="a.lastError"
-              type="error"
-              :message="a.lastError"
+              :type="errType(a)"
+              :message="errMessage(a)"
               show-icon
               class="mt-2"
               style="padding: 4px 8px"
@@ -231,6 +231,7 @@ import PageHeader from '@/components/PageHeader.vue'
 import { channelStore, isQwenwork } from '@/stores/channel'
 import { qwenworkApi } from '@/api/qwenwork'
 import type { QwAccount, QwLoginPoll } from '@/api/qwenwork'
+import { lastErrorFresh, errorWhen } from '@/utils/lastError'
 
 const rows = ref<QwAccount[]>([])
 const err = ref('')
@@ -264,6 +265,12 @@ function fmt(v: number | null | undefined) {
 }
 
 const dateText = (ts: number) => new Date(ts).toLocaleString('zh-CN', { hour12: false })
+
+// lastError 只在换票/请求成功时才清空，会停在旧错误上。新鲜度判定收敛到
+// utils/lastError.ts（无时间戳的旧数据一律当陈旧，不当成当前故障）：
+// 新鲜的显示成 error（红），陈旧的显示成 warning（黄）。
+const errType = (a: QwAccount) => (lastErrorFresh(a) ? 'error' : 'warning')
+const errMessage = (a: QwAccount) => errorWhen(a.lastErrorAt) + a.lastError
 
 function tokenExpired(a: QwAccount) {
   return !!a.tokenExpiresAt && Date.now() >= a.tokenExpiresAt

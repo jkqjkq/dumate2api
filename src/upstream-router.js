@@ -22,6 +22,8 @@
 const QWEN_PREFIX = 'qwen';
 /** TRAE Work 通道的前缀。`traework/glm-5.2` → 上游模型 `glm-5.2` */
 const TRAEWORK_PREFIX = 'traework';
+/** Qoder 通道的前缀。`qoder/gfmodel` → 上游模型 `gfmodel` */
+const QODER_PREFIX = 'qoder';
 
 const UPSTREAMS = {
   dumate: {
@@ -80,6 +82,25 @@ const UPSTREAMS = {
     // 与千问同理：reasoning 与正文抢预算，小 max_tokens 会截断正文
     needsBudget: true,
     budgetKind: 'traework',
+  },
+  // Qoder（阿里 AI IDE）：进程内直连，与千问办公**同一套 COSY 协议**，
+  // 但签名是**纯本地算法**（src/qoder/cosy.js，不需要官方 wasm）。
+  // 凭证走 device flow 自取（src/qoder/login.js），**不依赖 Qoder 客户端**。
+  // 双区域：cn（qoder.com.cn）/ global（qoder.sh），账号各自独立。
+  qoder: {
+    id: 'qoder',
+    label: 'Qoder',
+    host: null,
+    portEnv: null,
+    defaultPort: null,
+    prefix: QODER_PREFIX,
+    direct: true,
+    basePath: null,
+    auth: () => null,
+    needsModelMap: false,
+    // 与千问/TRAE 同理：reasoning 与正文抢预算，小 max_tokens 会截断正文
+    needsBudget: true,
+    budgetKind: 'qoder',
   },
 };
 
@@ -151,16 +172,18 @@ function availability(channel) {
   return { ok: true };
 }
 
-/** 对外暴露的模型名列表：千问/TRAE 的加前缀，避免与搭子撞名 */
+/** 对外暴露的模型名列表：直连通道的加前缀，避免与搭子撞名 */
 function exposedFor(channel, models) {
   if (channel === 'qwenwork') return models.map((m) => `${QWEN_PREFIX}/${m}`);
   if (channel === 'traework') return models.map((m) => `${TRAEWORK_PREFIX}/${m}`);
+  if (channel === 'qoder') return models.map((m) => `${QODER_PREFIX}/${m}`);
   return models.slice();
 }
 
 module.exports = {
   QWEN_PREFIX,
   TRAEWORK_PREFIX,
+  QODER_PREFIX,
   UPSTREAMS,
   resolve,
   availability,

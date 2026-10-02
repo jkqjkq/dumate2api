@@ -24,24 +24,72 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 > **9080 不一定在运行**：它是按需启动的对外服务，不是常驻开发环境。动手前先 `netstat -ano | grep ":9080"` 确认。若它没在跑而你被要求「发布新版」，正确做法是**只同步快照文件**，不要顺手把它启动起来——启动一个对外服务是用户的决定，不是发布流程的一部分。
 
-**三条上游通道，靠模型名前缀分流**（`src/upstream-router.js`）：
+**四条上游通道，靠模型名前缀分流**（`src/upstream-router.js`）：
 
 | 调用方传的模型名 | 路由到 |
 |---|---|
 | `glm-5` / `gpt-4o` 等（无前缀） | DuMate 8980，**现有客户端零改动** |
 | `qwen/pro` / `qwen/flash` / `qwen/auto` | 千问办公（`src/qwenwork/` 直连 `gateway.qwenwork.cn`） |
 | `traework/glm-5.2` | TRAE Work（`src/traework/` 直连，凭证自持） |
+| `qoder/gfmodel` | Qoder（`src/qoder/` 直连，**签名纯本地、不需要客户端**） |
 | 未知前缀（如 `qwn/pro`） | **400 报错，不静默回落** |
 
-**通道 id 的单一来源是 `src/channels.js`**（`dumate` / `qwenwork` / `traework`）。
+**通道 id 的单一来源是 `src/channels.js`**（`dumate` / `qwenwork` / `traework` / `qoder`）。
 `keys.js`（网关鉴权）、`admin/routes/keys.js`（校验）、`usage.js` / `reqlogs.js`
-（筛选参数）四处都 require 同一份——加第四条通道只改这一个文件。
+（筛选参数）四处都 require 同一份——加一条通道只改这一个文件。
 
 **千问与 TRAE 都是直连通道，但彼此也不同**：千问是单账号只读（登录态在客户端
 `auth-v2.dat`）、三个积分池；TRAE 是多账号自持凭证、单一 credits + 签到体系。
 前端 `isDirectChannel()` 只分「搭子 vs 直连」，页面内部还要用 `isTraework()` /
 `isQwenwork()` 再分一次——共用一套模板会把「能不能加账号」「能不能自动续期」
 这类问题说反。
+
+**Qoder 是第四条通道**（2026-10-02 接入，`src/qoder/`）：阿里 AI IDE，
+与千问办公**同一套 COSY 协议**（同样的 `Encode=1` 自定义 base64、同样的
+`Bearer COSY.<payload>.<sig>` 信封、同样的 device flow 登录，**连 client_id 都相同**）。
+但有两点关键差异：
+
+1. **签名不需要官方 wasm**——纯本地算法（RSA 加密临时密钥 + AES 加密身份 + MD5 签名，
+   公钥硬编码，见 `src/qoder/cosy.js`）。所以这条通道**不需要装任何客户端**
+   （`/health` 的 `needsClient: false`）。千问必须读客户端的 wasm，Qoder 不用。
+2. **额度分两块且不能相加**：`userQuota`（订阅套餐内，Free 恒为 0）与
+   `addOnQuota`（签到/赠送，**免费用户实际能用的就是这个**）。
+
+**零额度时聊天会挂起**（不报错、不超时失败），所以**签到是通道可用的前提**——
+新账号必须先 `checkin` 领积分。签到链路 `GET /sash/api/v1/me/campaigns` →
+`POST .../{id}/claim`，**不需要签名**，只要 device token + `cosy-clienttype: 10`。
+
+**积分过期要本地记账，因为上游没有逐批余额接口**（`src/qoder/grants.js`）。
+实测 `/api/v2/quota/detail`、`/sash/.../grants`、`/sash/.../credit-packs` 等一律
+503/404——**唯一带到期信息的是领取响应本身**（`benefit.validity` = `RELATIVE_DAYS`/30 天
++ `grantedAt`）。所以每次签到往 `data/qoder-grants.jsonl` 落一条（幂等键 `grantId`），
+过期提醒才有数据源。**活动列表对已领活动不返回领取时间**，所以无法回填——
+账本从功能启用时开始记，界面要如实标出覆盖范围（`/grants` 的 `since` 字段），
+否则「账本里没有」会被读成「没有积分」。
+
+**「领取额」不是「剩余额」**——这是本通道的数据缺口，必须如实标注。上游只告诉
+我们这批领了多少，不告诉我们还剩多少。千问（每包有独立余额）与 TRAE（每包有
+`remain`）都没有这个问题，**不要照搬它们的措辞**。界面一律写「领取额」，
+并注明「实际剩余以额度卡总余额为准」。
+
+**签到积分领取后 30 天作废，每日 10:00 (UTC+8) 刷新**——注意**不是 00:00**
+（千问是 00:00 重置，两者不同）。`/qoder/grants` 与仪表盘的过期明细按此展示。
+
+**模型选择要同时设 body 与请求头**：body 的 `model_config.key` / `chat_context.extra.modelConfig.key`
+**加**请求头 `x-model-key` / `x-model-source`（只设 body 时上游仍走 `auto`）。
+而且**响应里的 `model` 字段恒为 `"auto"`**（上游如此），不能据此判断实际模型——
+真正的判据是 `system_fingerprint`（实测 `dmodel` → `a307abda…`、`kmodel_latest` → `fpv0_3f6baf1…`）。
+
+**倍率差 14 倍，开发调试一律用 0.1 档**：`qfmodel`/`qmodel`/`q37fmodel`/`dfmodel`/`gfmodel`。
+实测 5 个 0.1 档请求合计不到 0.01 credits，而 `kmodel_latest`(Kimi-K3) 是 1.4 档。
+倍率从模型表接口的 `price_factor` 读，**不硬编码**。
+
+**Qoder 的 usage 直接返回 credits 消耗**（三条直连通道里唯一如此）：
+`usage.credits = price_factor × tokens/1000`，比千问（读余额差）和 TRAE（读 usage_summary）都干净。
+
+**跨进程陷阱**：`model-info.js` 的 `qoderRows` **必须自己拉模型表**（`session.fetchModels`），
+不能只读 `setQoderModels` 写的快照——快照由网关进程写入，而 `/models/info` 跑在管理端进程，
+两者模块状态独立。TRAE 同理（`traeworkRows` 直接 `fetchModels`）。
 
 **千问办公是进程内直连，不需要任何外部服务。** 早期版本经 Buddy2api（8787）中转，后来发现它的 `wasm_helper.mjs` 本身就是纯 Node ESM 脚本、Python 只是一层没必要的壳，改为直连后少一个进程、少一层鉴权、少一个故障点。`src/qwenwork/` 直接调官方 wasm 生成请求并发到云端网关。
 
@@ -201,6 +249,51 @@ sanguo 项目的 `novel-creator` 技能把写作拆成分阶段门控（「起�
 `auth-v2.dat` → 现在的自持凭证账号池），不是并行两条链路。所以上面那张表里
 「网页凭证」只适用于搭子。
 
+**千问不需要「走客户端」，但仍有两处依赖安装目录**（别把它读成「要走客户端」）：
+
+1. **官方 wasm**（`qoder_auth_wasm_bg.wasm`）——请求体必须由它签名，无法自实现。
+   运行时从安装目录读（`wasm-path.js` 取版本号最大的目录），**不复制进仓库**。
+   客户端升级后新 wasm 若签名规则变了，这里会失效——但实测 1.1.0 与 1.2.0 的
+   wasm **完全相同**（同 md5），所以升级客户端本身不影响签名。
+2. **machineId**（`credentials.machineId()` 读 `~/.qoderworkcn/.auth/machine_id`）——
+   登录时生成，之后每账号固定不变（改了等于换设备）。**装过客户端才有这个值**；
+   没装就退回随机 UUID，实测也能登录与推理。注意本机两个账号**共用同一个
+   machineId**（都取自客户端那份），这是预期行为，不是 bug。
+
+凭证本身（access/refresh token）走 `login.js` 的 **OAuth device flow + PKCE** 自取，
+存在 `data/qwenwork-accounts.json`，**不碰客户端的 `auth-v2.dat`**——所以换账号
+不需要开客户端，两个账号也能并存。`credentials.js` 现在只剩 `machineId()` 在用。
+
+**`lastError` 是「最近一次结果」，不是「历史故障」**（2026-10-02 修）。三条不变量：
+
+- **成功即清除**：`send()` 里一次请求成功就清掉该账号的 `lastError`（只在确实
+  有值时写盘）。早先只在换票成功时清，于是一次瞬时失败（上游抖动的 403）会
+  **永远挂着**——账号页显示的 403 其实几小时前就自愈了，用户被误导成「当前坏了」。
+- **带时间戳**：`patch()` 集中给 `lastError` 打 `lastErrorAt`（写入 `lastError`
+  时同步写入时刻，清空时置 null）。时间戳逻辑收敛在 `patch()` 一处：所有写
+  `lastError` 的调用方（`index.js` 的 `markFailure`、`chat.js` 的换票失败）都走它，
+  漏一处就会出现两种形状。
+- **无时间戳 = 陈旧**（`web/src/utils/lastError.ts` 的 `lastErrorFresh`）。判据是
+  「有 `lastErrorAt` 且未过 30 分钟」才算新鲜。**旧数据（本功能上线前写入的）没有
+  时间戳，一律当陈旧**——第一版实现写反了（把「无时间戳」保守当成新鲜），结果
+  acc2 那条修复前的旧 403 一直被标红，用户再次报「为什么还显示这个 403」。
+  陈旧错误降级为灰色警告（`errorWhen` 显示「较早：」），仍显示错误串供排查。
+
+  **为什么必须「无时间戳 = 陈旧」而不是「新鲜」**：`lastError` 只在**换票成功**或
+  **请求成功**时才清——一个**不被使用**的账号（非主账号、主账号一直成功）永远
+  拿不到这两次清空机会，一次瞬时失败就永久挂在那里，且永远不会有时间戳。
+  把无时间戳当新鲜 = 把这类遗留错误永久标红。**宁可少报，也不要凭空报一个旧故障。**
+
+  两个界面（仪表盘账号卡、账号管理页）共用这个工具，不要各写一份——上一版就是
+  因为各写一份且判据写反，才出现「同一账号一处红一处不红」的漂移。旧的无时间戳
+  遗留值已一次性清理（2026-10-02）。
+
+**千问上游的 403 是间歇性的**（2026-10-02 实测）：同一账号、同一模型、同一分钟，
+直接请求可能成功、`send()` 可能失败，几分钟后自愈。表现为 `Model is not available
+for this user`（账号维度，网关会据此换号）。**这不是配置错误、不是额度、不是 token
+问题**——遇到就重试。真正需要处理的是 **402**（额度真耗尽）和 **`换票失败`**
+（refresh token 失效，要重新登录），这两种才会持续失败。
+
 ## 命令
 
 ```bash
@@ -275,8 +368,26 @@ DUMATE2API_PORT=9082 node src/server.js
 `/credits` 与 `/accounts` 两处相等、失败账号如实报出、每账号按各自峰值算）。
 
 另一个千问专项离线验证（不需要起服务，拦截 https 层喂预设响应）：
-`node test/verify-qwen-wallets-zero.js`（「三池全 0」响应的重试判据：瞬时抖动
-重试即恢复、真实归零如实上报并标 retried、免费扣完转付费不误判）。
+`node test/verify-qwen-wallets-zero.js`（「每日额度被读成 0」的两层纠错：重试恢复、
+`account-context` 交叉验证还原真实 daily、真实归零如实上报并标 retried、
+免费扣完转付费不误判）。
+
+**Qoder 专项**（两个都离线，不需要起服务）：
+
+- `node test/verify-qoder-cosy.js`——签名算法，用**参考实现（Go）生成的确定性测试向量**
+  逐字节比对（Encode / AES-128-CBC / MD5 / 身份 JSON 的 key 字母序），22 项。
+  RSA 只验长度（PKCS#1 v1.5 padding 随机，无法逐字节比对）。
+- `node test/verify-qoder-channel.js`——通道逻辑：模型 key 解析、body 构造（模型 key
+  同时进 body 与请求头）、工具过滤、执行纪律注入幂等、信封错误解析、SSE 聚合含 credits、
+  区域端点与归一化。
+- `node test/verify-qoder-grants.js`——积分批次账本：到期时刻推导（RELATIVE_DAYS /
+  缺字段 / 领取失败）、幂等（同 grantId 不重复写）、时间窗与账号过滤、正好到期的边界、
+  「amount 是领取额不是剩余额」的数据缺口。
+
+**`node test/qoder-cli.js` 是不开管理端也能验证 Qoder 通道的入口**（与 `traework-login.js` 同定位）：
+`login [cn|global]` 生成授权链接 → `status` → `models`（带倍率排序）→ `quota` →
+`checkin`（领积分）→ `chat "你好" [model]`（**默认用最省的 gfmodel**）→ `remove <id>`。
+排查「Qoder 到底通不通」时比在界面里点更快。
 
 离线自测的完整流程（无需安装 DuMate）：两个终端分别跑 `npm start` → `npm test`。
 
@@ -434,6 +545,8 @@ Claude Code ── Anthropic ───────┼──→ 网关 :9080 ─�
 | `qwenwork-credits.jsonl` | 千问积分归因（每请求一条，带 `req_id` 与请求日志配对） |
 | `qwenwork-daypeak.json` | 千问每日额度的观测峰值，用于推断「每日上限」 |
 | `qwenwork-accounts.json` | 千问自持凭证账号池（**含 refresh token，等同密码**） |
+| `qoder-accounts.json` | Qoder 自持凭证账号池（device flow 换取，含 refresh token） |
+| `qoder-grants.jsonl` | Qoder 积分批次账本（**签到领取记录**，用于过期提醒；上游无逐批余额接口） |
 | `traework-accounts.json` | TRAE 自持凭证账号池（OAuth 换取，含轮换的 refreshToken） |
 | `traework-credits.jsonl` | TRAE 逐请求积分归因（按账号的 consumed 游标，见 `traework/credits.js`） |
 | `points-cursor.jsonl` | 搭子的余额游标（每请求一条，相邻差值即该请求成本） |
@@ -533,12 +646,14 @@ Vue 3 + Vite + ant-design-vue 4 + Tailwind + ECharts（按需引入，不用全�
 
 **每日额度是「每天 00:00 自动重置」，不需要当天先使用一次**（2026-09-30 实测确认）。重置时刻就是 wallet 的 `valid_to`（`2026-10-01T00:00:00+08:00`）。证据：账号 2 当天**零请求**，前一日收尾 `4.9657`，次日读到满额 `100`——中间没有任何请求。所以「必须先跑一次才刷新」这个说法不成立。
 
-但用户看到的那个「0」是**真实存在**的，成因不是「没刷新」，而是 `/user/wallets` 偶尔返回「三池全 0 + `active_wallets` 空」的**瞬时响应**。决定性证据：同一时刻打两个接口，`wallets` 报全 0 而 `account-context` 的 `quota.remaining` 报 100——两者矛盾，说明那次是**读失败**，不是余额归零。`fetchWallets` 现在对这种响应**重试一次**：
+但用户看到的那个「0」是**真实存在**的，成因不是「没刷新」，而是 `/user/wallets` 偶尔返回坏读——它会把**每日免费额度读成 0**（付费池仍准确）。`fetchWallets` 现在有两层纠错：
 
-- **重试即恢复** → 用重试的结果（瞬时抖动，不标任何标记）
-- **重试仍是全 0** → 如实上报 0 并标 `retried: true`，经 `retriedAccounts` 汇总到界面
+1. **重试一次**（针对「三池全 0 + `active_wallets` 空」这种最明显的形态）：重试即恢复 → 用重试结果（瞬时抖动，不标任何标记）。
+2. **交叉验证**（2026-10-02 加，针对重试也没恢复、以及更隐蔽的形态）：只要 `daily` 读数为 0，就去 gateway 的 `account-context` 取 `quota.remaining`。它是**权威口径**且**恰好等于三池之和**（实测 `100 + (−4.8222) = 95.1778`），所以 `daily = remaining − monthly − longterm` 能还原出真实的每日额度。还原出的 daily > 0.005 就采用并标 `dailyCorrected: true`（经 `correctedAccounts` 汇总到界面，显示「已校正」而非「已用尽」）。
 
-为什么不是「一律当读失败」：真·额度耗尽时三池确实都是 0，那时显示 0 是**正确的**（历史上 95 条 `daily=0` 全部伴随付费池 >0，即免费扣完转扣付费；真·全耗尽还没遇到过，但不能因此认为它不可能）。重试是能同时容纳这两种情况的判据——**不要**改成「全 0 就报错」或「全 0 就沿用旧值」，前者会掩盖真实耗尽，后者会长期显示过期数字。离线验证：`node test/verify-qwen-wallets-zero.js`。
+**为什么触发条件从 `allZero` 放宽到「daily 读数为 0」**：账号 2 的坏读形态是「`daily=0` 但 `longterm` 为负」，三池不全是 0，**根本不进 `allZero` 分支**，却同样把每日额度显示成了 0——用户 2026-10-02 报的正是这个（界面显示「每日额度 0.00 积分」，而 `account-context` 报 `remaining=95.1778`）。只看 `allZero` 会漏掉它。
+
+**不能一律把 0 当读失败**：真·额度耗尽时三池确实都是 0，那时显示 0 是**正确的**（历史上 95 条 `daily=0` 全部伴随付费池 >0，即免费扣完转扣付费）。判据是「还原出的 daily > 0.005」——真耗尽时 `remaining` 也≈0，差值不 > 0.005，于是不校正、如实报 0 + `retried`。**不要**改成「读数为 0 就报错」或「读数为 0 就沿用旧值」，前者会掩盖真实耗尽，后者会长期显示过期数字。`account-context` 取不到（网络错/结构变了）时也不校正，回落成「如实报 0 + `retried`」，不编数字。离线验证：`node test/verify-qwen-wallets-zero.js`（含「谎报 0 被校正」「付费池为负时还原」「真耗尽不误判」「account-context 取不到则回落」四类）。
 
 **模型管理页的三条通道共用一套骨架，但账各自独立**（2026-09-29 对齐）。页面结构固定为「通道元信息行 → 模型信息表 → 该通道的额度卡 → 通道专有区块」：
 

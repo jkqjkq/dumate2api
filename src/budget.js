@@ -74,6 +74,13 @@ const TW_FLOOR = (() => {
 
 const DEFAULT_BUDGET = 32768;
 
+// Qoder 的输出预算下限。与千问/TRAE 同理：reasoning 与正文共用 max_tokens，
+// 小值会被 reasoning 吃光、正文为空。默认 16384（与 TRAE 一致，实测够用）。
+const QD_FLOOR = (() => {
+  const n = parseInt(process.env.DUMATE_QODER_MIN_MAX_TOKENS || '16384', 10);
+  return Number.isFinite(n) && n >= 0 ? n : 16384;
+})();
+
 function resolveMaxTokens(requested) {
   const n = Number(requested);
   let out = Number.isFinite(n) && n > 0 ? n : DEFAULT_BUDGET;
@@ -106,14 +113,28 @@ function resolveTraeworkMaxTokens(requested) {
   return out;
 }
 
+/**
+ * Qoder 的预算。与千问/TRAE 同一套逻辑（reasoning 与正文抢预算），
+ * 下限独立可配——**三通道各一套，不要互相套用**。
+ */
+function resolveQoderMaxTokens(requested) {
+  const n = Number(requested);
+  let out = Number.isFinite(n) && n > 0 ? n : DEFAULT_BUDGET;
+  if (QD_FLOOR > 0) out = Math.max(out, QD_FLOOR);
+  if (CEIL > 0) out = Math.min(out, CEIL);
+  return out;
+}
+
 module.exports = {
   resolveMaxTokens,
   resolveQwenMaxTokens,
   resolveTraeworkMaxTokens,
+  resolveQoderMaxTokens,
   FLOOR,
   QW_FLOOR,
   QW_DEFAULT,
   TW_FLOOR,
+  QD_FLOOR,
   CEIL,
   DEFAULT_BUDGET,
 };

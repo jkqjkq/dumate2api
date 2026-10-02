@@ -6,6 +6,9 @@
     <!-- ============ 千问办公：多账号池，凭证自持（可增删、可设主账号） ============ -->
     <QwenworkAccounts v-else-if="isQw" />
 
+    <!-- ============ Qoder：多账号池，凭证自持（device flow，不需要客户端） ============ -->
+    <QoderAccounts v-else-if="isQd" />
+
     <!-- ============ 百度搭子：原有页面 ============ -->
     <template v-else>
     <PageHeader title="账号管理" sub="网页凭证账号池：签到、抽奖、积分与模型轮询" />
@@ -494,15 +497,17 @@ import { computed, onMounted, reactive, ref, watch } from 'vue'
 import PageHeader from '@/components/PageHeader.vue'
 import { message } from 'ant-design-vue'
 import client from '@/api/client'
-import { channelStore, isTraework, isQwenwork } from '@/stores/channel'
+import { channelStore, isTraework, isQwenwork, isQoder } from '@/stores/channel'
 import TraeworkAccounts from '@/components/traework/TraeworkAccounts.vue'
 import QwenworkAccounts from '@/components/qwenwork/QwenworkAccounts.vue'
+import QoderAccounts from '@/components/qoder/QoderAccounts.vue'
 import type { WebAccount, AccountStatus, PoolData, PoolAccount } from '@/api/webaccounts'
 
 // 三条通道三种账号形态：搭子是网页凭证池、千问与 TRAE 都是凭证自持可增删。
 // 后两者的数据由各自的子组件自己拉（字段与搭子不同），这里只做分支。
 const isTw = computed(() => isTraework())
 const isQw = computed(() => isQwenwork())
+const isQd = computed(() => isQoder())
 
 const accounts = ref<WebAccount[]>([])
 const loginUrl = ref('')

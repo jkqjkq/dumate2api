@@ -123,9 +123,13 @@ function titleFor(id: string): string {
   if (!i) return ''
   if (!i.ready) return i.error || '不可用'
   if (i.kind === 'direct') {
-    const bits = [`直连`, `wasm ${i.wasm || '未知'}`]
+    // 千问有 wasm 依赖；Qoder/TRAE 没有（Qoder 签名纯本地）。
+    // 对没有 wasm 的通道显示「wasm 未知」是凭空报一个不存在的故障。
+    const bits = ['直连']
+    if (i.wasm) bits.push(`wasm ${i.wasm}`)
+    if (i.accounts != null && i.accounts > 0) bits.push(`${i.accounts} 个账号`)
     if (i.account) bits.push(i.account)
-    if (i.refreshExpired) bits.push('refresh token 已过期，需重开客户端登录')
+    if (i.refreshExpired) bits.push('refresh token 已过期，需重新登录')
     return bits.join(' · ')
   }
   return `端口 ${i.port || '—'}` + (i.managed ? ' · 自托管' : '')
