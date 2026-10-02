@@ -45,22 +45,63 @@ const S2C = (() => {
 })();
 
 /**
+ * 同上的查表，但用 Uint8Array 按 ASCII 码直索引。
+ *
+ * 热循环里对象属性查找比数组下标慢一个量级，而这个循环对**每个字节**都跑一次
+ * （一次请求几 MB），所以这里用码点直索引。0 表示「不在表内」（自定义字母表
+ * 里没有 NUL，可以安全当哨兵）。
+ */
+const S2C_TABLE = (() => {
+  const t = new Uint8Array(256);
+  for (let i = 0; i < 64; i++) t[STD_ALPHABET.charCodeAt(i)] = CUSTOM_ALPHABET.charCodeAt(i);
+  t['='.charCodeAt(0)] = CUSTOM_PAD.charCodeAt(0);
+  return t;
+})();
+
+/**
  * 自定义 base64 编码：先标准 base64，再把字符串按 1/3 处重排，最后换字母表。
  * 顺序不能改——重排与换表都对结果有影响。
+ *
+ * **性能是这里的第一约束（2026-10-03 修，曾导致网关「假死」）**：
+ * 原实现是 `let out=''; for(...) out += mapped;`。JS 字符串在 V8 里是**近似
+ * O(n²)** 的（每次增长都要复制整个串），再叠上 `std.slice()` 三段重排产生的
+ * 临时字符串，实测代价：
+ *
+ * | 输入 | 原实现 |
+ * |---|---|
+ * | 4 MB | 0.6 s |
+ * | 16 MB | 3.1 s |
+ * | 64 MB | **15.2 s** |
+ * | 128 MB | **4 GB heap OOM 崩溃** |
+ *
+ * 因为 `encode` 是**同步**的（在 `runOnce` 里直接调），它一慢就**阻塞整个事件
+ * 循环**：`/health` 也不响应、其他通道的请求全部排队。客户端表现为「一直转圈、
+ * 没有任何输出」，而网关进程 CPU 跑满却不崩——极难自查（我这次是靠
+ * `process._debugProcess` + inspector `Debugger.pause` 拿到调用栈才定位到）。
+ *
+ * 改法：**下标置换 + 预计算查表 + 一次性 Buffer**，全程 O(n)、无中间大字符串。
+ * 重排不再真的拼接字符串——它本质是纯下标置换（新串第 i 位 = 原串第 perm(i) 位），
+ * 直接算出源下标即可。
  */
 function encode(plaintext) {
   const std = Buffer.from(plaintext).toString('base64');
   const n = std.length;
+  if (n === 0) return '';
   const a = Math.floor(n / 3);
-  // 重排：末段 + 中段 + 首段
-  const rearranged = std.slice(n - a) + std.slice(a, n - a) + std.slice(0, a);
-  let out = '';
+  // rearranged = std[n-a:] + std[a:n-a] + std[0:a]
+  //   i < a            → 末段，源下标 n-a+i
+  //   a <= i < n-a     → 中段，源下标 i
+  //   i >= n-a         → 首段，源下标 i-(n-a)
+  const out = Buffer.allocUnsafe(n);
   for (let i = 0; i < n; i++) {
-    const mapped = S2C[rearranged[i]];
-    if (mapped === undefined) throw new Error(`qoder cosy: 字符不在字母表内 (${rearranged.charCodeAt(i)})`);
-    out += mapped;
+    const src = i < a ? n - a + i : (i < n - a ? i : i - (n - a));
+    const code = std.charCodeAt(src);
+    const mapped = S2C_TABLE[code];
+    if (mapped === 0) throw new Error(`qoder cosy: 字符不在字母表内 (${code})`);
+    out[i] = mapped;
   }
-  return out;
+  // latin1：字节 0-255 ↔ 字符 0-255，自定义字母表全是 ASCII，无损
+  return out.toString('latin1');
 }
 
 /**

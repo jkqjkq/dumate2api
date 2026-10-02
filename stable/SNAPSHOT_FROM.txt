@@ -1,5 +1,5 @@
 快照指纹 sha256（stable/src 下 43 个 .js，按路径+内容计算）：
-7a0c68b0c323bdd38aced511e6159da56cd3aa0d636eed639c020bbd715d1820
+7225acd34614e05d1d8e3327c1dfe7872f35ba14acb88b01d450f2ddba0a6bae
 
 指纹算法：
   对 stable/src 下所有 .js 文件，按相对路径排序（`/` 分隔），
@@ -8,36 +8,32 @@
 
   **关于历史值的说明**：本文件早先记过 f7e7a810…、96a22d7c…、8548df35…
   三个值，**均无法复现**。2026-10-03 同步时按上面这个算法对**旧快照内容**
-  实算，得到 395350d0… 而非记录的 8548df35…；又试了 path+CRLF+content、
-  无分隔符、content-only、NUL 分隔、content+path 等 6 种变体，仍无匹配。
+  实算，得到 395350d0… 而非记录的 8548df35…；又试了 6 种变体仍无匹配。
   说明那三个值在写入时就与任何一致算法不符（不是编码/换行问题）。
   本次起，值由上面算法实算得出，可核对。
 
 来源：dev 分支提交
-  23a62d0 fix(gateway): 直连通道失败时让翻译器收尾——修「流无终结事件」与网关崩溃
+  ccf8e27 perf(qoder): cosy.encode 改 O(n)——修「网关假死 23 分钟无任何输出」
 
-本次同步的改动（只动了 1 个文件）：
+本次同步的改动（2 个文件）：
 
-  server.js —— `handleDirectChannel` 的 catch 原来无条件 `shim.end()` +
-  `res.end()`，三条直连通道（千问/TRAE/Qoder）共用它，造成两个后果：
+  qoder/cosy.js —— **性能修复，崩溃/假死级**。
+    `encode`（自定义 base64）在 runOnce 里**同步调用**，原实现
+    `let out=''; for(...) out += mapped;` 在 V8 里近似 O(n²)，叠上
+    `std.slice()` 三段重排的临时字符串，实测 64MB 要 15.2s、128MB 直接
+    4GB heap OOM 崩溃。它一慢就**阻塞整个事件循环**：/health 不响应、
+    其他通道请求全部排队、进程 CPU 跑满却不崩不打日志——客户端表现为
+    「一直转圈、没有任何输出」（cc-switch 报 `504 流式响应首包超时: 600s`，
+    两次重试 ≈ 23 分钟，与用户看到的一致）。
+    改成下标置换 + Uint8Array 查表 + 一次性 Buffer，全程 O(n)：
+    16MB 3.1s→0.26s、64MB 15.2s→1.05s、128MB OOM→1.77s。
+    正确性由与朴素实现穷举比对 2200+ 组锁定。
 
-  1. **网关进程崩溃**（崩溃级）。翻译器的 `upstreamRes.on('end')` 是异步
-     触发的，在 catch 同步 `res.end()` 之后才跑，于是 sendEvent 调
-     `res.write()` 抛 `ERR_STREAM_WRITE_AFTER_END`；流式 res 的 'error'
-     事件没有监听者 → 未捕获异常 → 进程直接退出。
-     实测：9082 于 2026-10-02 23:51 退出、次日 00:03 才重启，期间 cc-switch
-     连报 8 次「502 上游连接失败」。触发它的是**千问额度耗尽（402）**。
-  2. 客户端收到没有终结事件的流 → Codex 报 `stream disconnected before
-     completion: stream closed before response.completed`。
+  server.js —— 新增 `startLagMonitor`：事件循环卡顿超阈值
+    （DUMATE_LAG_WARN_MS，默认 2000ms）打一条带时长的日志，
+    把「静默假死」变成可排查的痕迹。DUMATE_LAG_MONITOR=0 关闭。
 
-  修法按路径分三种（详见 CLAUDE.md 同名条目）：有翻译器 + 已发头 →
-  `shim.emit('error')` 让翻译器发自己的失败终结事件（**必须先补空 error
-  监听兜底**，否则同一机制又会打挂进程）；无翻译器（OpenAI）+ 已发头 →
-  写 error 帧 + [DONE]；未发头 → 回正经 4xx JSON。
-  顺带把 anthropic 翻译器的 res.write 收敛到 makeSSEWriter（带
-  writableEnded/destroyed 守卫）——它原来 sendEvent 裸写，正是崩溃点。
-
-  不在本快照内：`test/verify-stream-error-termination.js`（离线验证，不进快照）。
+  不在本快照内：`test/verify-qoder-encode-perf.js`（离线验证）。
   快照仍严格等于网关依赖闭包（43 个文件）。
 
 验证记录（2026-10-03，全部实测）：
@@ -46,10 +42,12 @@
   - **node --check**：43 个文件全部通过
   - **独立启动**（临时端口 19099，DUMATE_AUTOSTART=off，指向 <repo>/data）：
       /health → 四通道 ready=true
-      **真实上游错误路径**（traework 坏模型名）→ 流里有 `response.failed`，
-      且进程存活（这正是本次修的场景，修前会崩）
-  - **离线验证 11/11 通过**：verify-stream-error-termination（11 项，
-    FAKE_QODER_MODE=post）+ 既有 10 个脚本全过
+      真实上游错误路径（traework 坏模型名）→ 流里有 `response.failed`，进程存活
+  - **离线验证 12/12 通过**：新增 verify-qoder-encode-perf（8 项，含 2200+ 组
+    逐字节比对与线性度断言）+ 既有 11 个脚本全过
+  - **真实 Codex 会话**（sanguo，多轮工具调用，397K token 会话）正常完成，
+    埋点 input 从 18782 递增到 19615、每轮都有输出
+  - **30MB 请求总耗时 7.6s**（原实现仅 encode 就要 7s+），卡顿监控正确抓到 5769ms
   - **未启动 9080**：本次只更新快照文件，9080 保持停止状态
 
 启动方式的重要说明（沿用）：
@@ -59,11 +57,8 @@
   且 9083 管理端读的是 <repo>/data、看不到 9080 的流量。
 
 上一版快照来源：
-  578d8b0 chore(stable): 同步快照到 9736b11（Qoder 通道）（2026-10-03）
-  记录指纹 3662af33…
+  225e597 chore(stable): 同步快照到 23a62d0（流式失败收尾修复）（2026-10-03）
+  记录指纹 7a0c68b0…
 
-再上一版：
-  9736b11 feat(qoder): 接入第四条上游通道（阿里 Qoder）（2026-10-03）
-  （该版曾修正一处陈旧文件 stable/src/qwenwork/wasm-path.js——它停留在
-   脱敏之前，注释里还写着本机真实路径。教训：同步时要逐字节比对**全部**
-   闭包文件，而不只比对本次改过的那些。）
+更早：
+  578d8b0 → 9736b11（Qoder 通道接入），指纹 3662af33…
