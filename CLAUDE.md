@@ -87,6 +87,39 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 **Qoder 的 usage 直接返回 credits 消耗**（三条直连通道里唯一如此）：
 `usage.credits = price_factor × tokens/1000`，比千问（读余额差）和 TRAE（读 usage_summary）都干净。
 
+**`cosy.encode` 是同步的，它一慢就「假死」整个网关（2026-10-03 修，性能级）。**
+自定义 base64 编码在 `runOnce` 里**直接同步调用**，所以它的耗时会**阻塞事件循环**：
+期间 `/health` 不响应、其他通道的请求全部排队、进程 CPU 跑满却**不崩也不打日志**。
+客户端表现是「一直转圈、没有任何输出」（cc-switch 侧报
+`504 流式响应首包超时: 600s`，两次重试 ≈ 23 分钟，与用户看到的一致）。
+
+原实现是 `let out=''; for(...) out += mapped;`——V8 的字符串拼接近似 **O(n²)**，
+再叠上 `std.slice()` 三段重排的临时字符串。实测：
+
+| 输入 | 原实现 | 现实现 |
+|---|---|---|
+| 16 MB | 3.1 s | 0.26 s |
+| 64 MB | **15.2 s** | 1.05 s |
+| 128 MB | **4 GB heap OOM 崩溃** | 1.77 s |
+
+改法是**下标置换 + 预计算查表（Uint8Array 按码点直索引）+ 一次性 Buffer**，
+全程 O(n)、无中间大字符串——重排本质是纯下标置换（新串第 i 位 = 原串第 perm(i) 位），
+不必真的拼字符串。正确性由 `test/verify-qoder-encode-perf.js` 与朴素实现
+**穷举比对**（2200+ 组，含 len 0-400 × 5 种填充 + 随机字节）+ 固定向量锁定。
+
+**同类风险**：翻译层也有 `fullText += delta.content` 这类累积，但它们累积的是
+**模型输出**（KB 级），而 `encode` 处理的是**整个请求体**（Codex 一次能发几十 MB），
+量级差三个数量级——**不要把两者混为一谈，后者才是真瓶颈**。
+
+**排查这类「静默假死」的办法**：`node -e "process._debugProcess(<pid>)"` 打开
+inspector，再用 WebSocket 连 `:9229` 发 `Debugger.pause` 抓调用栈。
+**注意**：若阻塞发生在**原生代码**里（如 RSA/AES 或 GC），`pause` 会超时无响应——
+那本身就是「阻塞在 native」的信号。本次正是靠它抓到 `encode @ cosy.js`。
+
+**网关现在带事件循环卡顿监控**（`startLagMonitor`，`src/server.js`）：卡顿超过
+`DUMATE_LAG_WARN_MS`（默认 2000ms）就打一条带时长的日志。它不解决卡顿，
+但把「静默假死」变成「日志里有明确时间点」。`DUMATE_LAG_MONITOR=0` 关闭。
+
 **跨进程陷阱**：`model-info.js` 的 `qoderRows` **必须自己拉模型表**（`session.fetchModels`），
 不能只读 `setQoderModels` 写的快照——快照由网关进程写入，而 `/models/info` 跑在管理端进程，
 两者模块状态独立。TRAE 同理（`traeworkRows` 直接 `fetchModels`）。
@@ -554,6 +587,8 @@ Claude Code ── Anthropic ───────┼──→ 网关 :9080 ─�
 | `DUMATE_TRAEWORK_MODELS_CACHE_MS` | `300000` | TRAE 模型表缓存时长（5 分钟）。模型表只在登录/刷新时变，不必每次打上游 |
 | `DUMATE_WEB_FALLBACK` | 未设（开启） | 设 `0` 关闭「桌面凭证不可用时回落到网页池」（见上文回落机制）。关闭后桌面凭证失效即请求全失败 |
 | `DUMATE_POINTS_METER` | 未设（开启） | 设 `0` 关闭搭子的余额游标采集（`points-cursor.js`）。关闭后请求日志不再有逐条消耗 |
+| `DUMATE_LAG_MONITOR` | 未设（开启） | 设 `0` 关闭事件循环卡顿监控（`startLagMonitor`）。开启时同步代码卡顿超阈值会打日志 |
+| `DUMATE_LAG_WARN_MS` | `2000` | 卡顿监控的告警阈值（ms）。低于此值的 GC 停顿与大请求编码不报 |
 | `DUMATE_WEB_BASE` | `https://www.dumate.cn` | 搭子网页端基址。只在需要指向测试环境时改 |
 | `DUMATE_WEB_TIMEOUT` | `20000` | 搭子网页接口超时（ms）。**注意前端 axios 是 30s**，改大这里会让整页请求先超时 |
 | `DUMATE_GATEWAY_HOST` | `dumate-svc.baidu.com` | 网页凭证换模型 token 的目标主机。上游换域名时改这里 |

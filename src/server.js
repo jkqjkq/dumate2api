@@ -41,6 +41,39 @@ function log(...args) {
 }
 
 /**
+ * 事件循环卡顿监控。
+ *
+ * **为什么需要**：网关里所有重活都是**同步**的（签名编码、翻译层解析），
+ * 一段同步代码卡住就等于整个进程「假死」——`/health` 不响应、其他通道的
+ * 请求全部排队，而进程 CPU 跑满却不崩、**一行日志都不打**。客户端表现为
+ * 「一直转圈、没有任何输出」。2026-10-03 的 `cosy.encode` 就是这种
+ * （64MB 要 15s、128MB OOM；靠 `process._debugProcess` + inspector
+ * `Debugger.pause` 抓栈才定位到）。
+ *
+ * 这个探针用 setInterval 测「实际间隔 - 期望间隔」，卡顿超过阈值就打一条
+ * 带**时间戳与时长**的日志。它不解决卡顿，但把「静默假死」变成「日志里
+ * 有明确时间点与严重程度」——事后排查至少知道是哪一秒、卡了多久。
+ *
+ * 阈值取 2000ms：正常 GC 停顿与首个大请求的编码（几百 ms）都不报，
+ * 只有真正的秒级卡顿才落日志。`DUMATE_LAG_MONITOR=0` 关闭。
+ */
+function startLagMonitor() {
+  if (process.env.DUMATE_LAG_MONITOR === '0') return;
+  const EXPECTED = 1000;
+  const WARN_MS = parseInt(process.env.DUMATE_LAG_WARN_MS || '2000', 10);
+  let last = Date.now();
+  const timer = setInterval(() => {
+    const now = Date.now();
+    const lag = now - last - EXPECTED;
+    last = now;
+    if (lag >= WARN_MS) {
+      log(`⚠ 事件循环卡顿 ${lag}ms（同步代码阻塞，期间 /health 与其他通道请求都不响应）`);
+    }
+  }, EXPECTED);
+  if (timer.unref) timer.unref(); // 不因它而阻止进程退出
+}
+
+/**
  * 流式 SSE 的安全写入小工具（Anthropic 翻译器用；Responses 有等价的 send 守卫）。
  *
  * **存在的理由**：客户端中途断连、或上游出错后收尾逻辑仍想补发事件时，
@@ -1483,6 +1516,8 @@ async function start() {
 
   server.listen(PROXY_PORT, PROXY_HOST, () => {
     log(`✓ dumate2api listening on http://${PROXY_HOST}:${PROXY_PORT}`);
+    // 同步代码卡住时打日志，把「静默假死」变成可排查的痕迹（见函数注释）
+    startLagMonitor();
     log('');
     log('Endpoints:');
     log('  OpenAI:    http://127.0.0.1:' + PROXY_PORT + '/v1/chat/completions');
