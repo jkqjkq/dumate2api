@@ -33,7 +33,10 @@
           <a-tag v-if="isQw" color="cyan" class="ml-2">千问办公</a-tag>
           <a-tag v-else-if="isTw" color="purple" class="ml-2">TRAE Work</a-tag>
         </div>
-        <a-button type="primary" size="small" @click="openCreate">新建 Key</a-button>
+        <a-space>
+          <a-button size="small" @click="ccDlg?.openDialog()">配置到 cc-switch</a-button>
+          <a-button type="primary" size="small" @click="openCreate">新建 Key</a-button>
+        </a-space>
       </div>
 
       <!-- 直连通道下说明「key 与通道的关系」，否则用户会以为这里的 key 是通道专用的 -->
@@ -64,6 +67,7 @@
             <a-tag v-if="record.channel === 'qwenwork'" color="cyan">仅千问</a-tag>
             <a-tag v-else-if="record.channel === 'traework'" color="purple">仅 TRAE</a-tag>
             <a-tag v-else-if="record.channel === 'dumate'" color="blue">仅搭子</a-tag>
+            <a-tag v-else-if="record.channel === 'qoder'" color="geekblue">仅 Qoder</a-tag>
             <a-tag v-else color="default">不限</a-tag>
           </template>
           <template v-else-if="column.key === 'state'">
@@ -196,21 +200,25 @@
         <a-button @click="tokenOpen = false">我已保存</a-button>
       </div>
     </a-modal>
+
+    <CcSwitchDialog ref="ccDlg" />
   </div>
 </template>
 
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import PageHeader from '@/components/PageHeader.vue'
+import CcSwitchDialog from '@/components/CcSwitchDialog.vue'
 import { message } from 'ant-design-vue'
 import dayjs, { type Dayjs } from 'dayjs'
 import client from '@/api/client'
-import { channelStore, isTraework, isQwenwork, channelLabel } from '@/stores/channel'
+import { channelStore, isTraework, isQwenwork, isQoder, channelLabel } from '@/stores/channel'
 import type { ApiKey, KeysData } from '@/api/keys'
 
 const data = ref<KeysData | null>(null)
 const modelOptions = ref<Array<{ label: string; value: string }>>([])
 const modalOpen = ref(false)
+const ccDlg = ref<InstanceType<typeof CcSwitchDialog> | null>(null)
 const tokenOpen = ref(false)
 const newToken = ref('')
 const saving = ref(false)
@@ -218,23 +226,26 @@ const editing = ref<ApiKey | null>(null)
 const ipError = ref('')
 
 // 通道绑定选项。留空 = 不限（兼容已有 key）
+// 四条通道都要在列：Qoder 接入时这里漏过一次，表现是「key 没法只绑 Qoder」
 const channelOptions = [
   { label: '不限通道', value: '' },
   { label: '仅百度搭子', value: 'dumate' },
   { label: '仅千问办公', value: 'qwenwork' },
   { label: '仅 TRAE Work', value: 'traework' },
+  { label: '仅 Qoder', value: 'qoder' },
 ]
 
 // 千问与 TRAE 分开判定：两者都是直连，但前缀与额度体系不同，
 // 页面上的说明文案与默认绑定值都要各自对应
 const isTw = computed(() => isTraework())
 const isQw = computed(() => isQwenwork())
+const isQd = computed(() => isQoder())
 
 const form = reactive({
   name: '',
   ipText: '',
   models: [] as string[],
-  channel: '' as '' | 'dumate' | 'qwenwork' | 'traework',
+  channel: '' as '' | 'dumate' | 'qwenwork' | 'traework' | 'qoder',
   expiresAt: null as Dayjs | null,
   note: '',
 })
@@ -271,7 +282,7 @@ const ipList = computed(() =>
 async function load() {
   // 按通道过滤：切到千问/TRAE 时只看与该通道相关的 key
   // （channel 绑定为该通道，或未限定通道的通用 key）
-  const q = isQw.value ? '?channel=qwenwork' : isTw.value ? '?channel=traework' : ''
+  const q = isQw.value ? '?channel=qwenwork' : isTw.value ? '?channel=traework' : isQd.value ? '?channel=qoder' : ''
   const { data: d } = await client.get('/keys' + q)
   data.value = d
   try {
@@ -287,7 +298,7 @@ function openCreate() {
   form.models = []
   // 在千问/TRAE 通道下新建，默认绑定到该通道——用户在这一页点「新建」，
   // 想要的显然是能调该通道模型的 key
-  form.channel = isQw.value ? 'qwenwork' : isTw.value ? 'traework' : ''
+  form.channel = isQw.value ? 'qwenwork' : isTw.value ? 'traework' : isQd.value ? 'qoder' : ''
   form.expiresAt = null
   form.note = ''
   ipError.value = ''
@@ -299,7 +310,7 @@ function openEdit(k: ApiKey) {
   form.name = k.name
   form.ipText = k.ip_allowlist.join('\n')
   form.models = [...k.model_allowlist]
-  form.channel = (k.channel || '') as '' | 'dumate' | 'qwenwork' | 'traework'
+  form.channel = (k.channel || '') as '' | 'dumate' | 'qwenwork' | 'traework' | 'qoder'
   form.expiresAt = k.expires_at ? dayjs(k.expires_at) : null
   form.note = k.note || ''
   ipError.value = ''

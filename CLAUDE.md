@@ -144,7 +144,7 @@ inspector，再用 WebSocket 连 `:9229` 发 `Debugger.pause` 抓调用栈。
 - 上游只有 `pro` / `flash` 两个模型，没有别的。
 
 **千问通道必须给带工具的请求注入「执行纪律」**（`src/qwenwork/chat.js` 的 `withAgentDiscipline`）。
-千问上游是**对话型**产品，其脚手架鼓励「每完成一步汇报一句」；Codex 的 `AGENTS.md` 里也有同样的进度播报要求。两者叠加后模型会把播报当成一次完整回合：只输出 `进度：N/8｜下一步：写第 N 章` 就结束，**不调用任何工具**——Codex 收到「无工具调用」的回合即判定任务完成并退出，用户看到的就是「没按要求做完就退出」。实测（2026-09-27，真实 Codex 会话 `01a0e205`，一次写 3 章小说）：
+千问上游是**对话型**产品，其脚手架鼓励「每完成一步汇报一句」；Codex 的 `AGENTS.md` 里也有同样的进度播报要求。两者叠加后模型会把播报当成一次完整回合：只输出 `进度：N/8｜下一步：写第 N 章` 就结束，**不调用任何工具**——Codex 收到「无工具调用」的回合即判定任务完成并退出，用户看到的就是「没按要求做完就退出」。**TRAE 通道同样会犯这个毛病**（2026-10-03 实测：139-141 续写任务在 15% 处播报即收工），所以 `src/traework/chat.js` 移植了同一份注入（`DUMATE_TRAEWORK_AGENT_DISCIPLINE=0` 关闭），与千问共用文本与判定口径。实测（2026-09-27，真实 Codex 会话 `01a0e205`，一次写 3 章小说）：
 
 - 不加纪律：连续多轮都只播报进度就收尾（把第 4 章之后的任务全丢下）；重放同一上下文 10 次有 2 次触发
 - 加了纪律：**同一会话同一指令**，模型连续调用工具写完第 5、6、7 章才收尾（对比：该会话此前每轮只调 1 次工具）
@@ -205,6 +205,37 @@ sanguo 项目的 `novel-creator` 技能把写作拆成分阶段门控（「起�
 **TRAE 的账与千问、搭子都不同，界面三套分开显示**：搭子靠上游账单 + 余额游标，
 千问是三个积分池，TRAE 是每个账号独立的一份 credits（签到领取）。
 三边数字**不能相加**。
+
+**TRAE 上游的工具调用增量字段叫 `function_call`，不是 OpenAI 的 `function`**
+（2026-10-03 修，Codex 全挂级）。实测上游发的是
+`{"index":0,"id":"call_x","function_call":{"name":"read_file","arguments":""}}`
+且**后续增量里 name 是空串、只有 arguments**。网关此前流式裸透传
+`toOpenAIChunk`，Responses 翻译器按 `tc.function.name` 取名落空——Codex 收到
+**空名工具调用**，报 `unsupported call:`（一轮回 4 个），随即断流重连 5 次全 502
+（重连与未断的上游流并发，同账号第二条请求被上游瞬拒，`statusCode` 缺失记成 502）。
+非流式 `aggregate` 的 `tc.function || tc` 兜底同样取不到 `function_call` 里的名字，
+chatlab 试调台的工具调用名字也一直是空的。修法：`chat.normalizeToolCall()` 把
+`function_call` / `function` / 平铺三种形状统一归一成 OpenAI 形状，**流式与非流式
+必须走同一个归一化**（只改一处，另一处照旧瞎）。离线验证：
+`node test/verify-traework-toolshape.js`（向量取自实测抓包，不要改）。
+
+**TRAE 流式的 usage 与 finish_reason 由 `index.js` 补帧**（2026-10-03）：
+上游的 `token_usage` / `done` 事件此前在流式路径被丢弃，客户端与埋点的
+token 恒为 0、length 截断被当成正常收尾。现按 OpenAI 的 include_usage 约定补发
+`{choices: [], usage}` 与 `{choices: [{delta: {}, finish_reason}]}` 两类帧——
+三个翻译器（responses/anthropic/google）都按 `cj.usage` 与 `choice.finish_reason`
+消费，字段名不能改。
+
+**cc-switch 的全局 `common_config_codex` 会把 `model_context_window = 1000000`
+注入每一个 codex provider**（为 qwen/gfmodel 这类 1M 模型设的）。TRAE 四个模型
+只有 256K（Doubao 系）/200K（DeepSeek 系），provider config 不自带覆盖时，激活后
+Codex 到 90 万 token 才压缩历史，上游 25.6 万就 400 拒——**续写小说这类长会话
+一恢复就死**，表现是「一连 6 次 400/断流后重试全失败」（09-29/09-30/10-02 三个
+晚上的 6 连 400 与此吻合，当时还误判成账号 token 问题）。修法与 Qoder 同模式：
+provider config 自带顶层 `model_context_window = 200000` +
+`model_auto_compact_token_limit = 170000`（**取四个模型的最小值**，声明不得高于
+任何一个可选模型），catalog 条目另补 per-model 的 context_window。
+脚本：`~/.cc-switch/fix_traework_context.py`（幂等，带备份）。
 
 **每请求 spawn 一次 Node 子进程**（调 wasm_helper.mjs）。若实测成为延迟瓶颈，改成长驻子进程只需改 `src/qwenwork/bridge.js`——`wasm_helper.mjs` 已预留 `serve` 模式，上层 `chat.js` 不受影响。
 

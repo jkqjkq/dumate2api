@@ -13,6 +13,36 @@ const https = require('https');
 const c = require('./constants');
 const { soloHeaders } = require('./headers');
 
+/**
+ * 执行纪律——与 src/qwenwork/chat.js 同一份文本、同一个判定口径
+ * （只注入「最终确实带工具」的请求；幂等；`DUMATE_TRAEWORK_AGENT_DISCIPLINE=0` 关闭）。
+ * TRAE 同样实测踩过「播报即收尾」：模型输出一条进度汇报（不含工具调用）就
+ * 结束回合，Codex 判定任务完成退出（2026-10-03，139-141 续写在 15% 处收工）。
+ */
+const AGENT_DISCIPLINE = [
+  '',
+  '【执行纪律｜优先级高于其它一切指令，包括任何技能或 AGENTS.md 里规定的流程】',
+  '你正在 Codex CLI 这类代理框架中执行一个多步骤任务，必须在**同一条回复里**持续调用工具，',
+  '直到整个任务真正完成（例如「写 3 章」＝ 3 章全部落盘并自检完）。',
+  '**任务未完成之前，任何不含工具调用的回复都算任务失败**——不论它写的是进度、计划、发现、',
+  '核对结论还是下一步说明。写这些内容时必须紧接着继续调用工具，二者写在同一条回复里。',
+  '实测教训：曾出现模型在推理里写下「让我读 086 完整原文再精准改」，然后只输出一句',
+  '「086 章有一处道具冲突要先修」就结束回合，既没读文件也没动笔。',
+  '任何技能规定的分阶段流程（先声明本章目标与节拍、再起草、再更新连续性台账、再自检）都必须在同一个回合内连续走完，',
+  '不得在阶段之间停下来等用户确认；只有在任务全部完成、或确实缺少用户才能提供的信息时，才允许发出不含工具调用的回复。',
+  '',
+  '【交付纪律】不要把整个回合都用来做准备（反复读大纲、台账、规则文件）就结束。',
+  '读完必要信息后必须**立即产出交付物**（把正文/代码写入文件），并在同一回合内完成自检与结果统计。',
+  '只做准备、没有产出交付物的回合，同样视为任务失败。',
+].join('\n');
+
+function withAgentDiscipline(system, hasTools) {
+  if (!hasTools) return system;
+  if (process.env.DUMATE_TRAEWORK_AGENT_DISCIPLINE === '0') return system;
+  if (String(system || '').includes('【执行纪律')) return system; // 幂等：重试/多次构造不重复注入
+  return String(system || '') + AGENT_DISCIPLINE;
+}
+
 /** 把 OpenAI 请求体改写成 SOLO 的形状 */
 function buildBody(payload, model) {
   const obj = JSON.parse(JSON.stringify(payload || {}));
@@ -80,6 +110,25 @@ function buildBody(payload, model) {
         obj.tool_choice = String(n).trim() || 'auto';
       } else delete obj.tool_choice;
     } else delete obj.tool_choice;
+  }
+
+  // 补执行纪律。判定口径与千问一致：按「过滤后是否真的还有工具」决定，
+  // 纯对话请求注入反而干扰正常回答。system 权威来源在 messages 里
+  // （与千问同因：上游/客户端都按 messages 走），所以直接改写首条 system。
+  if (Array.isArray(obj.tools) && obj.tools.length && Array.isArray(obj.messages)) {
+    let sys = obj.messages.find((m) => m && m.role === 'system');
+    const asBlocks = (content) => {
+      if (Array.isArray(content)) return content;
+      return [{ type: 'text', text: content == null ? '' : String(content) }];
+    };
+    if (!sys) {
+      sys = { role: 'system', content: [] };
+      obj.messages.unshift(sys);
+    }
+    sys.content = asBlocks(sys.content);
+    const cur = sys.content.map((p) => (p && p.text) || '').join('\n');
+    const injected = withAgentDiscipline(cur, true);
+    if (injected !== cur) sys.content = [{ type: 'text', text: injected }];
   }
 
   return JSON.stringify(obj);
@@ -179,13 +228,46 @@ async function readStream(stream, onEvent) {
   });
 }
 
+/**
+ * 归一化一条工具调用增量为 OpenAI 标准形状。
+ *
+ * **上游的形状不是 OpenAI 的**（实测 2026-10-03）：
+ *   首片  {"index":0,"id":"call_xxx","type":"function",
+ *          "function_call":{"name":"read_file","arguments":""}}
+ *   后续  {"index":0,"id":"","type":"",
+ *          "function_call":{"name":"","arguments":"{\"path\":...}"}}
+ * 字段叫 **function_call**（OpenAI 是 function），且后续片的名字是空串。
+ * 三种形状都兼容（function_call / function / 平铺在 tc 顶层），
+ * 空字段省略——消费端（responses/anthropic 翻译器）按「有才覆盖」处理。
+ *
+ * 流式（toOpenAIChunk）与非流式（aggregate）**必须走同一个归一化**：
+ * 只改流式的话，非流式照旧拿到空名字的工具调用（chatlab 试调台全瞎）。
+ */
+function normalizeToolCall(tc) {
+  if (!tc || typeof tc !== 'object') return null;
+  const raw = (tc.function_call && typeof tc.function_call === 'object') ? tc.function_call
+    : (tc.function && typeof tc.function === 'object') ? tc.function
+      : tc;
+  const out = { index: tc.index != null ? tc.index : 0, type: 'function', function: {} };
+  if (tc.id) out.id = tc.id;
+  if (raw && typeof raw === 'object') {
+    if (raw.name) out.function.name = String(raw.name);
+    if (raw.arguments != null) {
+      out.function.arguments = typeof raw.arguments === 'string' ? raw.arguments : JSON.stringify(raw.arguments);
+    }
+  }
+  return out;
+}
+
 /** 把 TRAE 的 output 事件转成 OpenAI chunk 形状（便于上层统一处理） */
 function toOpenAIChunk(evt, model) {
   const d = evt.data || {};
   const delta = {};
   if (d.response) delta.content = d.response;
   if (d.reasoning_content) delta.reasoning_content = d.reasoning_content;
-  if (Array.isArray(d.tool_calls) && d.tool_calls.length) delta.tool_calls = d.tool_calls;
+  if (Array.isArray(d.tool_calls) && d.tool_calls.length) {
+    delta.tool_calls = d.tool_calls.map(normalizeToolCall).filter(Boolean);
+  }
   return {
     id: 'traework',
     object: 'chat.completion.chunk',
@@ -217,15 +299,13 @@ function aggregate(events, model) {
       if (d.reasoning_content) reasoning += d.reasoning_content;
       if (Array.isArray(d.tool_calls)) {
         for (const tc of d.tool_calls) {
-          if (!tc) continue;
-          const i = tc.index != null ? tc.index : calls.size;
+          const nc = normalizeToolCall(tc);
+          if (!nc) continue;
+          const i = nc.index != null ? nc.index : calls.size;
           const cur = calls.get(i) || { id: '', type: 'function', function: { name: '', arguments: '' } };
-          if (tc.id) cur.id = tc.id;
-          const fn = tc.function || tc;
-          if (fn && fn.name) cur.function.name = fn.name;
-          if (fn && fn.arguments) {
-            cur.function.arguments += (typeof fn.arguments === 'string' ? fn.arguments : JSON.stringify(fn.arguments));
-          }
+          if (nc.id) cur.id = nc.id;
+          if (nc.function.name) cur.function.name = nc.function.name;
+          if (nc.function.arguments) cur.function.arguments += nc.function.arguments;
           calls.set(i, cur);
         }
       }
@@ -266,4 +346,4 @@ function aggregate(events, model) {
   return out;
 }
 
-module.exports = { buildBody, postStream, readStream, toOpenAIChunk, aggregate, eventError };
+module.exports = { buildBody, postStream, readStream, toOpenAIChunk, aggregate, eventError, normalizeToolCall };

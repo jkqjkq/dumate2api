@@ -159,7 +159,7 @@ import {
   ExclamationCircleOutlined, CommentOutlined,
 } from '@ant-design/icons-vue'
 import client from '@/api/client'
-import { channelStore, CHANNELS } from '@/stores/channel'
+import { channelStore, CHANNELS, isDirectChannel } from '@/stores/channel'
 import { qwenworkApi as qwenApi } from '@/api/qwenwork'
 import { traeworkApi } from '@/api/traework'
 import type { ChatLabModels } from '@/api/chatlab'
@@ -293,8 +293,10 @@ async function loadModels() {
   try {
     const { data } = await client.get('/chatlab/models')
     models.value = data
-    // 只在搭子通道下补默认值——直连通道的模型名不带前缀会跑到搭子上
-    if (!model.value && labChannel.value !== 'qwenwork' && labChannel.value !== 'traework') {
+    // 只在搭子通道下补默认值——直连通道的模型名不带前缀会跑到搭子上。
+    // 用 isDirectChannel() 而不是逐个比对 id：Qoder 接入时这里漏过一次
+    // （判定只写了 qwenwork / traework），漏了会把 Qoder 当搭子补默认值。
+    if (!model.value && !isDirectChannel(labChannel.value)) {
       model.value = data.exposed?.[0]?.id || data.aliases?.[0]?.id || ''
     }
   } finally {

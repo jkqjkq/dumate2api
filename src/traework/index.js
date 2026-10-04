@@ -122,6 +122,28 @@ async function send(payload, onChunk, opts = {}) {
     // 流式：把 output 事件转成 OpenAI chunk 形状回调出去
     if (onChunk && evt.event === 'output') {
       onChunk(JSON.stringify(chat.toOpenAIChunk(evt, model)));
+    } else if (onChunk && evt.event === 'token_usage') {
+      // 用量帧按 OpenAI 的 include_usage 约定补发（choices 空数组 + usage）。
+      // 不补的话，流式请求在客户端与埋点里 token 恒为 0，
+      // 「这轮花了多少」就再也对不上账。
+      const d = evt.data || {};
+      onChunk(JSON.stringify({
+        id: 'traework', object: 'chat.completion.chunk', created: Math.floor(Date.now() / 1000), model,
+        choices: [],
+        usage: {
+          prompt_tokens: d.prompt_tokens || 0,
+          completion_tokens: d.completion_tokens || 0,
+          total_tokens: d.total_tokens || 0,
+          completion_tokens_details: { reasoning_tokens: d.reasoning_tokens || 0 },
+        },
+      }));
+    } else if (onChunk && evt.event === 'done' && evt.data && evt.data.finish_reason) {
+      // 终止原因按 OpenAI 约定补一帧。翻译器靠它判 completed/length——
+      // 不补的话 length 截断会被当成正常收尾，客户端无从察觉。
+      onChunk(JSON.stringify({
+        id: 'traework', object: 'chat.completion.chunk', created: Math.floor(Date.now() / 1000), model,
+        choices: [{ index: 0, delta: {}, finish_reason: evt.data.finish_reason }],
+      }));
     }
   });
   settle();

@@ -152,7 +152,7 @@ import type { ModelFieldSource, ModelInfoRow } from '@/api/modelinfo'
 
 const props = defineProps<{
   /** 要看哪条通道。缺省跟随当前通道 */
-  channel: 'dumate' | 'qwenwork' | 'traework'
+  channel: 'dumate' | 'qwenwork' | 'traework' | 'qoder'
   /** 外部传入的数据（模型页已按通道拉过时可复用，避免重复请求） */
   preloaded?: ModelInfoRow[] | null
 }>()

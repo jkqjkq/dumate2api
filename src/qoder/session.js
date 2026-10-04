@@ -48,10 +48,23 @@ function bearerHeaders(token, extra) {
  * 据此排序/标注——**开发调试要挑 0.1 档**（档位差 14 倍）。
  */
 const MODELS_CACHE_MS = parseInt(process.env.DUMATE_QODER_MODELS_CACHE_MS || '300000', 10);
-let modelsCache = { at: 0, data: null };
+// 缓存按「区域 + 账号」隔离。原先是一个模块级单例，两个后果都是实测踩到的：
+//   1. **多账号互相串表**：preferred 账号只返回 2 个模型、另一个账号返回 14 个，
+//      先查谁，后面所有账号都拿到那份表（「配置到 cc-switch」里 Qoder 只列出
+//      2 个模型就是这个原因）。
+//   2. **cn / global 跨区串表**：两个区域的模型集本来就不同（账号也不通用）。
+const modelsCache = new Map(); // `${region}:${uid}` -> { at, data }
+
+function modelsCacheKey(account) {
+  const region = c.normalizeRegion(account && account.region);
+  const who = (account && (account.uid || account.id)) || '';
+  return `${region}:${who}`;
+}
 
 async function fetchModels(account, { force = false } = {}) {
-  if (!force && modelsCache.data && Date.now() - modelsCache.at < MODELS_CACHE_MS) return modelsCache.data;
+  const ck = modelsCacheKey(account);
+  const hit = modelsCache.get(ck);
+  if (!force && hit && Date.now() - hit.at < MODELS_CACHE_MS) return hit.data;
   const cosy = require('./cosy');
   const region = c.normalizeRegion(account.region);
   const ep = c.endpointsOf(region);
@@ -95,7 +108,7 @@ async function fetchModels(account, { force = false } = {}) {
     cheap: typeof m.price_factor === 'number' && m.price_factor <= 0.1,
   }));
   const out = { ok: true, error: '', models };
-  if (models.length) modelsCache = { at: Date.now(), data: out };
+  if (models.length) modelsCache.set(ck, { at: Date.now(), data: out });
   return out;
 }
 

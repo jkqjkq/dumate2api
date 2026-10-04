@@ -1036,13 +1036,10 @@ async function handleAnthropicMessages(req, res) {
   const info = reqlog.describeRequest(anthropicReq);
   req._logPath = '/v1/messages';
 
-  // Convert to OpenAI format
-  const openaiReq = anthropicToOpenAI(anthropicReq);
-  req._mappedModel = openaiReq.model;
-
-  // 通道分流：与 chat 路径同一套规则，且必须在转换之后——Anthropic 请求体
-  // 的模型名在这里才落到 openaiReq.model 上。
-  const route = router.resolve(openaiReq.model);
+  // 通道分流**必须在转换之前**：工具模式按通道选（直连通道转发结构化工具、
+  // 搭子保持文本降级），而模式要在调用转换时就定下来。模型名直接取
+  // anthropicReq.model——转换不会改它（映射在下面的 needsModelMap 分支里做）。
+  const route = router.resolve(anthropicReq.model);
   if (route.error) {
     return sendJSON(res, 400, { type: 'error', error: { type: 'invalid_request_error', message: route.error } });
   }
@@ -1051,6 +1048,14 @@ async function handleAnthropicMessages(req, res) {
     return sendJSON(res, 503, { type: 'error', error: { type: 'api_error', message: `channel ${route.channel} unavailable: ${avail.reason}` } });
   }
   req._channel = route.channel;
+
+  // Convert to OpenAI format。直连通道开 nativeTools：不开的话 Anthropic 的
+  // tools 会被整段丢弃，模型收不到工具定义，只能在正文里吐 `<seed:tool_call>`
+  // 文本式调用——Claude Code 拿不到 tool_use 块，直接判定回合结束
+  // （表现为「很快就输出、任务没做」）。搭子（needsModelMap）保持文本降级，
+  // 它的上游确实不支持 function calling，这是能力边界不是缺陷。
+  const openaiReq = anthropicToOpenAI(anthropicReq, { nativeTools: !route.target.needsModelMap });
+  req._mappedModel = openaiReq.model;
 
   if (route.target.needsModelMap) {
     openaiReq.model = mapModel(route.model);
@@ -1138,6 +1143,14 @@ function translateStreamToAnthropic(upstreamRes, res, originalModel, onDone) {
   let inputTokens = 0;
   let outputTokens = 0;
   let lastFinishReason = null;
+  // 工具调用缓冲。**刻意缓冲到流末再发**，两个理由：
+  //   1. Anthropic 的 content block 是**顺序**的（必须关掉前一个才能开下一个），
+  //      而上游的多个 tool_call 增量会按 index 交错到达。实时发块会让「往已关闭
+  //      的块写 delta」必然发生。
+  //   2. content_block_start 一旦发出就不能改 name，而实测上游的后续增量帧
+  //      name 是空串、只有首帧带名。缓冲后流末一定拿得到名字。
+  // 代价是工具调用不「流式」——它本身只有几十到几百 token，延迟可忽略。
+  const toolBuf = new Map(); // tool_call index -> { id, name, args }
 
   upstreamRes.on('data', (chunk) => {
     buffer += decoder.write(chunk);
@@ -1202,6 +1215,24 @@ function translateStreamToAnthropic(upstreamRes, res, originalModel, onDone) {
           });
         }
 
+        // 工具调用增量：只累积，流末统一发块（理由见 toolBuf 的声明处注释）。
+        // 三种形状都认：OpenAI 的 function.name、TRAE 上游原生的 function_call.name、
+        // 以及平铺在 tc 顶层的 name——直连通道的归一化程度不一，这里兜住。
+        if (Array.isArray(delta.tool_calls) && delta.tool_calls.length) {
+          for (const tc of delta.tool_calls) {
+            const ti = tc.index != null ? tc.index : 0;
+            let entry = toolBuf.get(ti);
+            if (!entry) { entry = { id: '', name: '', args: '' }; toolBuf.set(ti, entry); }
+            if (tc.id) entry.id = tc.id;
+            const nm = (tc.function && tc.function.name)
+              || (tc.function_call && tc.function_call.name) || tc.name || '';
+            if (nm) entry.name = nm;
+            const args = (tc.function && tc.function.arguments)
+              || (tc.function_call && tc.function_call.arguments) || tc.arguments || '';
+            if (args) entry.args += args;
+          }
+        }
+
         // Finish reason
         const finishReason = chunk.choices && chunk.choices[0] && chunk.choices[0].finish_reason;
         if (finishReason) lastFinishReason = finishReason;
@@ -1217,7 +1248,9 @@ function translateStreamToAnthropic(upstreamRes, res, originalModel, onDone) {
       sendEvent('content_block_stop', { type: 'content_block_stop', index: blockIndex });
     }
     // If no content was generated, add an empty text block
-    if (!hasText && blockIndex < 0) {
+    // （有工具调用时不补：那会让客户端先看到一个空 text 块，
+    //   某些实现据此判定「模型只是说了句空话」）
+    if (!hasText && blockIndex < 0 && !toolBuf.size) {
       sendEvent('content_block_start', {
         type: 'content_block_start',
         index: 0,
@@ -1230,9 +1263,47 @@ function translateStreamToAnthropic(upstreamRes, res, originalModel, onDone) {
       });
       sendEvent('content_block_stop', { type: 'content_block_stop', index: 0 });
     }
+    // 工具块：按 index 顺序依次发 start + 完整 input_json_delta + stop。
+    // 用 input_json_delta 而不是直接在 start 里塞 input——前者是各家客户端
+    // 实现都吃的最标准形状。
+    const toolEntries = [...toolBuf.entries()].sort((a, b) => a[0] - b[0]);
+    let sentToolUse = false;
+    for (const [, t] of toolEntries) {
+      if (!t.name) {
+        // 上游没给工具名：发出去客户端只会报 unknown tool，所以不发——
+        // 但必须留痕，静默丢弃是最难排查的那种。
+        console.warn('[anthropic] 丢弃一个没有名字的工具调用（上游未给 name）');
+        continue;
+      }
+      blockIndex++;
+      sendEvent('content_block_start', {
+        type: 'content_block_start',
+        index: blockIndex,
+        content_block: {
+          type: 'tool_use',
+          id: t.id || ('toolu_' + Math.random().toString(36).slice(2, 10)),
+          name: t.name,
+          input: {},
+        },
+      });
+      sendEvent('content_block_delta', {
+        type: 'content_block_delta',
+        index: blockIndex,
+        delta: { type: 'input_json_delta', partial_json: t.args || '{}' },
+      });
+      sendEvent('content_block_stop', { type: 'content_block_stop', index: blockIndex });
+      sentToolUse = true;
+    }
+    // stop_reason：有工具调用**必须**是 tool_use，不能照搬上游的 finish_reason。
+    // 实测 TRAE 在给出 tool_calls 的同时报的是 `stop`，照搬会被翻成 end_turn，
+    // 而 Claude Code 看到 end_turn 就认为回合正常结束、**不去执行工具**——
+    // 表现为「模型说要调工具，但什么都没发生」。
     sendEvent('message_delta', {
       type: 'message_delta',
-      delta: { stop_reason: mapFinishReason(lastFinishReason), stop_sequence: null },
+      delta: {
+        stop_reason: sentToolUse ? 'tool_use' : mapFinishReason(lastFinishReason),
+        stop_sequence: null,
+      },
       usage: { input_tokens: inputTokens, output_tokens: outputTokens }
     });
     sendEvent('message_stop', { type: 'message_stop' });

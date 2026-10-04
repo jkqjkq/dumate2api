@@ -9,7 +9,7 @@ export interface ModelInfoRow {
   name: string
   /** 调用时用的全名（带通道前缀） */
   prefixed: string
-  channel: 'dumate' | 'qwenwork' | 'traework'
+  channel: 'dumate' | 'qwenwork' | 'traework' | 'qoder'
   /** 上游原生名字（非别名） */
   native: boolean
   /** 别名指向的目标 */

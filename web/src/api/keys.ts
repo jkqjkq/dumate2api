@@ -8,7 +8,7 @@ export interface ApiKey {
   ip_allowlist: string[]
   model_allowlist: string[]
   /** 通道绑定：'' = 不限；设了就只允许走该通道的模型 */
-  channel?: '' | 'dumate' | 'qwenwork'
+  channel?: '' | 'dumate' | 'qwenwork' | 'traework' | 'qoder'
   note: string
   usage: {
     requests: number
