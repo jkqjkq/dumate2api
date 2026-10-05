@@ -67,6 +67,17 @@ function attachTwCredits(rows) {
 }
 
 /**
+ * 给 Qoder 通道的行附上真实消耗与**实际使用的账号**。
+ *
+ * 与千问/TRAE 同样按 req_id 配对，但**不做游标差值**：Qoder 的 usage 直接
+ * 返回本条请求的 credits，是三条直连通道里唯一能精确归因单条请求的。
+ * 所以每条独立有值（首条也有），也不标并发。
+ */
+function attachQoderCredits(rows) {
+  return require('../../qoder/credits').attachCosts(rows);
+}
+
+/**
  * 摘掉直连通道行上的搭子余额游标字段。
  *
  * points-cursor 的差值来自**搭子账号**的余额，对直连通道没有意义。
@@ -117,9 +128,9 @@ const routes = [
         // 附上实测扣费（余额差）。没有游标的行如实留空——
         // 第一条请求没有参照点，补 0 会被读成「这条没花钱」
         // 千问/TRAE 的行另按 req_id 附各自的积分明细（三套账，见上面两个 attach）
-        rows: attachTwCredits(attachQwCredits(
+        rows: attachQoderCredits(attachTwCredits(attachQwCredits(
           stripDumateCursor(pointsCursor.attachCosts(rows, allInWindow)),
-        )),
+        ))),
         total,
         limit,
         offset,
@@ -217,9 +228,9 @@ const routes = [
       // 传全量行，并发判定才准（详情页同样要标出「差值可能含别人消耗」）。
       // 与列表接口走**同一条 attach 链**：少一环就会出现「列表显示 TRAE 消耗、
       // 点进详情却是搭子的游标差」这种自相矛盾
-      const [withCost] = attachTwCredits(attachQwCredits(
+      const [withCost] = attachQoderCredits(attachTwCredits(attachQwCredits(
         stripDumateCursor(pointsCursor.attachCosts([row], rows)),
-      ));
+      )));
       return sendJSON(res, 200, withCost);
     },
   },

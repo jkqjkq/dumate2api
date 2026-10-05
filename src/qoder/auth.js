@@ -11,6 +11,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const c = require('./constants');
+const { explainError } = require('../errtext');
 
 const FILE = 'qoder-accounts.json';
 
@@ -46,11 +47,33 @@ function save(data) {
   return data;
 }
 
-/** 手机号脱敏：认号够用，又不把完整号码裸在页面上 */
+/**
+ * 手机号脱敏：157****1251。
+ *
+ * 与千问/TRAE **同一份实现**（口径必须一致：三条通道的账号卡会并排看，
+ * 「861****」和「157****」混着出现会让人以为是两个不同的号）。
+ *
+ * 号码是 PII，列表接口一律只给脱敏形式——认号用「前缀 + 后 4 位」足够了。
+ * Qoder 更进一步：**连账号文件里也只存脱敏值**（见 login.js 的 finish），
+ * 因为没有任何场景需要完整号码，存明文等于白担一份泄露风险。
+ */
 function maskPhone(p) {
-  const s = String(p || '');
-  if (s.length < 7) return s ? '***' : '';
-  return `${s.slice(0, 3)}****${s.slice(-4)}`;
+  const s = String(p || '').trim();
+  if (!s) return '';
+  const plus = s.startsWith('+') ? '+' : '';
+  const digits = s.replace(/^\+/, '');
+  // 先剥国家码再脱敏。国内号是 86 + 11 位，不剥的话切出来会是「861****」
+  // 而不是「157****」——认号时要的是本机号的前 3 位。
+  let body = digits;
+  let cc = '';
+  if (digits.length === 13 && digits.startsWith('86')) {
+    cc = '86';
+    body = digits.slice(2);
+  }
+  if (body.length >= 7) {
+    return `${plus}${cc}${body.slice(0, 3)}****${body.slice(-4)}`;
+  }
+  return `${plus}${cc}${body.slice(0, 1)}****`;
 }
 
 /** 列表（脱敏：device/refresh token 全量不外传，只给尾 6 位供人工核对） */
@@ -61,7 +84,10 @@ function list() {
     nickname: a.nickname || '',
     username: a.username || '',
     email: a.email || '',
-    phoneMasked: maskPhone(a.phone),
+    // phone 落盘时就已是脱敏值（login.js 的 finish 存的），**不再脱敏一次**——
+    // 对已脱敏的串再切一刀目前碰巧结果相同，但那只是巧合，脱敏规则一改
+    // 就会切出「150********」这种废品。
+    phoneMasked: a.phone || '',
     hasPhone: !!a.phone,
     region: c.normalizeRegion(a.region),
     userType: a.userType || '',
@@ -71,7 +97,10 @@ function list() {
     expiresAt: a.expiresAt || null,
     refreshExpiresAt: a.refreshExpiresAt || null,
     machineId: a.machineId || '',
-    lastError: a.lastError || '',
+    // 读取时翻译：`aborted` 这类原生错误名对「账号怎么了」没有信息量。
+    // 存量记录（本功能上线前写的）靠这一层也能看懂——lastError 只在成功时
+    // 才清，一个不再使用的账号会永久留着旧串。
+    lastError: explainError(a.lastError),
     lastErrorAt: a.lastErrorAt || null,
     createdAt: a.createdAt || null,
     daysAlive: a.createdAt ? Math.floor((Date.now() - a.createdAt) / 86400000) : null,
@@ -128,6 +157,36 @@ function upsert(acc) {
   return rec;
 }
 
+/**
+ * 给缺手机号的存量账号补一次脱敏号码。
+ *
+ * 为什么需要：手机号字段是本功能上线后才存的，**改动前登录的账号没有这一项**，
+ * 不补的话它们的 phoneMasked 永远是空——而这正是现在库里仅有的两个账号。
+ *
+ * 三层保护，与搭子网页账号的 backfillNickname 同一套：
+ *   - 幂等：已经有 phone 的直接跳过（不打上游）
+ *   - 只补一次：失败的账号本次不再重试（进程内标记），避免每次进页面都白等
+ *   - 失败静默：读路径不该因为取不到手机号而报错，账号其余信息照常显示
+ *
+ * @returns {Promise<number>} 本次补到的账号数
+ */
+const phoneTried = new Set();
+async function backfillPhone(session) {
+  if (!session || !session.fetchUserInfo) return 0;
+  let n = 0;
+  for (const a of load().accounts) {
+    if (a.phone || phoneTried.has(a.id)) continue;
+    if (!a.accessToken) continue;
+    phoneTried.add(a.id);
+    try {
+      const info = await session.fetchUserInfo(a.accessToken, a.region);
+      const masked = maskPhone(info && info.security_mobile);
+      if (masked) { patch(a.id, { phone: masked }); n++; }
+    } catch (e) { /* 读路径失败不影响账号展示 */ }
+  }
+  return n;
+}
+
 /** 局部更新。lastError 与 lastErrorAt 同步移动（与千问同一约定） */
 function patch(id, fields) {
   const data = load();
@@ -167,5 +226,5 @@ function needsRefresh(a, skewMs = 300000) {
 
 module.exports = {
   FILE, dataDir, filePath, load, save, list, get, findUsable, preferred,
-  upsert, patch, remove, needsRefresh, maskPhone,
+  upsert, patch, remove, needsRefresh, maskPhone, backfillPhone,
 };

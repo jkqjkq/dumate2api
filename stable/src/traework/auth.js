@@ -14,6 +14,7 @@ const path = require('path');
 const crypto = require('crypto');
 const c = require('./constants');
 const { oauthHeaders } = require('./headers');
+const { explainError } = require('../errtext');
 
 const FILE = 'traework-accounts.json';
 
@@ -74,7 +75,8 @@ function list() {
     refreshExpiresAt: a.refreshExpiresAt || null,
     credits: a.credits == null ? null : a.credits,
     lastCheckin: a.lastCheckin || null,
-    lastError: a.lastError || '',
+    // 读取时翻译：存量记录里的 `aborted` 之类也要看得懂（详见 errtext.js）
+    lastError: explainError(a.lastError),
     deviceId: a.deviceId || '',
     // 只给尾部，便于人工核对是哪个账号
     refreshTail: a.refreshToken ? String(a.refreshToken).slice(-6) : '',

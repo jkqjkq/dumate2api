@@ -6,6 +6,7 @@ const c = require('./constants');
 const chat = require('./chat');
 const authStore = require('./auth');
 const models = require('./models');
+const { normalizeError } = require('../errtext');
 
 /** 通道是否可用：至少有一个启用且凭证完整的账号 */
 function status() {
@@ -27,7 +28,7 @@ async function pickAccount() {
   if (authStore.needsRefresh(a)) {
     const r = await authStore.exchange(a);
     if (!r.ok) {
-      authStore.patch(a.id, { lastError: `刷新失败: ${r.error}` });
+      authStore.patch(a.id, { lastError: normalizeError(`刷新失败: ${r.error}`) });
       throw new Error(`traework token 刷新失败: ${r.error}`);
     }
     authStore.patch(a.id, { ...r.patch, lastError: '' });
@@ -58,6 +59,92 @@ function warmupModels() {
 }
 
 /**
+ * 跑一次上游流。
+ *
+ * @param {string} bodyJson 出站请求体
+ * @param {object} auth 账号
+ * @param {string} model 上游模型名
+ * @param {function|null} emit 流式回调（收 OpenAI chunk 的 JSON 串）；为 null 即非流式
+ * @param {boolean} hold 是否给正文加缓冲门（只有「带工具的流式请求」需要）
+ * @returns {Promise<{events:Array, gate:object|null, streamErr:object|null, fatal:Error|null}>}
+ */
+async function runAttempt(bodyJson, auth, model, emit, hold) {
+  const r = await chat.postStream(bodyJson, auth);
+  if (!r.stream) {
+    return { fatal: new Error(`traework 请求失败: ${r.error || ('HTTP ' + r.status)}`) };
+  }
+  if (r.status >= 400) {
+    let raw = '';
+    try {
+      const { StringDecoder } = require('string_decoder');
+      const dec = new StringDecoder('utf8');
+      raw = await new Promise((res) => {
+        let b = '';
+        r.stream.on('data', (x) => { b += dec.write(x); });
+        r.stream.on('end', () => res(b + dec.end()));
+      });
+    } catch (e) { /* 忽略 */ }
+    const err = new Error(`traework ${r.status}: ${raw.slice(0, 200)}`);
+    err.statusCode = r.status;
+    return { fatal: err };
+  }
+
+  const events = [];
+  let streamErr = null;
+  const gate = (emit && hold) ? chat.createTextGate(emit, model, true) : null;
+
+  await chat.readStream(r.stream, (evt) => {
+    events.push(evt);
+    // 上游报错**不能转给下游**：流式路径的 HTTP 头早已发出（恒 200），
+    // 写进去客户端会当成数据帧收下，改不成 4xx 了。所以先记下来，
+    // 流结束后统一抛，让上层按错误处理。
+    const e = chat.eventError(evt);
+    if (e && !streamErr) streamErr = e;
+
+    if (gate) { gate.onEvent(evt); return; }
+
+    if (!emit) return;   // 非流式：只收集事件，聚合交给 chat.aggregate
+
+    // 流式（未启用缓冲门）：把 output 事件转成 OpenAI chunk 形状回调出去
+    if (evt.event === 'output') {
+      emit(JSON.stringify(chat.toOpenAIChunk(evt, model)));
+    } else if (evt.event === 'token_usage') {
+      // 用量帧按 OpenAI 的 include_usage 约定补发（choices 空数组 + usage）。
+      // 不补的话，流式请求在客户端与埋点里 token 恒为 0，
+      // 「这轮花了多少」就再也对不上账。
+      const d = evt.data || {};
+      emit(JSON.stringify({
+        id: 'traework', object: 'chat.completion.chunk', created: Math.floor(Date.now() / 1000), model,
+        choices: [],
+        usage: {
+          prompt_tokens: d.prompt_tokens || 0,
+          completion_tokens: d.completion_tokens || 0,
+          total_tokens: d.total_tokens || 0,
+          completion_tokens_details: { reasoning_tokens: d.reasoning_tokens || 0 },
+        },
+      }));
+    } else if (evt.event === 'done' && evt.data && evt.data.finish_reason) {
+      // 终止原因按 OpenAI 约定补一帧。翻译器靠它判 completed/length——
+      // 不补的话 length 截断会被当成正常收尾，客户端无从察觉。
+      emit(JSON.stringify({
+        id: 'traework', object: 'chat.completion.chunk', created: Math.floor(Date.now() / 1000), model,
+        choices: [{ index: 0, delta: {}, finish_reason: evt.data.finish_reason }],
+      }));
+    }
+  });
+
+  return { events, gate, streamErr, fatal: null };
+}
+
+/** 上游报错事件 → 可抛的错误（流式与非流式共用同一套状态码口径） */
+function upstreamError(streamErr) {
+  const e = new Error(`traework ${streamErr.code}: ${streamErr.message}`);
+  e.statusCode = streamErr.code >= 400 && streamErr.code < 600 ? streamErr.code : 400;
+  e.upstreamCode = streamErr.code;
+  return e;
+}
+
+/**
  * 发对话请求。
  * @param {object} payload OpenAI 格式请求体
  * @param {function} [onChunk] 流式回调（收到解出来的 OpenAI 行）
@@ -66,7 +153,8 @@ function warmupModels() {
 async function send(payload, onChunk, opts = {}) {
   const auth = await pickAccount();
   const model = payload && payload.model ? String(payload.model).replace(/^traework\//, '') : c.DEFAULT_MODEL;
-  const body = chat.buildBody(payload, model);
+  const meta = {};
+  const body = chat.buildBody(payload, model, meta);
   const startedAt = Date.now();
 
   // 上报本次实际使用的账号。**这是唯一权威的来源**：多账号轮询下
@@ -86,54 +174,73 @@ async function send(payload, onChunk, opts = {}) {
       .catch(() => { /* 采集失败绝不影响已发出的响应 */ });
   };
 
-  const r = await chat.postStream(body, auth);
-  if (!r.stream) {
-    settle();
-    throw new Error(`traework 请求失败: ${r.error || ('HTTP ' + r.status)}`);
-  }
-  if (r.status >= 400) {
-    let raw = '';
-    try {
-      const { StringDecoder } = require('string_decoder');
-      const dec = new StringDecoder('utf8');
-      raw = await new Promise((res) => {
-        let b = '';
-        r.stream.on('data', (x) => { b += dec.write(x); });
-        r.stream.on('end', () => res(b + dec.end()));
-      });
-    } catch (e) { /* 忽略 */ }
-    // 上游 4xx 通常没产生消耗，但仍采一次：若真扣了费，差值会落在下一条上，
-    // 而「不采集」会让下一条的差值跨过这一条，两条都不准
-    settle();
-    const err = new Error(`traework ${r.status}: ${raw.slice(0, 200)}`);
-    err.statusCode = r.status;
-    throw err;
-  }
-
-  const events = [];
-  let streamErr = null;
-  await chat.readStream(r.stream, (evt) => {
-    events.push(evt);
-    // 上游报错**不能转给下游**：流式路径的 HTTP 头早已发出（恒 200），
-    // 写进去客户端会当成数据帧收下，改不成 4xx 了。所以先记下来，
-    // 流结束后统一抛，让上层按错误处理。
-    const e = chat.eventError(evt);
-    if (e && !streamErr) streamErr = e;
-    // 流式：把 output 事件转成 OpenAI chunk 形状回调出去
-    if (onChunk && evt.event === 'output') {
-      onChunk(JSON.stringify(chat.toOpenAIChunk(evt, model)));
+  // ---- 非流式：聚合整轮，同样做「播报即收尾」修复 ----
+  if (!onChunk) {
+    let attempt = 0;
+    let curBody = body;
+    let agg = null;
+    let fatal = null;
+    for (;;) {
+      const r = await runAttempt(curBody, auth, model, null, false);
+      settle();
+      if (r.fatal) { fatal = r.fatal; break; }
+      if (r.streamErr) { fatal = upstreamError(r.streamErr); break; }
+      agg = chat.aggregate(r.events, model);
+      const msg = (agg.choices && agg.choices[0] && agg.choices[0].message) || {};
+      const hasCalls = Array.isArray(msg.tool_calls) && msg.tool_calls.length > 0;
+      if (hasCalls || !needsRepair(meta, msg.content) || attempt >= chat.REPAIR_MAX) break;
+      attempt++;
+      const nudged = chat.withRepairNudge(curBody);
+      if (!nudged) break;
+      curBody = nudged;
+      logRepair(opts.reqId, attempt, msg.content);
     }
-  });
-  settle();
-  if (streamErr) {
-    const e = new Error(`traework ${streamErr.code}: ${streamErr.message}`);
-    e.statusCode = streamErr.code >= 400 && streamErr.code < 600 ? streamErr.code : 400;
-    e.upstreamCode = streamErr.code;
-    throw e;
+    if (fatal) throw fatal;
+    return agg;
   }
 
-  if (onChunk) return { streamed: true };
-  return chat.aggregate(events, model);
+  // ---- 流式：正文先缓冲，整轮结束再判定是否需要重试 ----
+  // 详见 src/traework/chat.js 顶部「播报即收尾」的实测数据。
+  let attempt = 0;
+  let curBody = body;
+  let res = null;
+  for (;;) {
+    res = await runAttempt(curBody, auth, model, onChunk, needsRepair(meta, ''));
+    settle();
+    if (res.fatal || res.streamErr) break;
+    if (!res.gate) break;
+    const g = res.gate.result();
+    // 已经转为直发（正文超长 / 出现过工具调用）→ 这是正常一轮，收尾
+    if (g.live || g.toolCalls > 0) break;
+    if (!chat.looksUnfinished(g.text)) break;
+    if (attempt >= chat.REPAIR_MAX) break;
+    attempt++;
+    const nudged = chat.withRepairNudge(curBody);
+    if (!nudged) break;
+    curBody = nudged;
+    logRepair(opts.reqId, attempt, g.text);
+  }
+
+  if (res && res.gate) res.gate.finish();
+  if (res && res.fatal) throw res.fatal;
+  if (res && res.streamErr) throw upstreamError(res.streamErr);
+  return { streamed: true };
+}
+
+/** 这一轮该不该重试：请求确实带了工具，且回复没调工具又说还有下一步 */
+function needsRepair(meta, text) {
+  if (chat.REPAIR_MAX <= 0) return false;
+  if (!meta || !meta.toolCount) return false;
+  return chat.looksUnfinished(text);
+}
+
+/** 修复触发时留一行日志——这是「模型行为」而不是「网关行为」，不记下来就无从归因。
+ *  带上被丢弃的正文片段，用来区分「真·播报即收尾」与「判据误伤」（两者处置完全不同）。 */
+function logRepair(reqId, attempt, text) {
+  try {
+    const snip = String(text || '').replace(/\s+/g, ' ').slice(0, 120);
+    console.log(`[traework] 播报即收尾：第 ${attempt} 次重试（req_id=${reqId || '-'}）丢弃正文=「${snip}」`);
+  } catch (e) { /* 日志失败不影响请求 */ }
 }
 
 module.exports = {

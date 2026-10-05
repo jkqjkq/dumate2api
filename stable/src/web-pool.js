@@ -14,6 +14,7 @@
 const https = require('https');
 const crypto = require('crypto');
 const accounts = require('./accounts');
+const { normalizeError } = require('./errtext');
 
 const WEB_BASE = process.env.DUMATE_WEB_BASE || 'https://www.dumate.cn';
 const GATEWAY_HOST = process.env.DUMATE_GATEWAY_HOST || 'dumate-svc.baidu.com';
@@ -140,7 +141,7 @@ function markFailure(id, reason) {
   const st = stateOf(id);
   st.fail_count++;
   st.consecutive_fails++;
-  st.last_error = String(reason || '').slice(0, 200);
+  st.last_error = normalizeError(reason);
   st.last_used_at = Date.now();
   // 连续失败到阈值就冷却。单个失败不冷却——上游偶发抖动不该让账号下线，
   // 而且立刻冷却会在账号少时把池子打空。

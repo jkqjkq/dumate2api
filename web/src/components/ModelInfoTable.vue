@@ -13,6 +13,10 @@
         <template v-if="channel === 'traework'">
           倍率与上下文来自上游下发（{{ rows.length }} 个模型）
         </template>
+        <template v-else-if="channel === 'qoder'">
+          倍率（price_factor）与上下文来自上游下发（{{ rows.length }} 个模型）·
+          输出上限由网关下发
+        </template>
         <template v-else-if="channel === 'qwenwork'">
           千问的模型表接口会 403，当前为静态表（{{ rows.length }} 个）
         </template>
@@ -20,8 +24,9 @@
           上游没有模型列表接口，这些名字来自探测（{{ rows.length }} 个）
         </template>
       </div>
-      <a-space v-if="channel === 'traework'">
+      <a-space v-if="channel === 'traework' || channel === 'qoder'">
         <a-switch
+          v-if="channel === 'traework'"
           v-model:checked="visibleOnly"
           size="small"
           checked-children="仅可见"
@@ -69,9 +74,14 @@
             </div>
             <div class="rate-num num">{{ record.rate.toFixed(2) }}×</div>
           </div>
+          <!-- Qoder 的错峰/免费模型 rate 就是 0，只显示 0 会被读成「完全不扣费」
+               而它的原价（original_price_factor）其实是 0.1——两个一起给 -->
+          <div v-if="record.rateOriginal != null && record.rateOriginal !== record.rate" class="text-xs text-slate-400">
+            原价 {{ record.rateOriginal.toFixed(2) }}×
+          </div>
           <!-- 拿不到就显示「—」并说明原因，**不估算**：
                编一个数字会让人以为真能按那个价扣 -->
-          <a-tooltip v-else :title="rateHint">
+          <a-tooltip v-else-if="record.rate == null" :title="rateHint">
             <span class="text-xs text-slate-500">— <span class="src-tag">无此数据</span></span>
           </a-tooltip>
         </template>
@@ -87,6 +97,13 @@
             <div class="text-xs" :class="record.discountMatched ? 'text-green-500' : 'text-slate-500'">
               {{ record.discountMatched ? '本账号已命中' : '未命中（按原价扣）' }}
             </div>
+          </template>
+          <!-- Qoder 没有会员折扣，这一列用来标「免费/推理」这类上游属性，
+               不硬套 TRAE 的折扣语义 -->
+          <template v-else-if="record.channel === 'qoder'">
+            <a-tag v-if="record.isFree" color="cyan" class="mr-1">免费档</a-tag>
+            <a-tag v-if="record.capability === 'reasoning_model'" color="purple">推理</a-tag>
+            <span v-if="!record.isFree && record.capability !== 'reasoning_model'" class="text-xs text-slate-500">—</span>
           </template>
           <span v-else class="text-xs text-slate-500">—</span>
         </template>
@@ -172,7 +189,8 @@ const columns = [
   { title: '#', key: 'rank', width: '5%' },
   { title: '模型', key: 'name', width: '22%' },
   { title: '消耗倍率', key: 'rate', width: '16%' },
-  { title: '会员折扣', key: 'discount', width: '14%' },
+  // TRAE 有会员折扣，Qoder 没有——同一列按通道换标题，换成两套组件会各自漂移
+  { title: props.channel === 'qoder' ? '档位属性' : '会员折扣', key: 'discount', width: '14%' },
   { title: '上下文', key: 'ctx', width: '13%' },
   { title: '输出上限', key: 'maxtok', width: '11%' },
   { title: '类型', key: 'cap', width: '9%' },

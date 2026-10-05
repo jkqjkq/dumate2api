@@ -280,7 +280,7 @@ function writeProvider(spec) {
   });
 }
 
-/** 组装要写进 cc-switch 的 provider 记录 */
+/** 组装要写进 cc-switch 的 provider 记录（/apply 直写 SQLite 用） */
 function buildProviderSpec(channel, app, tiers, d, token, base) {
   const id = `dumate2api-${channel}-${app}`;
   const main = tiers[0] ? (tiers[0].name || tiers[0].id) : channels.label(channel);
@@ -306,6 +306,90 @@ function buildProviderSpec(channel, app, tiers, d, token, base) {
     notes,
     settings_config: { env: buildClaudeEnv(channel, tiers, d, token, base) },
   };
+}
+
+// ============================================================================
+// cc-switch 官方 deep link（ccswitch://v1/import?resource=provider&…）
+//
+// 为什么用它而不是直写库：点击链接会**唤起 cc-switch 并弹出它自己的
+// 「确认导入」对话框**（DeepLinkImportDialog），把应用/名称/endpoint/
+// 脱敏 key/模型/逐行 env（含完整 TOML）全部预填展示，**用户不点「导入」
+// 什么都不写**。这把「加不加」的决定权交回 cc-switch，也不再需要
+// python writer、备份、重启等一套直写库的副作用。
+//
+// config 参数走标准 Base64 + encodeURIComponent——cc-switch 的解码器对
+// STANDARD / URL_SAFE（含无填充）四种都兼容并自动补 padding。
+//
+// ⚠ Codex 有 cc-switch 自身的限制（3.20.4 与 main 一致）：其 deep-link
+//   导入器 build_codex_settings 用固定模板重建 config.toml，只吸收
+//   name/model/endpoint/apiKey，**inline config 里的 model_context_window、
+//   model_auto_compact_token_limit、modelCatalog 全部带不进去**。而上下文
+//   覆盖正是这个功能存在的核心（挡 cc-switch 全局 common_config 的 1M）。
+//   所以 codex 的 deeplink 只预填基础项，上下文两行需导入后手工补；
+//   需要完整 codex 配置时仍可用 /apply 直写（它原样保留 TOML+catalog）。
+//   Claude 路径的 inline env 则被 build_claude_settings 完整保留，无此问题。
+// ============================================================================
+
+/** provider 显示名（与直写库同一命名，便于用户认出） */
+function providerName(channel, tiers) {
+  const main = tiers[0] ? (tiers[0].name || tiers[0].id) : channels.label(channel);
+  return `${channels.label(channel)} · ${main} (dumate2api)`;
+}
+
+/** 拼一个 query 参数（值已 URL 编码）；空值跳过 */
+function qp(parts, key, value) {
+  if (value === undefined || value === null || value === '') return;
+  parts.push(`${key}=${encodeURIComponent(String(value))}`);
+}
+
+/**
+ * 生成 cc-switch deep link。
+ * @returns {{url:string, configJson:object|null, limitation:string|null}}
+ */
+function buildDeepLink(channel, app, tiers, d, token, base) {
+  const name = providerName(channel, tiers);
+  const parts = [];
+  qp(parts, 'resource', 'provider');
+  qp(parts, 'app', app);
+  qp(parts, 'name', name);
+  // cc-switch 校验 endpoint 必须是合法 http(s) URL；网关根地址即可
+  qp(parts, 'endpoint', base);
+  qp(parts, 'homepage', base);
+  // apiKey 必填（cc-switch 对空串直接报错）；网关默认不鉴权就用占位
+  qp(parts, 'apiKey', token || 'nokey');
+  qp(parts, 'enabled', 'false');
+  qp(parts, 'notes', `由 dumate2api 生成｜上下文 ${d.context_window ?? '?'}｜输出 ${d.max_output ?? '?'}`);
+
+  let configJson = null;
+  let limitation = null;
+
+  if (app === 'claude') {
+    // inline config 的 env 会被 cc-switch 完整保留（四档位 + 上下文 + 压缩线）
+    configJson = { env: buildClaudeEnv(channel, tiers, d, token, base) };
+    const t0 = tiers[0];
+    if (t0) qp(parts, 'model', t0.prefixed);
+    // 三个档位别名也用 URL 参数显式带一份（cc-switch 会在确认框里单独展示）
+    if (tiers[1]) qp(parts, 'haikuModel', tiers[1].prefixed);
+    if (tiers[2]) qp(parts, 'sonnetModel', tiers[2].prefixed);
+    if (tiers[3]) qp(parts, 'opusModel', tiers[3].prefixed);
+  } else {
+    // codex：基础项靠 URL 参数即可；上下文/catalog 带不进（见上方说明）
+    const t0 = tiers[0];
+    if (t0) qp(parts, 'model', t0.prefixed);
+    limitation =
+      'cc-switch 的 deep-link 对 Codex 用固定模板重建 config.toml，'
+      + '带不进 model_context_window / model_auto_compact_token_limit / modelCatalog；'
+      + `链接已预填地址、Key、模型，但上下文窗口（${d.context_window ?? '?'}）与压缩线`
+      + `（${d.compact_limit ?? '?'}）需导入后在 cc-switch 里手工补上，或改用「直接写入」。`;
+  }
+
+  if (configJson) {
+    const b64 = Buffer.from(JSON.stringify(configJson), 'utf8').toString('base64');
+    qp(parts, 'config', b64);
+    qp(parts, 'configFormat', 'json');
+  }
+
+  return { url: `ccswitch://v1/import?${parts.join('&')}`, configJson, limitation };
 }
 
 const routes = [
@@ -353,12 +437,17 @@ const routes = [
       for (const n of d.notes || []) warnings.push(n);
       if (accountNote) warnings.push(accountNote);
 
+      const dl = buildDeepLink(channel, app, tiers, d, token, base);
+      if (dl.limitation) warnings.push(dl.limitation);
+
       return sendJSON(res, 200, {
         ok: true,
         channel,
         channel_label: channels.label(channel),
         app,
         gateway: base,
+        deeplink: dl.url,
+        deeplink_limitation: dl.limitation,
         all_models: rows.map((m) => ({
           id: m.id,
           prefixed: m.prefixed,
@@ -470,6 +559,72 @@ const routes = [
       });
     },
   },
+  {
+    // 唤起 cc-switch 并让它弹「确认导入」框（不直写库）。
+    // 在服务端重新推导一遍——**不信任前端传来的 URL**，避免被构造任意
+    // endpoint/apiKey 的钓鱼链接。服务端本机用 Start-Process 走系统协议
+    // 关联调起 cc-switch，比浏览器跳转自定义 scheme 更稳（不弹浏览器的
+    // 「是否打开」中间框，cc-switch 没运行也能被协议处理器拉起来）。
+    method: 'POST',
+    path: '/open',
+    handler: async ({ res, body }) => {
+      const b = body || {};
+      const channel = channels.normalize(b.channel) || 'dumate';
+      const app = String(b.app || 'claude').toLowerCase() === 'codex' ? 'codex' : 'claude';
+      const token = String(b.token || '').trim();
+      const want = Array.isArray(b.models) ? b.models.map(String) : [];
+
+      let rows;
+      try {
+        if (channel === 'qoder') {
+          rows = (await qoderRowsMerged()).rows;
+        } else {
+          const r = await mi.rowsFor(channel, { visibleOnly: true });
+          rows = (r.rows || []).filter((x) => x.id);
+        }
+      } catch (e) {
+        return sendJSON(res, 502, { ok: false, error: `读取 ${channel} 模型表失败: ${e.message}` });
+      }
+      if (!rows || !rows.length) return sendJSON(res, 404, { ok: false, error: `${channel} 没有可用模型` });
+
+      const tiers = pickTiers(rows, want);
+      const d = derive(tiers);
+      const base = gatewayBase();
+      const dl = buildDeepLink(channel, app, tiers, d, token, base);
+
+      // 装没装：协议处理器注册了才算数（exe/库可能在但协议没注册）
+      const st = await ccSwitchState();
+      if (!st.installed) {
+        return sendJSON(res, 200, {
+          ok: false,
+          installed: false,
+          error: `未检测到 cc-switch（找不到 ${st.db}）。请先安装并至少启动一次。`,
+        });
+      }
+
+      // Start-Process 走 shell 协议关联。URL 内不会有单引号
+      // （encodeURIComponent 不产生它，name 只有中文/固定 ASCII），再兜一层。
+      // 用 try/catch 显式回传成败（Start-Process 成功时 stdout 为空，无法靠它判断）。
+      const safeUrl = dl.url.replace(/'/g, '');
+      const probe = await ps(
+        `try { Start-Process -FilePath '${safeUrl}'; 'OK' } catch { 'ERR:' + $_.Exception.Message }`,
+        20000,
+      );
+      const ok = /^OK/.test(probe);
+
+      try { require('../auth').audit('admin', 'ccswitch_deeplink_open', `${channel}/${app}`); } catch (e) { /* 忽略 */ }
+
+      return sendJSON(res, 200, {
+        ok,
+        installed: true,
+        running: st.running,
+        url: dl.url,
+        limitation: dl.limitation,
+        name: providerName(channel, tiers),
+        error: ok ? '' : (probe.replace(/^ERR:/, '') || '唤起 cc-switch 失败，可手动复制链接'),
+      });
+    },
+  },
 ];
 
-module.exports = { routes, derive, pickTiers };
+module.exports = { routes, derive, pickTiers, buildDeepLink };

@@ -35,6 +35,9 @@
           <span class="font-medium">账号列表</span>
           <span class="text-slate-500 text-sm ml-2">
             共 {{ rows.length }} 个 · 启用 {{ enabledCount }} 个
+            <template v-if="credits.length">
+              · 今日已签 {{ checkedInCount }}/{{ credits.length }}
+            </template>
           </span>
         </div>
       </div>
@@ -59,6 +62,11 @@
                   </a-tag>
                   {{ a.planName || '—' }}
                 </div>
+                <!-- 脱敏手机号：认号用（多个账号昵称可能相近）。
+                     只显示脱敏形式——完整号码不进界面，账号文件里也没有。 -->
+                <div v-if="a.phoneMasked" class="text-xs text-slate-500 mt-1">
+                  <span class="font-mono">{{ a.phoneMasked }}</span>
+                </div>
               </div>
               <a-switch
                 size="small"
@@ -75,6 +83,29 @@
               class="mt-2"
               style="padding: 4px 8px"
             />
+
+            <!-- 今日签到状态。
+                 判据是**只读**的 /campaigns（claimStatus），查它不会触发领取——
+                 与 TRAE 的 checkedIn 同一口径。查不出（null）显示「—」并说明原因，
+                 不猜成「已签」：新账号靠这个提示去领第一笔积分（额度为 0 时
+                 聊天会挂起，不是报错）。 -->
+            <div class="mt-3 flex items-center justify-between gap-2">
+              <div class="min-w-0">
+                <div class="text-xs text-slate-400">今日签到</div>
+                <div class="mt-1 flex items-center gap-1 flex-wrap">
+                  <a-tag :color="checkinColor(a)">{{ checkinText(a) }}</a-tag>
+                  <span v-if="checkinNextText(a)" class="text-xs text-slate-500">
+                    {{ checkinNextText(a) }}
+                  </span>
+                </div>
+              </div>
+              <div class="text-right shrink-0">
+                <div class="text-xs text-slate-400">上次签到</div>
+                <div class="text-xs mt-1">
+                  {{ creditOf(a.id)?.lastCheckin ? dateText(creditOf(a.id)!.lastCheckin!) : '—' }}
+                </div>
+              </div>
+            </div>
 
             <!-- 额度：userQuota（订阅内）与 addOnQuota（签到/赠送）**分开显示**，
                  不能相加——Free 套餐的 userQuota 恒为 0。 -->
@@ -202,6 +233,8 @@ const checkinLoading = ref(false)
 const checkinBusy = reactive<Record<number, boolean>>({})
 
 const enabledCount = computed(() => rows.value.filter((a) => a.enabled).length)
+// 只数**明确**已签的；查不出的（null）不算，否则「已签 2/2」会把未知当已签
+const checkedInCount = computed(() => credits.value.filter((c) => c.checkedIn === true).length)
 const subText = computed(() => 'Qoder 多账号池（凭证自持，device flow 取票）')
 
 const creditOf = (id: number) => credits.value.find((c) => c.id === id) || null
@@ -217,6 +250,36 @@ const grantOf = (id: number): { daysLeft: number; expiresAt: number; amount: num
 }
 const fmtQ = (n: number | null | undefined) =>
   n == null ? '—' : n.toLocaleString('zh-CN', { maximumFractionDigits: 4 })
+
+// ---- 今日签到 ----
+// checkedIn 三态：true=已签 / false=未签 / null=查不出。
+// 「查不出」必须和「未签」区分开——都是提醒用户去点签到，但把查不出显示成
+// 「未签到」等于用一个没查到的事实下结论。
+function checkinColor(a: QoderAccount) {
+  const c = creditOf(a.id)
+  if (!c || c.checkedIn == null) return 'default'
+  return c.checkedIn ? 'green' : 'orange'
+}
+function checkinText(a: QoderAccount) {
+  const c = creditOf(a.id)
+  if (!c) return '—'
+  if (c.checkedIn == null) return '状态未查询'
+  if (c.checkedIn) return '今日已签'
+  // 有明确待领额度时说出来：「还能领 100」比「未签到」更可执行
+  return c.checkinPending ? `未签到 · 可领 ${fmtQ(c.checkinPending)}` : '未签到'
+}
+/** 下次可签时刻。Qoder 是 10:00 (UTC+8) 刷新，不是 00:00——照抄千问会误导 */
+function checkinNextText(a: QoderAccount) {
+  const c = creditOf(a.id)
+  if (!c || !c.checkinNextAt) return ''
+  const ms = c.checkinNextAt - Date.now()
+  if (ms <= 0) return '· 可签到'
+  const h = Math.floor(ms / 3600000)
+  const m = Math.floor((ms % 3600000) / 60000)
+  return `· ${h > 0 ? `${h} 小时 ${m} 分` : `${m} 分`}后可再签`
+}
+const dateText = (ts: number) =>
+  new Date(ts).toLocaleString('zh-CN', { hour12: false, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
 
 // ---- 登录 ----
 const loginOpen = ref(false)

@@ -19,6 +19,11 @@ const routes = [
     method: 'GET',
     path: '/status',
     handler: async ({ res }) => {
+      // 存量账号补一次脱敏手机号（本功能上线前登录的没有这一项）。
+      // 不 await：读路径不该被上游请求拖住，第一次没补上，下次进来自然就有。
+      // 幂等 + 每账号只试一次，所以重复调用没有代价。
+      authStore.backfillPhone(session).catch(() => {});
+
       let st = { ready: false, error: '' };
       try { st = qoder.status(); } catch (e) { st = { ready: false, error: e.message }; }
       return sendJSON(res, 200, {
@@ -69,6 +74,9 @@ const routes = [
       for (const a of list) {
         const raw = authStore.get(a.id);
         const q = await session.fetchQuota(raw.accessToken, a.region);
+        // 签到状态走**只读**的 /campaigns（不领取任何东西），与 TRAE 的
+        // checkedIn 同一口径。查失败给 null，不猜成「已签」或「未签」。
+        const ck = await session.checkinStatus(raw.accessToken, a.region);
         rows.push({
           id: a.id,
           nickname: a.nickname || a.uid || `账号 ${a.id}`,
@@ -78,6 +86,14 @@ const routes = [
           userQuota: q.ok ? q.userQuota : null,
           addOnQuota: q.ok ? q.addOnQuota : null,
           isQuotaExceeded: q.ok ? q.isQuotaExceeded : null,
+          // null = 查不出来；true/false = 今日已签 / 未签
+          checkedIn: ck.ok ? ck.checkedIn : null,
+          /** 待领额度（还有 CLAIMABLE 的活动时） */
+          checkinPending: ck.ok ? ck.pending : null,
+          /** 下次可签时刻（活动 endAt，10:00 UTC+8 刷新） */
+          checkinNextAt: ck.ok ? ck.nextAt : null,
+          /** 上次签到时刻（本地记录；上游不提供） */
+          lastCheckin: a.lastCheckin || null,
           error: q.ok ? '' : (q.error || '查询失败'),
         });
       }
@@ -95,6 +111,9 @@ const routes = [
         summary: {
           total: rows.length,
           valid: rows.filter((r) => !r.error).length,
+          // 今日已签账号数。只数明确 true 的——查不出的（null）不计入，
+          // 否则「已签 2/2」会把查不出的也当成已签，比不显示更糟。
+          checkedIn: rows.filter((r) => r.checkedIn === true).length,
           unknown: rows.length - known.length,
           // 两份额度**分开合计**，不合并
           addOnTotal: Number(sumAddOn.toFixed(4)),
@@ -106,6 +125,39 @@ const routes = [
         },
         // 免费用户实际能用的就是 addOnQuota（签到/赠送）。写清楚避免误读。
         note: 'addOnQuota 是签到/赠送得到的积分（免费用户实际可用）；userQuota 是订阅套餐内的额度（Free 套餐恒为 0）。两者不可相加。',
+      });
+    },
+  },
+  {
+    // 逐笔消耗明细（按时间倒序），供积分明细页表格。
+    //
+    // 与 TRAE 的同名端点同形，但**成本来源不同**：TRAE 是 consumed 游标做差
+    // （并发时会不精确），Qoder 的 usage.credits 是上游直给的单请求扣费
+    // （price_factor × tokens/1000），所以 exact 恒为 true。
+    method: 'GET',
+    path: '/credits/records',
+    handler: async ({ req, res }) => {
+      const limit = Math.min(1000, Math.max(1,
+        parseInt((req.url.match(/[?&]limit=(\d+)/) || [])[1] || '100', 10) || 100));
+      const credits = require('../../qoder/credits');
+      const rows = credits.creditRecords(limit);
+      // 汇总只统计本次返回的窗口，且不补 0——cost 为 null（上游没给 credits）
+      // 的行不计入，界面要写清范围，否则「合计」会被读成全部请求的总和
+      const sum = rows.reduce((s, r) => s + (r.cost || 0), 0);
+      return sendJSON(res, 200, {
+        limit,
+        rows,
+        window: {
+          cost: Number(sum.toFixed(4)),
+          requests: rows.length,
+          exact: rows.filter((r) => r.exact).length,
+        },
+        // **账本起点**：本功能上线前经网关的请求没有逐笔记录，无法追溯。
+        // 界面必须标出这个起点——否则「合计 0.0259」会被读成「总共只花了这么点」，
+        // 而真相是大部分消耗发生在这个时刻之前。
+        since: credits.since(),
+        // 账本涵盖的请求数（不是全部请求数，只是有记录的那部分）
+        recorded: rows.length,
       });
     },
   },

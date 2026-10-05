@@ -1,5 +1,5 @@
-快照指纹 sha256（stable/src 下 43 个 .js，按路径+内容计算）：
-7225acd34614e05d1d8e3327c1dfe7872f35ba14acb88b01d450f2ddba0a6bae
+快照指纹 sha256（stable/src 下 45 个 .js，按路径+内容计算）：
+609ba73915dfcf287f78389338c8853413c07dd525944ec1a5ca266ca774d2af
 
 指纹算法：
   对 stable/src 下所有 .js 文件，按相对路径排序（`/` 分隔），
@@ -12,42 +12,106 @@
   说明那三个值在写入时就与任何一致算法不符（不是编码/换行问题）。
   本次起，值由上面算法实算得出，可核对。
 
-来源：dev 分支提交
-  ccf8e27 perf(qoder): cosy.encode 改 O(n)——修「网关假死 23 分钟无任何输出」
+来源：dev 分支工作区（同步时尚未提交，提交号见本节末尾补记）
+  上一版来源提交 ccf8e27 perf(qoder): cosy.encode 改 O(n)
 
-本次同步的改动（2 个文件）：
+文件数变化：43 → 45。新增两个，无删除。
 
-  qoder/cosy.js —— **性能修复，崩溃/假死级**。
-    `encode`（自定义 base64）在 runOnce 里**同步调用**，原实现
-    `let out=''; for(...) out += mapped;` 在 V8 里近似 O(n²)，叠上
-    `std.slice()` 三段重排的临时字符串，实测 64MB 要 15.2s、128MB 直接
-    4GB heap OOM 崩溃。它一慢就**阻塞整个事件循环**：/health 不响应、
-    其他通道请求全部排队、进程 CPU 跑满却不崩不打日志——客户端表现为
-    「一直转圈、没有任何输出」（cc-switch 报 `504 流式响应首包超时: 600s`，
-    两次重试 ≈ 23 分钟，与用户看到的一致）。
-    改成下标置换 + Uint8Array 查表 + 一次性 Buffer，全程 O(n)：
-    16MB 3.1s→0.26s、64MB 15.2s→1.05s、128MB OOM→1.77s。
-    正确性由与朴素实现穷举比对 2200+ 组锁定。
+本次同步的改动（15 个文件，按影响面排序）：
 
-  server.js —— 新增 `startLagMonitor`：事件循环卡顿超阈值
-    （DUMATE_LAG_WARN_MS，默认 2000ms）打一条带时长的日志，
-    把「静默假死」变成可排查的痕迹。DUMATE_LAG_MONITOR=0 关闭。
+  anthropic.js —— **直连通道的原生工具调用（nativeTools），「任务没做就收尾」级**。
+    原实现把工具一律降级成纯文本（`[Tool Use: 名字]`），那是**搭子的能力边界**
+    （上游不支持 function calling）。但三条直连通道**原生支持**，降级等于把
+    tools 丢了。实测对照（同一 TRAE 模型、同一 prompt、同一套 tools）：
+      直连上游（只过 buildBody）→ 结构化 tool_calls
+          {"name":"Glob","arguments":"{\"pattern\": \"**/*.md\"}"}
+      经文本降级路径 → 模型收不到工具定义，正文里吐文本式
+          <seed:tool_call><function name="Glob">…（逐字分片到达）
+    Claude Code 收到的是普通文本、没有 tool_use 块，于是判定回合正常结束——
+    表现为「很快就输出、任务没做」。**不是上游不支持，是这里丢了 tools。**
+    Codex 走 /v1/responses，那条路径的 responses.js 一直有 convertTools，
+    所以「Codex 用 TRAE 能用工具」掩盖了本文件的问题——两条路径不是同一套代码。
+    另修：tool_result 必须各自独立成 role:'tool' 且**紧跟**带 tool_calls 的
+    assistant 消息（中间夹一条 user 文本会让上游报「工具结果没有对应的调用」）；
+    有 tool_calls 时 stop_reason 必须是 tool_use，**不能照搬上游 finish_reason**
+    ——实测 TRAE 给了 tool_calls 却报 `stop`，翻成 end_turn 会让 Claude Code
+    认为回合结束、**不去执行工具**。
 
-  不在本快照内：`test/verify-qoder-encode-perf.js`（离线验证）。
-  快照仍严格等于网关依赖闭包（43 个文件）。
+  traework/chat.js —— 「播报即收尾」的检测 + 一次性重试。
+    `Doubao-Seed-Evolving`（reasoning_effort=high）在带工具的请求上有 20~67%
+    概率只输出一条进度播报就结束回合，Codex 把「无工具调用」判成任务完成退出。
+    实测过五种手段，只有重试可靠（工具名/正文门/tool_choice 都不行）：
+      现状 1/5 · 去掉纪律 1/4 · 纪律移末尾 3/4 · tool_choice:required 1/4
+      只留一个工具 2/4 · **重试时追加「只输出工具调用」 5/5**
+    判据是「模型自己说还有下一步」（无工具调用 + 正文 < 600 字 + 命中
+    `下一步|next step`）。**不要放宽成「只要没工具调用就重试」**——真·收尾
+    会被逼着再调一次工具，变成永不结束。重试 = 原请求体末尾追加一条 user
+    消息（幂等）；重试轮仍无工具就把正文吐给下游收尾，不再重试。
+    正文缓冲门：`reasoning_content` 直发、`content` 先扣住、`tool_calls` 一到
+    先冲刷正文。**不要改成全量缓冲**——正文总在工具调用之前且只有几十字，
+    全量缓冲会把每一轮的流式效果全丢掉。超 DUMATE_TRAEWORK_HOLD_CAP（600 字）
+    转直发。`DUMATE_TRAEWORK_REPAIR_RETRY=0` 关闭。
+    真机验证：修复前 1~2 次工具调用后停在 8~18%；修复后 17 轮请求、10 次
+    修复触发，三章正文（2742/2706/3298 字）+ 台账 + 情欲清单全部落盘。
 
-验证记录（2026-10-03，全部实测）：
+  traework/index.js —— 流式 usage / finish_reason 补帧 + 工具形状归一化。
+    上游的 `token_usage` / `done` 事件此前在流式路径被丢弃，客户端与埋点的
+    token 恒为 0、length 截断被当成正常收尾。现按 OpenAI 的 include_usage
+    约定补发 `{choices: [], usage}` 与 `{choices:[{delta:{},finish_reason}]}`
+    两类帧（三个翻译器都按这两个字段消费）。
+    另修：上游的工具调用增量字段叫 `function_call` **不是** `function`
+    （`{"index":0,"id":"call_x","function_call":{"name":"read_file",...}}`，
+    后续增量里 name 是空串、只有 arguments）。按 `tc.function.name` 取名落空
+    → Codex 收到空名工具调用报 `unsupported call:`，随即断流重连 5 次全 502。
+    normalizeToolCall() 把三种形状统一，**流式与非流式必须走同一个归一化**。
 
-  - **逐字节比对**：闭包 43 = 快照 43，内容全部一致；反向检查无多余文件
-  - **node --check**：43 个文件全部通过
-  - **独立启动**（临时端口 19099，DUMATE_AUTOSTART=off，指向 <repo>/data）：
-      /health → 四通道 ready=true
-      真实上游错误路径（traework 坏模型名）→ 流里有 `response.failed`，进程存活
-  - **离线验证 12/12 通过**：新增 verify-qoder-encode-perf（8 项，含 2200+ 组
-    逐字节比对与线性度断言）+ 既有 11 个脚本全过
-  - **真实 Codex 会话**（sanguo，多轮工具调用，397K token 会话）正常完成，
-    埋点 input 从 18782 递增到 19615、每轮都有输出
-  - **30MB 请求总耗时 7.6s**（原实现仅 encode 就要 7s+），卡顿监控正确抓到 5769ms
+  qoder/credits.js（新增） —— Qoder 逐请求积分归因。
+    Qoder 是三条直连通道里**唯一**由 usage 直接给出本条请求 credits 的
+    （`price_factor × tokens/1000`），所以不做游标差值、只按 req_id 落一条。
+    千问要读余额差、TRAE 要读 consumed 游标，都只能算「与上一条的差值」，
+    第一条没有参照点、并发时还会串账——Qoder 没有这些问题。
+    credits 为 null 就**如实留空不落 0**（0 会被读成「这次没花钱」）。
+    `since()` 给出账本起点：本功能上线前经网关的请求没有逐笔记录、无法追溯，
+    界面必须标出这个起点，否则「合计」会被读成「总共只花了这么点」。
+
+  errtext.js（新增） —— 错误名翻译。
+    `aborted` 这类原生错误名对「账号怎么了」没有信息量。存量记录（本功能
+    上线前写的）靠这一层也能看懂——lastError 只在成功时才清，一个不再使用的
+    账号会永久留着旧串。
+
+  qoder/auth.js —— 手机号脱敏：先剥国家码再切。
+    国内号是 86 + 11 位，不剥的话切出来是「861****」而不是「157****」。
+    另：phone 落盘时就已是脱敏值（login.js 的 finish 存的），**不再脱敏一次**
+    ——对已脱敏的串再切一刀目前碰巧结果相同，但那只是巧合，脱敏规则一改
+    就会切出「150********」这种废品。
+
+  model-info.js —— Qoder 模型表补**输出上限**与**免费档**。
+    输出上限：上游模型表**没有**这个字段（字段表里只有 max_input_tokens），
+    这里给的是网关下发的预算下限，来源标 config——不拿上下文冒充输出上限，
+    也不编一个值。免费档：上游 is_free，与 TRAE 的会员折扣是两回事。
+    原价倍率（original_price_factor）：错峰/免费模型的 price_factor 会是 0
+    （实测 qfmodel=0、原价 0.1），只显示 rate 会被读成「完全不扣费」。
+
+  其余小改：server.js、qoder/index.js、qoder/session.js、qoder/login.js、
+  qwenwork/auth.js、qwenwork/index.js、traework/auth.js、web-pool.js
+  （凭证读取与通道解析的配套调整，无行为级变更）。
+
+  不在本快照内（纯管理端 / 前端 / 测试，网关不加载）：
+    src/admin/**（含 qoder 的 /credits/records 新端点）、src/records.js、
+    src/points-agg.js、src/web-gateway.js、src/login-browser.js、
+    web/**（积分明细页的 Qoder 真实消耗卡片与 TRAE 逐笔表）、
+    test/verify-traework-repair.js、test/verify-qoder-credits.js 等。
+
+验证记录（2026-10-06，全部实测）：
+
+  - **逐字节比对**：闭包 45 = 快照 45，内容全部一致；反向检查无多余文件
+  - **node --check**：45 个文件全部通过
+  - **独立启动**（临时端口 19099，DUMATE_AUTOSTART=off，
+    DUMATE_ADMIN_DATA=<repo>/data）：
+      /health → 四通道 ready=true（qoder needsClient=false 正确）
+      未知前缀 `qwn/pro` → 400（前缀路由不静默回落）
+      qoder 真实请求（/v1/responses 流式）→ 完整 response.completed 收尾，
+      usage input 13 / output 9，进程存活
   - **未启动 9080**：本次只更新快照文件，9080 保持停止状态
 
 启动方式的重要说明（沿用）：
@@ -57,8 +121,8 @@
   且 9083 管理端读的是 <repo>/data、看不到 9080 的流量。
 
 上一版快照来源：
-  225e597 chore(stable): 同步快照到 23a62d0（流式失败收尾修复）（2026-10-03）
-  记录指纹 7a0c68b0…
+  ccf8e27 perf(qoder): cosy.encode 改 O(n)（2026-10-03），指纹 7225acd3…
 
 更早：
+  225e597 chore(stable): 同步快照到 23a62d0（流式失败收尾修复）
   578d8b0 → 9736b11（Qoder 通道接入），指纹 3662af33…

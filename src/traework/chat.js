@@ -43,8 +43,8 @@ function withAgentDiscipline(system, hasTools) {
   return String(system || '') + AGENT_DISCIPLINE;
 }
 
-/** 把 OpenAI 请求体改写成 SOLO 的形状 */
-function buildBody(payload, model) {
+/** 把 OpenAI 请求体改写成 SOLO 的形状。meta（可选）会被填入过滤后的工具数量 */
+function buildBody(payload, model, meta) {
   const obj = JSON.parse(JSON.stringify(payload || {}));
   obj.stream = true;
   obj.function = c.FUNCTION;
@@ -130,6 +130,8 @@ function buildBody(payload, model) {
     const injected = withAgentDiscipline(cur, true);
     if (injected !== cur) sys.content = [{ type: 'text', text: injected }];
   }
+
+  if (meta) meta.toolCount = Array.isArray(obj.tools) ? obj.tools.length : 0;
 
   return JSON.stringify(obj);
 }
@@ -259,21 +261,167 @@ function normalizeToolCall(tc) {
   return out;
 }
 
-/** 把 TRAE 的 output 事件转成 OpenAI chunk 形状（便于上层统一处理） */
-function toOpenAIChunk(evt, model) {
-  const d = evt.data || {};
+/** TRAE 的 output 事件 → OpenAI delta 形状（content / reasoning_content / tool_calls） */
+function deltaOf(evt) {
+  const d = (evt && evt.data) || {};
   const delta = {};
   if (d.response) delta.content = d.response;
   if (d.reasoning_content) delta.reasoning_content = d.reasoning_content;
   if (Array.isArray(d.tool_calls) && d.tool_calls.length) {
     delta.tool_calls = d.tool_calls.map(normalizeToolCall).filter(Boolean);
   }
+  return delta;
+}
+
+/** 把 TRAE 的 output 事件转成 OpenAI chunk 形状（便于上层统一处理） */
+function toOpenAIChunk(evt, model) {
   return {
     id: 'traework',
     object: 'chat.completion.chunk',
     created: Math.floor(Date.now() / 1000),
     model,
+    choices: [{ index: 0, delta: deltaOf(evt), finish_reason: null }],
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 「播报即收尾」修复（2026-10-05）
+//
+// 现象：TRAE 的 Doubao 系模型在**带工具的**请求上有约 20~25% 的概率只输出一条
+// 进度播报（「当前进度：8%｜已完成：…｜下一步：读取…」）而不调用任何工具就结束
+// 回合。Codex 把「无工具调用的回合」判定成任务完成并退出，用户看到的就是
+// 「没按要求做完就退出」。
+//
+// 实测（同一份真实请求，各跑 5 次，判据＝该轮有没有发出工具调用）：
+//   现状                        1/5
+//   tool_choice=required        1/4（上游并不真的强制）
+//   纪律移到消息末尾            3/4
+//   重试时追加「只输出工具调用」 5/5
+//   → 提示词层面的加固都不稳定，唯一可靠的是**重试**。
+//
+// 所以这里做「检测 + 重试」：正文先缓冲住（正文总在工具调用之前、只有几十字，
+// 缓冲几乎不增加首字延迟；reasoning 照常直发，用户仍能看到模型在动），等整轮
+// 结束再判定。判据是**模型自己说还有下一步**——它既然声明了下一步，回合就不该
+// 在这里结束。长正文（>600 字）按真回答处理，不重试。
+// ---------------------------------------------------------------------------
+
+/** 重试时追加的修复指令（实测 5/5 触发工具调用） */
+const REPAIR_NUDGE = [
+  '你上一条回复只输出了一条进度汇报，没有调用任何工具就结束了回合，这是不允许的。',
+  '必须立即调用工具继续执行任务：不要输出任何文字，只输出工具调用。',
+].join('\n');
+
+/** 正文缓冲上限：超过就转直发（真·长回答不该被扣住等判定） */
+const HOLD_CAP = Number(process.env.DUMATE_TRAEWORK_HOLD_CAP || 600);
+
+/** 重试次数上限（0 关闭整个修复） */
+const REPAIR_MAX = Number(process.env.DUMATE_TRAEWORK_REPAIR_RETRY == null
+  ? 1 : process.env.DUMATE_TRAEWORK_REPAIR_RETRY);
+
+/**
+ * 一轮「无工具调用」的回复，是不是「没干活就收工」。
+ * @returns {boolean}
+ */
+function looksUnfinished(text) {
+  const t = String(text || '').trim();
+  if (!t) return true;                    // 一个字都没吐，等价于没干活
+  if (t.length > HOLD_CAP) return false;  // 长文本按真回答处理
+  return /下一步|next\s+step/i.test(t);   // 模型自己声明还有下一步
+}
+
+/** 在请求体末尾追加修复指令（幂等：已经加过就不再加） */
+function withRepairNudge(bodyJson) {
+  try {
+    const obj = JSON.parse(bodyJson);
+    if (!Array.isArray(obj.messages)) return null;
+    const last = obj.messages[obj.messages.length - 1];
+    const lastText = last && (Array.isArray(last.content)
+      ? last.content.map((p) => (p && p.text) || '').join('')
+      : String(last.content || ''));
+    if (String(lastText).includes(REPAIR_NUDGE)) return bodyJson;
+    obj.messages.push({ role: 'user', content: [{ type: 'text', text: REPAIR_NUDGE }] });
+    return JSON.stringify(obj);
+  } catch (e) { return null; }
+}
+
+/**
+ * 正文缓冲门。
+ *
+ * 把一轮上游流「按需缓冲」后转发给下游：
+ *   - reasoning_content → 直发（思考过程，缓冲它对判定没有帮助）
+ *   - tool_calls        → 先冲刷已缓冲的正文再直发；一出现就说明这轮真在干活
+ *   - content           → 先缓冲；超过 HOLD_CAP 或已转直发后直发
+ *   - token_usage / done → 暂扣，等整轮结束由 finish() 统一补发
+ *
+ * @param {function} emit 下游回调（收 OpenAI chunk 的 JSON 字符串）
+ * @param {string} model
+ * @param {boolean} hold 是否启用缓冲（只有「带工具的请求」才需要）
+ */
+function createTextGate(emit, model, hold) {
+  let pending = '';          // 已收到但还没下发的正文
+  let text = '';             // 本轮收到的全部正文（不论有没有下发）
+  let live = !hold;          // 是否已转为直发
+  let toolCalls = 0;
+  const held = [];           // 暂扣的 usage / finish_reason 帧
+
+  const mkChunk = (delta) => JSON.stringify({
+    id: 'traework',
+    object: 'chat.completion.chunk',
+    created: Math.floor(Date.now() / 1000),
+    model,
     choices: [{ index: 0, delta, finish_reason: null }],
+  });
+  const flush = () => { if (pending) { emit(mkChunk({ content: pending })); pending = ''; } };
+
+  return {
+    onEvent(evt) {
+      if (evt.event === 'output') {
+        const d = evt.data || {};
+        if (d.reasoning_content) emit(mkChunk({ reasoning_content: d.reasoning_content }));
+        if (Array.isArray(d.tool_calls) && d.tool_calls.length) {
+          const tcs = d.tool_calls.map(normalizeToolCall).filter(Boolean);
+          toolCalls += tcs.filter((t) => t.function && t.function.name).length;
+          flush();
+          live = true;
+          emit(mkChunk({ tool_calls: tcs }));
+        }
+        if (d.response) {
+          text += d.response;
+          if (live) emit(mkChunk({ content: d.response }));
+          else {
+            pending += d.response;
+            if (pending.length > HOLD_CAP) { live = true; flush(); }
+          }
+        }
+        return;
+      }
+      if (evt.event === 'token_usage') {
+        const d = evt.data || {};
+        held.push(JSON.stringify({
+          id: 'traework', object: 'chat.completion.chunk',
+          created: Math.floor(Date.now() / 1000), model,
+          choices: [],
+          usage: {
+            prompt_tokens: d.prompt_tokens || 0,
+            completion_tokens: d.completion_tokens || 0,
+            total_tokens: d.total_tokens || 0,
+            completion_tokens_details: { reasoning_tokens: d.reasoning_tokens || 0 },
+          },
+        }));
+        return;
+      }
+      if (evt.event === 'done' && evt.data && evt.data.finish_reason) {
+        held.push(JSON.stringify({
+          id: 'traework', object: 'chat.completion.chunk',
+          created: Math.floor(Date.now() / 1000), model,
+          choices: [{ index: 0, delta: {}, finish_reason: evt.data.finish_reason }],
+        }));
+      }
+    },
+    /** 判定所需的中间状态 */
+    result() { return { toolCalls, text, live, pending }; },
+    /** 收尾：把还没下发的正文与暂扣的帧补发出去 */
+    finish() { flush(); for (const f of held) emit(f); },
   };
 }
 
@@ -346,4 +494,7 @@ function aggregate(events, model) {
   return out;
 }
 
-module.exports = { buildBody, postStream, readStream, toOpenAIChunk, aggregate, eventError, normalizeToolCall };
+module.exports = {
+  buildBody, postStream, readStream, toOpenAIChunk, deltaOf, aggregate, eventError, normalizeToolCall,
+  createTextGate, looksUnfinished, withRepairNudge, REPAIR_NUDGE, REPAIR_MAX, HOLD_CAP,
+};

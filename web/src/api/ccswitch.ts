@@ -38,6 +38,10 @@ export interface CcPreview {
   channel_label: string
   app: string
   gateway: string
+  /** cc-switch 官方 deep link：唤起它并弹「确认导入」框（用户确认才写入） */
+  deeplink: string
+  /** codex 走 deeplink 时 cc-switch 自身的限制说明；claude 为 null */
+  deeplink_limitation: string | null
   all_models: CcModel[]
   tiers: (CcModel & { tier: string })[]
   derived: CcDerived
@@ -45,6 +49,16 @@ export interface CcPreview {
   codex_config: string
   codex_catalog: unknown[]
   warnings: string[]
+}
+
+export interface CcOpenResult {
+  ok: boolean
+  installed?: boolean
+  running?: boolean
+  url?: string
+  name?: string
+  limitation?: string | null
+  error?: string
 }
 
 export interface CcApplyResult {
@@ -79,5 +93,10 @@ export const ccswitchApi = {
   /** 直接把配置写进 cc-switch（不是生成文本让用户粘） */
   apply(params: { channel: string; app: string; models?: string[]; token?: string; confirmed?: boolean }) {
     return client.post<CcApplyResult>('/cc-switch/apply', params)
+  },
+
+  /** 唤起 cc-switch 并弹它自己的「确认导入」框（不直写库） */
+  open(params: { channel: string; app: string; models?: string[]; token?: string }) {
+    return client.post<CcOpenResult>('/cc-switch/open', params)
   },
 }

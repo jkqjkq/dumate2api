@@ -1,9 +1,10 @@
 <template>
   <div class="page">
     <PageHeader
-      :title="isTw ? 'TRAE 额度' : isQw ? '千问积分' : '积分明细'"
+      :title="isTw ? 'TRAE 额度' : isQw ? '千问积分' : isQd ? 'Qoder 积分' : '积分明细'"
       :sub="isTw ? 'TRAE Work 额度与签到（按账号独立）'
-        : isQw ? '千问办公积分池与逐笔消耗（真实数据）' : undefined"
+        : isQw ? '千问办公积分池与逐笔消耗（真实数据）'
+        : isQd ? 'Qoder 真实消耗（上游 quota/usage 直给）' : undefined"
     >
       <template #sub>
         <template v-if="isTw">
@@ -11,6 +12,9 @@
         </template>
         <template v-else-if="isQw">
           千问办公积分池与逐笔消耗 · 经本网关的请求
+        </template>
+        <template v-else-if="isQd">
+          已消耗与剩余来自上游 quota/usage · 逐笔明细只覆盖本网关记录
         </template>
         <template v-else-if="loading">加载中…</template>
         <template v-else-if="current">共 {{ accountOptions.length }} 个账号可选</template>
@@ -21,7 +25,7 @@
           size="small"
           class="ghost-btn"
           :loading="loading"
-          @click="isTw ? loadTw() : isQw ? loadQw() : load(true)"
+          @click="isTw ? loadTw() : isQw ? loadQw() : isQd ? loadQd() : load(true)"
         >
           刷新
         </a-button>
@@ -125,6 +129,65 @@
             「剩余额度」= 额度上限 − 已消耗（上游 usage_summary 的实时值）；
             「签到可得」是今天签到能领到的额度，不是余额。
             取不到时显示 —，不补 0——0 会被读成「额度用完了」。
+          </div>
+        </a-card>
+
+        <!-- 逐笔消耗：按账号的 consumed 游标做差（不是累计值） -->
+        <a-card title="积分消耗明细" :bordered="false" class="mt-4">
+          <template #extra>
+            <span class="text-xs text-slate-400">
+              最近 {{ twRecords.length }} 条 · 合计 {{ fmtTw(twWindow.cost) }}
+              <template v-if="twWindow.requests !== twWindow.exact">
+                · {{ twWindow.requests - twWindow.exact }} 条并发（差值可能含相邻请求）
+              </template>
+            </span>
+          </template>
+          <a-empty v-if="!twRecords.length" description="还没有经网关的积分记录" />
+          <a-table
+            v-else
+            size="small"
+            :data-source="twRecords"
+            :columns="twRecordColumns"
+            row-key="req_id"
+            :pagination="{ pageSize: 20, size: 'small', showSizeChanger: false }"
+          >
+            <template #bodyCell="{ column, record }">
+              <template v-if="column.key === 'ts'">
+                <span class="text-xs">{{ dateTimeText(record.ts) }}</span>
+              </template>
+              <template v-else-if="column.key === 'model'">
+                <span class="font-mono text-xs">{{ record.model || '—' }}</span>
+              </template>
+              <template v-else-if="column.key === 'cost'">
+                <span v-if="record.cost != null" class="font-medium num">{{ fmtTw(record.cost) }}</span>
+                <span v-else class="text-xs text-slate-400">— 无参照点</span>
+                <!-- 并发时的差值里可能混着相邻请求的消耗，必须标出来 -->
+                <a-tooltip
+                  v-if="!record.exact"
+                  title="与相邻请求并发，差值可能含对方的消耗"
+                >
+                  <a-tag color="orange" class="ml-1">并发</a-tag>
+                </a-tooltip>
+              </template>
+              <template v-else-if="column.key === 'ms'">
+                <span v-if="record.ms != null" class="text-xs num">{{ fmtMs(record.ms) }}</span>
+                <span v-else class="text-xs text-slate-400">—</span>
+              </template>
+              <template v-else-if="column.key === 'remain'">
+                <span v-if="record.remain != null" class="text-xs text-slate-400 num">
+                  {{ record.remain.toLocaleString('zh-CN') }}
+                </span>
+                <span v-else class="text-xs text-slate-400">—</span>
+              </template>
+              <template v-else-if="column.key === 'account'">
+                <span class="text-xs">{{ record.account || '—' }}</span>
+              </template>
+            </template>
+          </a-table>
+          <div class="text-xs text-slate-400 mt-2">
+            消耗 = 该账号相邻两条请求的「已消耗」之差（上游只给累计值，没有单请求
+            扣费字段）。首条没有参照点，显示「无参照点」而不补 0；并发请求的差值
+            可能含对方的消耗，已标「并发」。合计只统计本页这段窗口。
           </div>
         </a-card>
       </template>
@@ -258,6 +321,245 @@
           </template>
         </a-table>
       </a-card>
+    </template>
+
+    <!-- ============ Qoder：两份额度（不可相加）+ 逐笔消耗 ============ -->
+    <template v-else-if="isQd">
+      <a-empty
+        v-if="!qdRows.length"
+        :description="qdError || '还没有 Qoder 账号'"
+      />
+      <template v-else>
+        <!-- 真实消耗放最上面：这三个数字是上游 quota/usage 直接给的累积值，
+             含客户端直连对话，是「这个账号到底花了多少」的唯一真值。 -->
+        <a-row :gutter="[16, 16]">
+          <a-col :span="6">
+            <a-card :bordered="false" class="h-full">
+              <a-statistic
+                title="已消耗（签到积分）"
+                :value="qdUsed.addOn ?? '—'"
+                value-style="color:#fbbf24"
+              />
+              <div class="text-xs text-slate-500 mt-2">
+                上游累积真值 · 含客户端直连
+              </div>
+            </a-card>
+          </a-col>
+          <a-col :span="6">
+            <a-card :bordered="false" class="h-full">
+              <a-statistic
+                title="已消耗（订阅额度）"
+                :value="qdUsed.user ?? '—'"
+                value-style="color:#fbbf24"
+              />
+              <div class="text-xs text-slate-500 mt-2">
+                Free 套餐恒为 0
+              </div>
+            </a-card>
+          </a-col>
+          <a-col :span="6">
+            <a-card :bordered="false" class="h-full">
+              <a-statistic
+                title="剩余可用合计"
+                :value="qdTotals.left ?? '—'"
+                value-style="color:#22d3ee"
+              />
+              <div class="text-xs text-slate-500 mt-2">
+                签到 {{ fmtQw(qdTotals.addOn) }} · 订阅 {{ fmtQw(qdTotals.user) }}
+              </div>
+            </a-card>
+          </a-col>
+          <a-col :span="6">
+            <a-card :bordered="false" class="h-full">
+              <a-statistic
+                title="今日已签到"
+                :value="`${qdTotals.checked} / ${qdRows.length}`"
+              />
+              <div class="text-xs text-slate-500 mt-2">
+                <template v-if="qdTotals.pending">
+                  有 {{ qdTotals.pending }} 个账号待领取
+                </template>
+                <template v-else>每日 10:00（UTC+8）刷新，不是 00:00</template>
+              </div>
+            </a-card>
+          </a-col>
+        </a-row>
+
+        <!-- 两份额度分开报：相加会得出一个既不是订阅也不是签到的数字 -->
+        <a-alert type="info" show-icon class="mt-4">
+          <template #message>两份额度，<b>不要相加</b></template>
+          <template #description>
+            <div>
+              签到积分（addOnQuota）是签到 / 赠送得到的，订阅额度（userQuota）是套餐内的——
+              上游分两个池子返回，合起来没有意义。
+            </div>
+            <div v-if="qdExpiring.count" class="text-orange-500">
+              {{ qdExpiring.count }} 个批次将在 7 天内到期，合计领取额
+              {{ fmtQw(qdExpiring.amount) }}（<b>领取额不是剩余额</b>——上游不给逐批余额）。
+            </div>
+          </template>
+        </a-alert>
+
+        <a-card title="按账号真实消耗" :bordered="false" class="mt-4">
+          <template #extra>
+            <span class="text-xs text-slate-400">
+              上游 quota/usage 直接给的累积值，不是本网关估算
+            </span>
+          </template>
+          <a-table
+            size="small"
+            :pagination="false"
+            :data-source="qdRows"
+            :columns="qdColumns"
+            row-key="id"
+          >
+            <template #bodyCell="{ column, record }">
+              <template v-if="column.key === 'name'">
+                <div>{{ record.nickname || `账号 ${record.id}` }}</div>
+                <div class="text-xs text-slate-400 font-mono">{{ record.region }}<template v-if="record.planName"> · {{ record.planName }}</template></div>
+              </template>
+              <!-- 已消耗：上游累积真值。带占比条——只有数字看不出还剩多少 -->
+              <template v-else-if="column.key === 'used'">
+                <template v-if="record.addOnQuota || record.userQuota">
+                  <div v-if="record.addOnQuota" class="mb-1">
+                    <div class="flex items-center justify-between text-xs">
+                      <span class="text-slate-400">签到</span>
+                      <span class="num">
+                        <b>{{ fmtQw(record.addOnQuota.used) }}</b>
+                        <span class="text-slate-400"> / {{ fmtQw(record.addOnQuota.total) }}</span>
+                      </span>
+                    </div>
+                    <div class="used-bar-wrap">
+                      <div class="used-bar" :class="usedClass(record.addOnQuota.percentage)" :style="{ width: pctWidth(record.addOnQuota.percentage) }" />
+                    </div>
+                    <div class="text-xs text-slate-400">
+                      已用 {{ pctText(record.addOnQuota.percentage) }}
+                      <span v-if="record.addOnQuota.used === 0" class="text-slate-500">（额度整数粒度，小额请求可能不累加）</span>
+                    </div>
+                  </div>
+                  <div v-if="record.userQuota">
+                    <div class="flex items-center justify-between text-xs">
+                      <span class="text-slate-400">订阅</span>
+                      <span class="num">
+                        <b>{{ fmtQw(record.userQuota.used) }}</b>
+                        <span class="text-slate-400"> / {{ fmtQw(record.userQuota.total) }}</span>
+                      </span>
+                    </div>
+                    <div class="used-bar-wrap">
+                      <div class="used-bar" :class="usedClass(record.userQuota.percentage)" :style="{ width: pctWidth(record.userQuota.percentage) }" />
+                    </div>
+                  </div>
+                </template>
+                <span v-else class="text-slate-400">—</span>
+              </template>
+              <template v-else-if="column.key === 'addOn'">
+                <span v-if="record.addOnQuota" class="font-medium num">
+                  {{ fmtQw(record.addOnQuota.remaining) }}
+                </span>
+                <span v-else class="text-slate-400">—</span>
+              </template>
+              <template v-else-if="column.key === 'user'">
+                <span v-if="record.userQuota" class="num">{{ fmtQw(record.userQuota.remaining) }}</span>
+                <span v-else class="text-slate-400">—</span>
+              </template>
+              <template v-else-if="column.key === 'checkin'">
+                <a-tag v-if="record.checkedIn === true" color="green">今日已签</a-tag>
+                <a-tag v-else-if="record.checkedIn === false" color="orange">未签</a-tag>
+                <span v-else class="text-xs text-slate-400">查不出</span>
+                <div v-if="record.checkinPending" class="text-xs text-slate-400">
+                  待领 {{ fmtQw(record.checkinPending) }}
+                </div>
+              </template>
+              <template v-else-if="column.key === 'err'">
+                <span v-if="record.error" class="text-xs text-red-500">{{ record.error }}</span>
+                <a-tag v-else-if="record.isQuotaExceeded" color="red">已超限</a-tag>
+                <span v-else class="text-slate-400">—</span>
+              </template>
+            </template>
+          </a-table>
+          <div class="text-xs text-slate-400 mt-2">
+            这些数字由上游 <span class="font-mono">/api/v2/quota/usage</span> 直接返回，
+            含你在 Qoder 客户端 / 网页里的对话——不是本网关的估算。
+            <b>已消耗是整数粒度</b>：单条小额请求（约 0.02 credits）不会立刻推动它，
+            所以「已消耗」会滞后于逐笔明细的累加值。
+            <template v-if="qdError">（{{ qdError }}）</template>
+          </div>
+        </a-card>
+
+        <!-- 逐笔消耗：上游 usage.credits 直给，不做游标差。
+             两个口径必须并列——只给逐笔合计会让人以为「总共才花了这么点」，
+             而它的账本起点晚于通道接入时间，之前的消耗没有逐笔记录。 -->
+        <a-card title="积分消耗明细" :bordered="false" class="mt-4">
+          <template #extra>
+            <span class="text-xs text-slate-400">
+              <template v-if="qdRecords.length">
+                本账本 {{ qdRecords.length }} 条 · 合计 {{ fmtQw(qdWindow.cost) }}
+                <span class="text-slate-500">· 上游直给，精确</span>
+              </template>
+            </span>
+          </template>
+
+          <a-alert type="warning" show-icon class="mb-3">
+            <template #message>逐笔合计 <b>不等于</b>你的总消耗</template>
+            <template #description>
+              <div>
+                上游累积已消耗（上方「已消耗」卡）：
+                <b class="num">{{ fmtQw((qdUsed.addOn ?? 0) + (qdUsed.user ?? 0)) }}</b>
+                ——这是<b>全部</b>消耗，含本网关之外的客户端直连对话。
+              </div>
+              <div>
+                本页逐笔合计（本网关账本）：
+                <b class="num">{{ fmtQw(qdWindow.cost) }}</b>
+                <template v-if="qdSince">
+                  ——只覆盖 <b>{{ dateTimeText(qdSince) }}</b> 之后
+                  （账本从那时才开始记，更早的请求<b>没有逐笔记录、无法追溯</b>）。
+                </template>
+                <template v-else>——账本还没有记录。</template>
+              </div>
+              <div class="text-slate-400">
+                两份数字<b>不该相等</b>：一个是上游全量，一个是本网关的部分窗口。
+                差值是账本起点之前的消耗与客户端直连部分。
+              </div>
+            </template>
+          </a-alert>
+
+          <a-empty v-if="!qdRecords.length" description="账本还没有记录（本功能上线前的请求无法追溯）" />
+          <a-table
+            v-else
+            size="small"
+            :data-source="qdRecords"
+            :columns="qdRecordColumns"
+            row-key="req_id"
+            :pagination="{ pageSize: 20, size: 'small', showSizeChanger: false }"
+          >
+            <template #bodyCell="{ column, record }">
+              <template v-if="column.key === 'ts'">
+                <span class="text-xs">{{ dateTimeText(record.ts) }}</span>
+              </template>
+              <template v-else-if="column.key === 'model'">
+                <span class="font-mono text-xs">{{ record.model || '—' }}</span>
+              </template>
+              <template v-else-if="column.key === 'cost'">
+                <span v-if="record.cost != null" class="font-medium num">{{ fmtQw(record.cost) }}</span>
+                <span v-else class="text-xs text-slate-400">— 上游未给</span>
+              </template>
+              <template v-else-if="column.key === 'ms'">
+                <span v-if="record.ms != null" class="text-xs num">{{ fmtMs(record.ms) }}</span>
+                <span v-else class="text-xs text-slate-400">—</span>
+              </template>
+              <template v-else-if="column.key === 'account'">
+                <span class="text-xs">{{ record.account || '—' }}</span>
+              </template>
+            </template>
+          </a-table>
+          <div class="text-xs text-slate-400 mt-2">
+            每条的消耗是上游 <span class="font-mono">usage.credits</span> 直给的单请求值
+            （倍率 × 用量），不是余额差——所以不受并发影响。实测值很小（1 万 token
+            的请求约 0.02），因为它就是「credits」数，与额度卡的积分同单位。
+            已消耗掉的积分来自哪一份（订阅 / 签到）上游不区分，这里无法拆分。
+          </div>
+        </a-card>
+      </template>
     </template>
 
     <!-- ============ 百度搭子：原有页面 ============ -->
@@ -666,11 +968,13 @@ import { GridComponent, TooltipComponent, LegendComponent } from 'echarts/compon
 import { CanvasRenderer } from 'echarts/renderers'
 import PageHeader from '@/components/PageHeader.vue'
 import client from '@/api/client'
-import { channelStore, isTraework, isQwenwork } from '@/stores/channel'
+import { channelStore, isTraework, isQwenwork, isQoder } from '@/stores/channel'
 import { traeworkApi } from '@/api/traework'
-import type { TraeworkCreditRow, TraeworkStatus } from '@/api/traework'
+import type { TraeworkCreditRow, TraeworkStatus, TraeworkCreditRecord } from '@/api/traework'
 import { qwenworkApi } from '@/api/qwenwork'
 import type { QwCredits, QwCreditRecord } from '@/api/qwenwork'
+import { qoderApi } from '@/api/qoder'
+import type { QoderCreditRow, QoderCreditRecord } from '@/api/qoder'
 import type { PointsData, PointsPackage, AllPointsData, AccountPoints } from '@/api/points'
 import type { RecordsData, CheckinCalendarData } from '@/api/records'
 import { SERIES, INK, TOOLTIP_BASE, axisStyle, compactNum, exactNum, barSeries } from '@/utils/chartTheme'
@@ -713,6 +1017,21 @@ const twColumns = [
   { title: '错误', key: 'err' },
 ]
 
+const twRecords = ref<TraeworkCreditRecord[]>([])
+const twWindow = ref({ cost: 0, requests: 0, exact: 0 })
+
+const twRecordColumns = [
+  { title: '时间', key: 'ts', width: '20%' },
+  { title: '模型', key: 'model', width: '16%' },
+  { title: '消耗', key: 'cost', width: '15%' },
+  { title: '耗时', key: 'ms', width: '11%' },
+  { title: '请求后剩余', key: 'remain', width: '18%' },
+  { title: '账号', key: 'account', width: '20%' },
+]
+
+// TRAE 的账与千问不同：单一 credits，数值是「次」不是积分小数
+const fmtTw = (n: number | null) => (n == null ? '—' : Number(n).toFixed(2))
+
 // 合计只对**取到值**的账号求和：把 null 当 0 会让「一个账号取不到」
 // 表现成「总额度变少了」，而真相是没测到
 const twTotals = computed(() => {
@@ -744,6 +1063,116 @@ async function loadTw() {
     ])
     twStatus.value = s.data as TraeworkStatus
     twRows.value = c.data.rows || []
+    // 逐笔明细单独拉：额度表与明细是两个端点，一个失败不该拖垮另一个
+    const rec = await traeworkApi.creditRecords(200)
+      .catch(() => ({ data: { rows: [], window: { cost: 0, requests: 0, exact: 0 } } }))
+    twRecords.value = rec.data.rows || []
+    twWindow.value = rec.data.window || { cost: 0, requests: 0, exact: 0 }
+  } finally {
+    loading.value = false
+  }
+}
+
+// ---- Qoder 积分（两份额度 + 逐笔消耗，与 TRAE / 千问都是各自的账）----
+const isQd = computed(() => isQoder())
+const qdRows = ref<QoderCreditRow[]>([])
+const qdError = ref('')
+const qdRecords = ref<QoderCreditRecord[]>([])
+const qdWindow = ref({ cost: 0, requests: 0, exact: 0 })
+/** 账本起点。本功能上线前的请求没有逐笔记录，必须标出来 */
+const qdSince = ref<number | null>(null)
+// 已消耗（上游累积真值）。两份额度**分开合计**——与剩余额同口径，不相加。
+// 取不到（查询失败）的账号不计入，返回 null，不补 0。
+const qdUsed = computed(() => {
+  let addOn: number | null = null
+  let user: number | null = null
+  for (const r of qdRows.value) {
+    if (r.addOnQuota) addOn = (addOn || 0) + r.addOnQuota.used
+    if (r.userQuota) user = (user || 0) + r.userQuota.used
+  }
+  return { addOn, user }
+})
+
+/** 7 天内到期的批次（本地账本，领取额口径） */
+const qdExpiring = ref({ count: 0, amount: 0 })
+
+// 占用百分比：上游 percentage 是 0~1 的小数；拿不到时显示 —，不编 0
+const pctWidth = (p: number | null) => {
+  const v = p == null ? 0 : (p > 1 ? p : p * 100)
+  return `${Math.max(0, Math.min(100, v))}%`
+}
+const pctText = (p: number | null) => (p == null ? '—' : `${((p > 1 ? p : p * 100)).toFixed(0)}%`)
+const usedClass = (p: number | null) => {
+  const v = p == null ? 0 : (p > 1 ? p : p * 100)
+  if (v >= 80) return 'used-high'
+  if (v >= 50) return 'used-mid'
+  return 'used-low'
+}
+
+// 两份额度**分开合计**，不合并。取不到的账号不计入（与 TRAE 同口径）
+const qdTotals = computed(() => {
+  let addOn: number | null = null
+  let user: number | null = null
+  let left: number | null = null
+  let checked = 0
+  let pending = 0
+  for (const r of qdRows.value) {
+    if (r.addOnQuota) { addOn = (addOn || 0) + r.addOnQuota.remaining; left = (left || 0) + r.addOnQuota.remaining }
+    if (r.userQuota) { user = (user || 0) + r.userQuota.remaining; left = (left || 0) + r.userQuota.remaining }
+    // 只数明确 true 的——查不出的（null）不计入，否则「已签 2/2」会把
+    // 查不出的也当成已签，比不显示更糟
+    if (r.checkedIn === true) checked++
+    if (r.checkinPending) pending++
+  }
+  return { addOn, user, left, checked, pending }
+})
+
+const qdColumns = [
+  { title: '账号', key: 'name', width: '18%' },
+  { title: '已消耗（上游真值）', key: 'used', width: '26%' },
+  { title: '剩余（签到）', key: 'addOn', width: '12%' },
+  { title: '剩余（订阅）', key: 'user', width: '12%' },
+  { title: '今日签到', key: 'checkin', width: '12%' },
+  { title: '状态', key: 'err' },
+]
+
+const qdRecordColumns = [
+  { title: '时间', key: 'ts', width: '24%' },
+  { title: '模型', key: 'model', width: '20%' },
+  { title: '消耗', key: 'cost', width: '18%' },
+  { title: '耗时', key: 'ms', width: '13%' },
+  { title: '账号', key: 'account', width: '25%' },
+]
+
+async function loadQd() {
+  loading.value = true
+  try {
+    const [c, rec] = await Promise.all([
+      qoderApi.credits().catch(() => ({
+        data: {
+          count: 0,
+          rows: [] as QoderCreditRow[],
+          summary: { total: 0, valid: 0, unknown: 0, checkedIn: 0, addOnTotal: 0, userTotal: 0, exceeded: 0, expiringCount: 0, expiringAmount: 0 },
+          note: '',
+        },
+      })),
+      qoderApi.creditRecords(200).catch(() => ({
+        data: { rows: [] as QoderCreditRecord[], window: { cost: 0, requests: 0, exact: 0 }, since: null, recorded: 0 },
+      })),
+    ])
+    qdRows.value = c.data.rows || []
+    qdExpiring.value = {
+      count: c.data.summary?.expiringCount || 0,
+      amount: c.data.summary?.expiringAmount || 0,
+    }
+    qdRecords.value = rec.data.rows || []
+    qdWindow.value = rec.data.window || { cost: 0, requests: 0, exact: 0 }
+    qdSince.value = rec.data.since ?? null
+    qdError.value = ''
+  } catch (e: any) {
+    qdRows.value = []
+    qdRecords.value = []
+    qdError.value = e?.response?.data?.error || e?.message || '读取 Qoder 积分失败'
   } finally {
     loading.value = false
   }
@@ -1119,13 +1548,14 @@ function onResize() { grantChart?.resize() }
 
 // 操作流水只在搭子通道有意义（签到/抽奖/任务是网页端独有），
 // 千问与 TRAE 各自的账在各自的区块里，切过去时不请求、也不渲染。
-watch([opType, opAccount, opDays], () => { if (!isTw.value && !isQw.value) loadOps() })
+watch([opType, opAccount, opDays], () => { if (!isTw.value && !isQw.value && !isQd.value) loadOps() })
 
 onMounted(() => {
-  // 按当前通道初始化：顶栏已切到 TRAE/千问时进这个页面，
+  // 按当前通道初始化：顶栏已切到 TRAE/千问/Qoder 时进这个页面，
   // 该拉的是对应通道的账，而不是搭子的额度包
   if (isTw.value) loadTw()
   else if (isQw.value) loadQw()
+  else if (isQd.value) loadQd()
   else {
     load()
     loadOps()
@@ -1139,6 +1569,7 @@ onMounted(() => {
 watch(() => channelStore.current, () => {
   if (isTw.value) loadTw()
   else if (isQw.value) loadQw()
+  else if (isQd.value) loadQd()
   else {
     load()
     loadOps()
@@ -1168,6 +1599,23 @@ onBeforeUnmount(() => {
 :deep(.row-selected) > td:first-child {
   box-shadow: inset 3px 0 0 var(--lab-primary);
 }
+
+/* 已消耗占比条：只有数字看不出「还剩多少」，条给出一眼的量感 */
+.used-bar-wrap {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--lab-surface-3);
+  overflow: hidden;
+  margin-top: 2px;
+}
+.used-bar {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.3s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.used-bar.used-high { background: var(--lab-danger); }
+.used-bar.used-mid { background: var(--lab-warn); }
+.used-bar.used-low { background: var(--lab-ok); }
 
 /* 切换按钮加大：默认 solid 按钮太小，点完看不出选中态变化 */
 :deep(.acct-btn) {

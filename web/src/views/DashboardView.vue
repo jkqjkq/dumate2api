@@ -427,6 +427,69 @@
         description="access token 到期后无法自动续期。请到「账号管理」删除后重新登录。"
       />
 
+      <!-- 趋势 + 上游状态。与 TRAE 同一布局（左趋势右状态），
+           三条直连通道并排看时位置一致才不会找不着。 -->
+      <a-row :gutter="[16, 16]" class="mt-4">
+        <a-col :span="17">
+          <a-card title="近 14 天调用趋势" :bordered="false" class="h-full">
+            <template #extra><span class="text-xs text-slate-400">按天聚合 · 与搭子仪表盘同口径</span></template>
+            <a-empty v-if="!qdDaily.length" description="还没有 Qoder 请求记录" />
+            <!-- 同样拆成上下两张共享 X 轴的小图而不是双 Y 轴：请求数与 Token
+                 量纲不同，共图会凭空造出「此消彼长」的相关性。 -->
+            <template v-else>
+              <div class="trend-block">
+                <div class="trend-label">请求数</div>
+                <div ref="qdReqChartEl" class="trend-chart" />
+              </div>
+              <div class="trend-block">
+                <div class="trend-label">Token</div>
+                <div ref="qdTokChartEl" class="trend-chart" />
+              </div>
+            </template>
+          </a-card>
+        </a-col>
+
+        <a-col :span="7">
+          <a-card title="上游状态" :bordered="false" class="h-full">
+            <a-descriptions :column="1" size="small">
+              <a-descriptions-item label="通道">
+                <a-tag :color="qdInfo?.ready ? 'green' : 'red'">
+                  {{ qdInfo?.ready ? '就绪' : '不可用' }}
+                </a-tag>
+                <span v-if="qdInfo?.error" class="text-xs text-slate-400 ml-1">
+                  {{ qdInfo.error }}
+                </span>
+              </a-descriptions-item>
+              <a-descriptions-item label="可用账号">
+                <template v-if="qdInfo?.accounts !== undefined">
+                  {{ qdInfo.accounts }} 个
+                </template>
+                <span v-else class="text-slate-400">—</span>
+              </a-descriptions-item>
+              <a-descriptions-item label="当前账号">
+                {{ qdInfo?.account || '—' }}
+              </a-descriptions-item>
+              <a-descriptions-item label="access token">
+                <span class="font-mono text-xs">{{ fmtExpire(qdInfo?.tokenExpiresAt) }}</span>
+              </a-descriptions-item>
+              <a-descriptions-item label="refresh token">
+                <span class="font-mono text-xs">{{ fmtExpire(qdInfo?.refreshExpiresAt) }}</span>
+                <a-tag v-if="qdInfo?.refreshExpired" color="orange" class="ml-1">已过期</a-tag>
+              </a-descriptions-item>
+            </a-descriptions>
+            <!-- Qoder 与千问的关键差异写在状态卡里：这是「要不要装客户端」
+                 这个问题的答案，也是它比千问干净的地方。 -->
+            <a-alert
+              type="info"
+              show-icon
+              class="mt-3"
+              message="凭证自持，不需要客户端"
+              description="签名是纯本地算法（RSA + AES + MD5），不依赖 Qoder 客户端或任何 wasm。access token 到期时网关用 refresh token 自动换新。"
+            />
+          </a-card>
+        </a-col>
+      </a-row>
+
       <!-- 账号健康快照：本地落盘数据，不打上游 -->
       <a-card title="账号健康快照" :bordered="false" class="mt-4">
         <template #extra>
@@ -1276,6 +1339,11 @@ const qdCreditsSummary = ref<{
 } | null>(null)
 // 今日用量取当前通道的埋点（与其它通道同源）
 const qdToday = computed(() => usage.value?.cards?.today || { requests: 0, tokens: 0 })
+// 趋势数据：/usage/overview?days=14&channel=qoder 已在 refreshQd 里拉了，
+// 这里只是把 daily 取出来。与 TRAE 同源同口径（按天聚合请求数与 Token）。
+const qdDaily = computed(() => usage.value?.daily || [])
+// 上游状态取顶栏那一份通道元信息（/system/status），不打上游、不额外请求
+const qdInfo = computed(() => channelStore.infos['qoder'] || null)
 
 // 积分过期明细。数据来自**本地账本**（/qoder/grants），不是上游——
 // Qoder 没有逐批余额接口，只有领取响应带到期信息，所以每次签到落一条本地记录。
@@ -1731,6 +1799,9 @@ async function refreshQd() {
     usage.value = u.data
     await channelStore.load()
     lastRefresh.value = new Date().toLocaleTimeString('zh-CN')
+    // 趋势图要在 DOM 挂上之后再画（v-if 控制的元素此时才存在）
+    await nextTick()
+    renderQdChart()
   } catch (e: any) {
     error.value = e?.response?.data?.error || e?.message || '未知错误'
   } finally {
@@ -1858,6 +1929,55 @@ function renderTwChart() {
   }
 }
 
+// Qoder 趋势：与 TRAE 完全同构（请求数 + Token 两张小倍数图），
+// 所以**复用 renderTwChart 的画法**而不是抄一份——Qoder 与 TRAE 共用同一个
+// `usage` ref（各自刷新时都会拉自己的 ?channel=），只有挂载的 DOM 不同。
+// 抄一份必然漂移：改一处配色/网格就要改两处。
+const qdReqChartEl = ref<HTMLElement | null>(null)
+const qdTokChartEl = ref<HTMLElement | null>(null)
+let qdReqChart: echarts.ECharts | null = null
+let qdTokChart: echarts.ECharts | null = null
+
+function renderQdChart() {
+  const rows = qdDaily.value
+  if (!rows.length) return
+  const days = rows.map((r) => r.day.slice(5))
+  const xAxis = {
+    type: 'category' as const,
+    data: days,
+    boundaryGap: false,
+    axisLine: { show: true, lineStyle: { color: INK.axis } },
+    axisTick: { show: false },
+  }
+  const yAxis = { type: 'value' as const, ...axisStyle({ formatter: (v: number) => compactNum(v) }) }
+  const tip = (fmtRow: (r: any) => string) => ({
+    ...TOOLTIP_BASE,
+    trigger: 'axis' as const,
+    formatter: (params: any[]) => fmtRow(rows[params[0].dataIndex]),
+  })
+
+  if (qdReqChartEl.value) {
+    if (!qdReqChart) qdReqChart = echarts.init(qdReqChartEl.value)
+    qdReqChart.setOption({
+      grid: { left: 56, right: 16, top: 8, bottom: 4 },
+      tooltip: tip((r) => `${r.day}<br/>请求 <b>${exactNum(r.requests)}</b>${r.failed ? `<br/>失败 ${exactNum(r.failed)}` : ''}`),
+      xAxis: { ...xAxis, axisLabel: { show: false } },
+      yAxis,
+      series: [lineSeries({ name: '请求数', data: rows.map((r) => r.requests), color: SERIES[0], area: true })],
+    })
+  }
+  if (qdTokChartEl.value) {
+    if (!qdTokChart) qdTokChart = echarts.init(qdTokChartEl.value)
+    qdTokChart.setOption({
+      grid: { left: 56, right: 16, top: 8, bottom: 22 },
+      tooltip: tip((r) => `${r.day}<br/>Token <b>${exactNum(r.total_tokens)}</b>`),
+      xAxis: { ...xAxis, axisLabel: { color: INK.muted, fontSize: 11 } },
+      yAxis,
+      series: [lineSeries({ name: 'Token', data: rows.map((r) => r.total_tokens), color: SERIES[1], area: true })],
+    })
+  }
+}
+
 // 千问趋势：与搭子同口径加一张 Token 图。积分图保留——它是这个通道
 // 独有的（免费/付费分池），但 Token 是跨通道可比的用量指标。
 const qwTokChartEl = ref<HTMLElement | null>(null)
@@ -1924,6 +2044,8 @@ function onResize() {
   twReqChart?.resize()
   twTokChart?.resize()
   qwTokChart?.resize()
+  qdReqChart?.resize()
+  qdTokChart?.resize()
 }
 
 onMounted(() => {
@@ -1943,6 +2065,8 @@ onBeforeUnmount(() => {
   twReqChart?.dispose()
   twTokChart?.dispose()
   qwTokChart?.dispose()
+  qdReqChart?.dispose()
+  qdTokChart?.dispose()
   reqChart = null
   tokChart = null
   qwChart = null

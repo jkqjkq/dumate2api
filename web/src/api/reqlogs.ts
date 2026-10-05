@@ -55,6 +55,13 @@ export interface ReqLogRow {
   tw_consumed?: number | null
   tw_remain?: number | null
   tw_limit?: number | null
+  // ---- Qoder 通道的积分明细（第四套账）----
+  // 与千问/TRAE 都不同的地方：**上游 usage 直给本条 credits**
+  // （倍率 × tokens/1000），不做相邻差值——所以首条就有值，并发也不串账。
+  /** 本次实际使用的账号（昵称，取不到则 uid） */
+  qoder_account?: string
+  /** 这条请求消耗的真实 credits，上游直给 */
+  qoder_cost?: number
 }
 
 export interface ReqLogsData {

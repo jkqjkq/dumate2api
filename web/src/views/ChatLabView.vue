@@ -82,7 +82,7 @@
               <span class="chip chip-cost" :class="{ muted: m.cost === null || m.cost === undefined }">
                 <ThunderboltOutlined />
                 <template v-if="m.cost !== null && m.cost !== undefined">{{ m.cost }} 积分</template>
-                <template v-else>未测到消耗</template>
+                <template v-else>{{ m.costNote || '未测到消耗' }}</template>
               </span>
               <span v-if="m.account" class="chip">{{ m.account }}</span>
               <span v-if="m.usage" class="chip">{{ fmtNum(m.usage.total) }} Token</span>
@@ -162,6 +162,7 @@ import client from '@/api/client'
 import { channelStore, CHANNELS, isDirectChannel } from '@/stores/channel'
 import { qwenworkApi as qwenApi } from '@/api/qwenwork'
 import { traeworkApi } from '@/api/traework'
+import { qoderApi } from '@/api/qoder'
 import type { ChatLabModels } from '@/api/chatlab'
 
 interface ChatMessage {
@@ -172,6 +173,8 @@ interface ChatMessage {
   streaming?: boolean
   error?: string
   cost?: number | null
+  /** 直连通道测不到消耗时的说明（计费不在搭子余额里） */
+  costNote?: string
   account?: string
   usage?: { input: number; output: number; total: number }
   ms?: number
@@ -209,6 +212,22 @@ const qwModelsLoading = ref(false)
 const twModels = ref<Array<{ id: string; name: string; prefixed: string }>>([])
 const twModelsLoading = ref(false)
 
+// Qoder 模型：同样从管理端拿，且**必须带 `qoder/` 前缀**。
+// 不带前缀的名字会被网关判成搭子——「选了 Qoder 模型却跑搭子」正是这么来的。
+const qdModels = ref<Array<{ id: string; name: string; prefixed: string }>>([])
+const qdModelsLoading = ref(false)
+
+async function loadQdModels() {
+  if (qdModelsLoading.value) return
+  qdModelsLoading.value = true
+  try {
+    const { data } = await qoderApi.chatlabModels()
+    qdModels.value = data.models || []
+  } catch { /* 拿不到就空列表，不阻断 */ } finally {
+    qdModelsLoading.value = false
+  }
+}
+
 async function loadTwModels() {
   if (twModelsLoading.value) return
   twModelsLoading.value = true
@@ -241,6 +260,11 @@ async function applyChannel(id: string) {
   } else if (id === 'traework') {
     if (!twModels.value.length) await loadTwModels()
     model.value = twModels.value[0]?.prefixed || ''
+  } else if (id === 'qoder') {
+    if (!qdModels.value.length) await loadQdModels()
+    // 默认挑 0.1 档的便宜模型：档位差 14 倍，试调不该默认烧最贵的那个
+    model.value = qdModels.value.find((m) => /^qoder\/(qfmodel|qmodel|q37fmodel|dfmodel|gfmodel)$/.test(m.prefixed))?.prefixed
+      || qdModels.value[0]?.prefixed || ''
   } else {
     if (!models.value) await loadModels()
     model.value = models.value?.exposed?.[0]?.id || models.value?.aliases?.[0]?.id || ''
@@ -271,6 +295,13 @@ const modelOptions = computed(() => {
   }
   if (labChannel.value === 'traework') {
     for (const m of twModels.value) {
+      out.push({ label: `${m.name} (${m.prefixed})`, value: m.prefixed })
+    }
+    return out
+  }
+  if (labChannel.value === 'qoder') {
+    for (const m of qdModels.value) {
+      // value 必须是带前缀的全名——网关靠前缀分流
       out.push({ label: `${m.name} (${m.prefixed})`, value: m.prefixed })
     }
     return out
@@ -308,6 +339,7 @@ async function loadModels() {
 function refreshModels() {
   if (labChannel.value === 'qwenwork') return loadQwModels()
   if (labChannel.value === 'traework') return loadTwModels()
+  if (labChannel.value === 'qoder') return loadQdModels()
   return loadModels()
 }
 
@@ -362,6 +394,7 @@ async function send() {
       target.account = data.account
       target.usage = data.usage
       target.cost = data.cost
+      target.costNote = data.costNote
       target.ms = data.ms
       target.streaming = false
       await loadSessionCost()
@@ -402,6 +435,7 @@ async function send() {
           target.usage = evt.usage
           target.account = evt.account || target.account
           target.cost = evt.cost
+          target.costNote = evt.costNote
         }
       }
     }

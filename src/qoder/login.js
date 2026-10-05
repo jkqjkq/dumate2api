@@ -159,6 +159,11 @@ async function finish(rec) {
     nickname: info.name || '',
     username: info.username || '',
     email: info.email || '',
+    // 手机号**只存脱敏形式**（150****9294）。上游给的是完整明文
+    // （userinfo 的 security_mobile），但界面只需要「认出这是哪个号」，
+    // 没有任何场景要用到完整号码——存明文等于白担一份个人信息泄露风险。
+    // 这个账号文件里已经有 access/refresh token，没必要再加一份完整手机号。
+    phone: authStore.maskPhone(info.security_mobile),
     userType: (plan && plan.user_type) || info.user_type || '',
     planName: (plan && plan.plan_tier_name) || '',
     machineId: rec.machineId || crypto.randomUUID(),

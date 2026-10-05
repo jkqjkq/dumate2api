@@ -48,10 +48,23 @@ function bearerHeaders(token, extra) {
  * 据此排序/标注——**开发调试要挑 0.1 档**（档位差 14 倍）。
  */
 const MODELS_CACHE_MS = parseInt(process.env.DUMATE_QODER_MODELS_CACHE_MS || '300000', 10);
-let modelsCache = { at: 0, data: null };
+// 缓存按「区域 + 账号」隔离。原先是一个模块级单例，两个后果都是实测踩到的：
+//   1. **多账号互相串表**：preferred 账号只返回 2 个模型、另一个账号返回 14 个，
+//      先查谁，后面所有账号都拿到那份表（「配置到 cc-switch」里 Qoder 只列出
+//      2 个模型就是这个原因）。
+//   2. **cn / global 跨区串表**：两个区域的模型集本来就不同（账号也不通用）。
+const modelsCache = new Map(); // `${region}:${uid}` -> { at, data }
+
+function modelsCacheKey(account) {
+  const region = c.normalizeRegion(account && account.region);
+  const who = (account && (account.uid || account.id)) || '';
+  return `${region}:${who}`;
+}
 
 async function fetchModels(account, { force = false } = {}) {
-  if (!force && modelsCache.data && Date.now() - modelsCache.at < MODELS_CACHE_MS) return modelsCache.data;
+  const ck = modelsCacheKey(account);
+  const hit = modelsCache.get(ck);
+  if (!force && hit && Date.now() - hit.at < MODELS_CACHE_MS) return hit.data;
   const cosy = require('./cosy');
   const region = c.normalizeRegion(account.region);
   const ep = c.endpointsOf(region);
@@ -81,11 +94,16 @@ async function fetchModels(account, { force = false } = {}) {
     prefixed: `qoder/${m.key}`,
     // 倍率是相对值，不是积分绝对值
     rate: typeof m.price_factor === 'number' ? m.price_factor : null,
+    // 原价倍率：**错峰/免费模型的 price_factor 会是 0**（实测 qfmodel=0、
+    // original_price_factor=0.1）。只给 rate 会被读成「完全不扣费」，所以两个都带，
+    // 界面在 rate 为 0 时并列显示原价。
+    rateOriginal: typeof m.original_price_factor === 'number' ? m.original_price_factor : null,
     contextWindow: m.max_input_tokens || null,
     isDefault: m.is_default === true,
     isFree: m.is_free === true,
     isNew: m.is_new === true,
     isReasoning: m.is_reasoning === true,
+    multimodal: m.is_vl === true,
     // 错峰优惠：22:00-08:00 打折
     promotion: (m.promotion && m.promotion.active) ? {
       discountFactor: m.promotion.discount_factor || null,
@@ -95,7 +113,7 @@ async function fetchModels(account, { force = false } = {}) {
     cheap: typeof m.price_factor === 'number' && m.price_factor <= 0.1,
   }));
   const out = { ok: true, error: '', models };
-  if (models.length) modelsCache = { at: Date.now(), data: out };
+  if (models.length) modelsCache.set(ck, { at: Date.now(), data: out });
   return out;
 }
 
@@ -224,6 +242,55 @@ async function listCampaigns(token, region) {
   };
 }
 
+/**
+ * 只读地判断「今天签到了没」——**不领取任何东西**。
+ *
+ * 关键前提：/campaigns 是 GET 且只读（`checkin()` 才 POST claim），所以
+ * 拿它查状态不会把「未签到」变成「已签到」。这是与 TRAE 的 status() 同一个
+ * 定位（那边也是只读接口），界面要显示的正是这个。
+ *
+ * 判定口径（实测）：
+ *   claimStatus = 'CLAIMABLE' → 还没领（今天可签）
+ *   claimStatus = 'CLAIMED'   → 已领（今天已签）
+ *   一个活动都没有          → 查不出，给 null（不猜成已签）
+ *
+ * 顺带把「下次可签时刻」算出来：活动的 endAt（Unix 秒）就是刷新时刻——
+ * 官方活动描述写着 Daily reset: 10:00 (UTC+8)，与本项目记载一致，
+ * 不是 00:00。查不到时返回 null，界面显示「—」而不是编一个。
+ */
+async function checkinStatus(token, region) {
+  const list = await listCampaigns(token, region);
+  if (!list.ok) return { ok: false, error: list.error, checkedIn: null, nextAt: null, pending: null };
+
+  const camps = list.campaigns || [];
+  if (!camps.length) {
+    // 上游没给任何活动：既不能说已签也不能说未签，如实 null
+    return { ok: true, checkedIn: null, nextAt: null, pending: null, campaigns: 0 };
+  }
+
+  const claimable = camps.filter((c) => c.claimStatus === 'CLAIMABLE');
+  const claimed = camps.filter((c) => c.claimStatus === 'CLAIMED');
+
+  // 待领总额：只有 CLAIMABLE 的才算「今天还没领」
+  const pending = claimable.reduce(
+    (s, c) => s + ((c.benefit && typeof c.benefit.amount === 'number') ? c.benefit.amount : 0), 0);
+
+  // 下次可签时刻：取活动最早的 endAt（今天这批的截止 = 明天这批的开始）
+  const ends = camps.map((c) => (typeof c.endAt === 'number' ? c.endAt : 0)).filter((n) => n > 0);
+  const nextAt = ends.length ? Math.min(...ends) * 1000 : null;
+
+  return {
+    ok: true,
+    checkedIn: claimable.length === 0 && claimed.length > 0,
+    // 有可领的 → 明确「未签」；一个活动都没 → null
+    pending: claimable.length ? Number(pending.toFixed(4)) : (claimed.length ? 0 : null),
+    nextAt,
+    campaigns: camps.length,
+    claimable: claimable.length,
+    claimed: claimed.length,
+  };
+}
+
 async function claimCampaign(token, region, campaignId) {
   const ep = c.endpointsOf(region);
   const url = `${ep.CampaignsBase}/${encodeURIComponent(campaignId)}/claim`;
@@ -310,5 +377,5 @@ async function checkin(token, region, opts = {}) {
 
 module.exports = {
   request, bearerHeaders, exchange, ensureAccount, fetchUserInfo, fetchPlan,
-  fetchQuota, fetchModels, listCampaigns, claimCampaign, checkin, TIMEOUT_MS,
+  fetchQuota, fetchModels, listCampaigns, claimCampaign, checkin, checkinStatus, TIMEOUT_MS,
 };

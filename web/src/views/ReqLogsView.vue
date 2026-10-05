@@ -13,7 +13,7 @@
       </template>
       <template #actions>
         <!-- 通道跟随顶栏的全局切换，不另设选择器 -->
-        <a-tag :color="isQw || isTw ? 'cyan' : 'blue'" class="mr-1">{{ chLabel }}</a-tag>
+        <a-tag :color="isDirect ? 'cyan' : 'blue'" class="mr-1">{{ chLabel }}</a-tag>
         <a-select
           v-if="tab === 'gateway'"
           v-model:value="filterStatus"
@@ -43,7 +43,7 @@
     <a-tabs v-model:activeKey="tab" @change="onTabChange">
       <a-tab-pane key="gateway" tab="网关请求" />
       <!-- 「积分消费明细」是搭子上游的计费账单，两条直连通道都没有这份数据 -->
-      <a-tab-pane v-if="!isQw && !isTw" key="points" tab="积分消费明细" />
+      <a-tab-pane v-if="!isDirect" key="points" tab="积分消费明细" />
     </a-tabs>
 
     <a-card v-if="tab === 'gateway'" :bordered="false" class="mb-4">
@@ -71,6 +71,7 @@
                  服务端过滤时把它们算进搭子，但这里仍标注来源，不伪造字段 -->
             <a-tag v-if="record.channel === 'qwenwork'" color="cyan">千问</a-tag>
             <a-tag v-else-if="record.channel === 'traework'" color="purple">TRAE</a-tag>
+            <a-tag v-else-if="record.channel === 'qoder'" color="orange">Qoder</a-tag>
             <a-tag v-else-if="record.channel === 'dumate'" color="blue">搭子</a-tag>
             <a-tooltip v-else title="分通道埋点上线前的记录">
               <a-tag color="default">搭子*</a-tag>
@@ -138,6 +139,13 @@
               <span v-else-if="record.tw_account" class="text-xs text-slate-400">
                 —
                 <div class="text-xs text-slate-400">待下一条</div>
+              </span>
+              <span v-else class="text-xs text-slate-400">—</span>
+            </template>
+            <!-- Qoder：上游 usage 直给本条 credits，三条直连通道里唯一精确归因的 -->
+            <template v-else-if="record.channel === 'qoder'">
+              <span v-if="record.qoder_cost !== undefined" class="text-xs text-orange-500">
+                {{ fmtQw(record.qoder_cost) }}
               </span>
               <span v-else class="text-xs text-slate-400">—</span>
             </template>
@@ -222,6 +230,7 @@
           <div class="detail-value">
             <a-tag v-if="detail.channel === 'qwenwork'" color="cyan">千问办公</a-tag>
             <a-tag v-else-if="detail.channel === 'traework'" color="purple">TRAE Work</a-tag>
+            <a-tag v-else-if="detail.channel === 'qoder'" color="orange">Qoder</a-tag>
             <a-tag v-else-if="detail.channel === 'dumate'" color="blue">百度搭子</a-tag>
             <span v-else class="text-slate-400">百度搭子（分通道前的记录）</span>
           </div>
@@ -325,6 +334,20 @@
                 <span class="text-xs text-slate-400">（归因记录未落盘，稍后刷新）</span>
               </template>
             </template>
+            <!-- Qoder：上游直给本条 credits，不需要差值参照点 -->
+            <template v-else-if="detail.channel === 'qoder'">
+              <template v-if="detail.qoder_cost !== undefined">
+                {{ fmtQw(detail.qoder_cost) }} 积分
+                <div v-if="detail.qoder_account" class="text-xs text-slate-400 mt-1">
+                  账号：{{ detail.qoder_account }}
+                </div>
+                <div class="text-xs text-slate-400">上游按本条请求的倍率 × tokens 直给，无需差值</div>
+              </template>
+              <template v-else>
+                —
+                <span class="text-xs text-slate-400">（上游未返回 credits）</span>
+              </template>
+            </template>
             <template v-else-if="detail.points_delta !== undefined">
               {{ detail.points_delta > 0 ? '+' : '' }}{{ detail.points_delta }}
               <span v-if="detail.points_exact === false" class="text-xs text-orange-500">
@@ -367,7 +390,7 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import PageHeader from '@/components/PageHeader.vue'
 import client from '@/api/client'
-import { channelStore, CHANNELS, isTraework, isQwenwork, channelParam } from '@/stores/channel'
+import { channelStore, CHANNELS, isDirectChannel, channelParam } from '@/stores/channel'
 import type { ReqLogRow, ReqLogsData, PointsRecord, PointsRecordsData } from '@/api/reqlogs'
 
 const data = ref<ReqLogsData | null>(null)
@@ -388,10 +411,8 @@ const detail = ref<ReqLogRow | null>(null)
 const detailOpen = ref(false)
 
 // 当前通道。网关请求按通道在**服务端**过滤；「积分消费明细」是搭子上游的
-// 账单，两条直连通道都没有，所以那个页签在非搭子下隐藏。
-// 千问与 TRAE 各自分开判定：虽然都不显示该页签，但筛选参数必须分别传对。
-const isTw = computed(() => isTraework())
-const isQw = computed(() => isQwenwork())
+// 账单，三条直连通道都没有那份数据，所以该页签在直连通道下隐藏。
+const isDirect = computed(() => isDirectChannel())
 const chLabel = computed(() => CHANNELS.find((c) => c.id === channelStore.current)?.label || channelStore.current)
 
 const statusOptions = [
@@ -567,8 +588,8 @@ watch([days, filterAccount], () => {
 // 停在原来的页码会看到空白页
 watch(() => channelStore.current, () => {
   page.value = 1
-  // 直连通道（千问 / TRAE）没有「积分消费明细」页签，若正停在那页则切回
-  if ((isQw.value || isTw.value) && tab.value === 'points') {
+  // 直连通道没有「积分消费明细」页签，若正停在那页则切回
+  if (isDirect.value && tab.value === 'points') {
     tab.value = 'gateway'
     load()
     return

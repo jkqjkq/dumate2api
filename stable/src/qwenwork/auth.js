@@ -14,6 +14,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const c = require('./constants');
+const { explainError } = require('../errtext');
 
 const FILE = 'qwenwork-accounts.json';
 
@@ -69,7 +70,8 @@ function list() {
     expiresAt: a.expiresAt || null,
     refreshExpiresAt: a.refreshExpiresAt || null,
     machineId: a.machineId || '',
-    lastError: a.lastError || '',
+    // 读取时翻译：存量记录里的 `aborted` 之类也要看得懂（详见 errtext.js）
+    lastError: explainError(a.lastError),
     // lastError 的写入时刻。界面据此显示「N 分钟前」——没有它，一条几小时前
     // 的瞬时错误会被读成「当前故障」（2026-10-02 实测踩到：账号页显示的
     // 403/402 其实早已自愈）。无 lastError 时为 null。

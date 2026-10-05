@@ -171,6 +171,46 @@ sanguo 项目的 `novel-creator` 技能把写作拆成分阶段门控（「起�
 
 判定这类问题时要**分清「网关行为」与「模型行为」**：把出问题的那次请求（从会话日志重建 input + instructions）经网关重放，如果稳定调工具（本次 5/5、多轮循环 6 轮 × 3 次全正常），说明是概率性的模型行为而不是网关丢帧——**不要为了一个复现不出来的现象去改翻译层**。本次排查还顺带确认：sanguo 会话上下文其实只有 1.3~2.5 万 token（网关日志里 25 万那条属于另一个会话），所以与长上下文无关。
 
+**TRAE 的「播报即收尾」靠「检测 + 重试」修，提示词修不动**（2026-10-05，`src/traework/`）。
+现象：`Doubao-Seed-Evolving`（Codex `model_reasoning_effort=high`）在**带工具的**请求上
+有 20~67% 的概率只输出一条进度播报（`当前进度：8%｜已完成：…｜下一步：读取…`）就结束回合，
+Codex 把「无工具调用」判定成任务完成退出——用户看到「没按要求做完就退出」。
+**排障关键**：上游 SSE **没有被截断**——流式 `reasoning_content` 与收尾帧 `extra_info.content`
+**长度完全相等**（实测都是 244 字符），`done` 帧也正常到达。模型是真的在「Need list chapters concise.」
+这种半句推理后跳到播报、不发工具调用。所以这不是丢帧，不能去改翻译层。
+
+实测（同一份真实 Codex 请求，各跑 4~5 次，判据＝该轮有没有发出工具调用）：
+
+| 手段 | 成功率 |
+|---|---|
+| 现状（纪律注入已在 `system[0]` 尾部） | 1/5 |
+| 去掉纪律（对照） | 1/4 |
+| 纪律移到消息末尾 | 3/4 |
+| `tool_choice:"required"` | 1/4 |
+| 只留 `exec_command` 一个工具 | 2/4 |
+| **重试时追加「只输出工具调用」** | **5/5** |
+
+**结论：只有重试可靠**，`tool_choice` 上游并不真的强制。所以 `send()` 里做的是
+**检测 + 一次性重试**（`DUMATE_TRAEWORK_REPAIR_RETRY`，默认 1；`0` 关闭）：
+
+- **正文缓冲门**（`chat.createTextGate`）：`reasoning_content` 直发；`content` 先扣住；
+  `tool_calls` 一到就先冲刷正文再直发；`token_usage` / `finish_reason` 暂扣到整轮结束。
+  **正文总在工具调用之前、只有几十字，所以缓冲几乎不增加首字延迟**——不要改成「全量缓冲」，
+  那会把每一轮的流式效果全丢掉。超过 `DUMATE_TRAEWORK_HOLD_CAP`（默认 600 字）转直发，
+  避免长回答被扣住。
+- **判据是「模型自己说还有下一步」**（`chat.looksUnfinished`）：无工具调用 + 正文 < 600 字 +
+  命中 `下一步|next step`（空正文也算）。既然模型声明了下一步，回合就不该在这里结束。
+  **不要放宽成「只要没有工具调用就重试」**——那样真·收尾也会被逼着再调一次工具，会变成永不结束。
+- **重试 = 原请求体末尾追加一条 user 消息**（`chat.withRepairNudge`，幂等）；重试轮若仍没调工具，
+  就把它的正文吐给下游收尾，不再重试。
+- 触发时打一行日志（含被丢弃的正文片段），用来区分「真·播报即收尾」与「判据误伤」。
+
+**验证**：`node test/verify-traework-repair.js`（38 项，离线，打桩 `chat.postStream`/`readStream`
+与 auth/credits，不需要账号与网络）。真机验证（2026-10-05，sanguo 项目副本，
+`traework/Doubao-Seed-Evolving`）：修复前 1~2 次工具调用后停在 8~18%；修复后 17 轮请求、
+10 次修复触发，**第 164/165/166 三章正文（2742/2706/3298 字）＋ 正文台账 ＋ 情欲清单全部落盘**，
+最后自然收尾在 `当前进度：100%`。
+
 **工具参数被截断必须报 `incomplete`，不能报 `completed`**（`src/responses.js` 的 `truncatedArguments`）。
 上游在 `finish_reason=length` 处会把 `arguments` 停在半句 JSON（实测 `{"cmd": "... @('第三章　第七户','',`，字符串都没闭合）。网关若当正常工具调用交给 Codex，Codex 会**执行一条语法残缺的命令**：命令必然失败，模型看到失败后往往只回一句「下一步：写入第 N 章」就结束回合。现在这种参数会被判成 incomplete，埋点带 `error=tool_arguments_truncated`。离线验证：`node test/verify-truncated-toolcall.js`。
 顺带修掉一个误报：`emptyButTruncated` 原来只排除 `stop`，把**纯工具调用轮次**（`finish_reason=tool_calls` + 正文 0，Codex 里大量存在）也算成了截断。
@@ -421,8 +461,10 @@ DUMATE2API_PORT=9082 node src/server.js
 `node test/verify-qwen-discipline.js`（执行纪律的注入条件与幂等）、
 `node test/verify-truncated-toolcall.js`（工具参数截断判定 + 纯工具调用轮次不误报 incomplete）。
 
-另有一个 TRAE 专项离线验证（不需要起服务）：
-`node test/verify-traework-gained.js`（签到到账差值计算，含 0/负数/快照缺失三种边界）。
+另有两个 TRAE 专项离线验证（都不需要起服务）：
+`node test/verify-traework-gained.js`（签到到账差值计算，含 0/负数/快照缺失三种边界）、
+`node test/verify-traework-repair.js`（「播报即收尾」修复：判据、幂等、正文缓冲门语义、
+端到端「首轮只播报→重试带工具调用」；打桩 postStream/readStream，不需要账号与网络）。
 
 另一个搭子专项离线验证（不需要起服务）：
 `node test/verify-display-name.js`（账号显示名解析：占位名识别、优先级、空值边界）。
@@ -616,6 +658,8 @@ Claude Code ── Anthropic ───────┼──→ 网关 :9080 ─�
 | `DUMATE_TRAEWORK_AUTOSTART` | `auto` | `auto`=启用 TRAE 通道 / `off`=关闭（与 `DUMATE_QWENWORK_AUTOSTART` 同形） |
 | `DUMATE_TRAEWORK_MIN_MAX_TOKENS` | `16384` | TRAE 输出预算下限（三通道各一套，不要互相套用） |
 | `DUMATE_TRAEWORK_MODELS_CACHE_MS` | `300000` | TRAE 模型表缓存时长（5 分钟）。模型表只在登录/刷新时变，不必每次打上游 |
+| `DUMATE_TRAEWORK_REPAIR_RETRY` | `1` | 「播报即收尾」的重试次数上限。`0` 关闭整个修复（见上文 TRAE 段落） |
+| `DUMATE_TRAEWORK_HOLD_CAP` | `600` | 正文缓冲门的阈值（字符）。超过就转直发，避免长回答被扣住等判定 |
 | `DUMATE_WEB_FALLBACK` | 未设（开启） | 设 `0` 关闭「桌面凭证不可用时回落到网页池」（见上文回落机制）。关闭后桌面凭证失效即请求全失败 |
 | `DUMATE_POINTS_METER` | 未设（开启） | 设 `0` 关闭搭子的余额游标采集（`points-cursor.js`）。关闭后请求日志不再有逐条消耗 |
 | `DUMATE_LAG_MONITOR` | 未设（开启） | 设 `0` 关闭事件循环卡顿监控（`startLagMonitor`）。开启时同步代码卡顿超阈值会打日志 |

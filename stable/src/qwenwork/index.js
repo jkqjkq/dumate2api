@@ -16,6 +16,7 @@ const authStore = require('./auth');
 const constants = require('./constants');
 const wasmPath = require('./wasm-path');
 const credits = require('./credits');
+const { normalizeError } = require('../errtext');
 
 // 在飞请求计数。积分归因在并发下有个本质限制：两个请求同时在飞时，
 // 「前后差值」分不清是谁消耗的——总和正确，单项归属不准。
@@ -84,7 +85,7 @@ function retryable(code, message) {
 
 /** 把一次失败记到账号上（界面要能看到为什么这个号没被用） */
 function markFailure(account, msg) {
-  try { authStore.patch(account.id, { lastError: String(msg).slice(0, 200) }); }
+  try { authStore.patch(account.id, { lastError: normalizeError(msg) }); }
   catch (e) { /* 记不下不影响主流程 */ }
 }
 

@@ -92,6 +92,9 @@
           <template v-if="column.key === 'name'">
             <div>{{ record.nickname || '未命名' }}</div>
             <div class="text-xs text-slate-400 font-mono">UID {{ record.uid || '—' }}</div>
+            <div v-if="record.phoneMasked" class="text-xs text-slate-500 font-mono">
+              {{ record.phoneMasked }}
+            </div>
           </template>
           <template v-else-if="column.key === 'region'">
             <a-tag :color="record.region === 'cn' ? 'blue' : 'purple'">

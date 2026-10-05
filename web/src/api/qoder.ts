@@ -64,6 +64,17 @@ export interface QoderCreditRow {
   addOnQuota: QoderQuotaBucket | null
   isQuotaExceeded: boolean | null
   error: string
+  /**
+   * 今日是否已签到。来自**只读**的 /campaigns（claimStatus），不触发领取。
+   * null = 查不出来（上游没给活动），不猜成已签/未签。
+   */
+  checkedIn: boolean | null
+  /** 待领额度（还有 CLAIMABLE 活动时）；已签为 0，查不出为 null */
+  checkinPending: number | null
+  /** 下次可签时刻（活动 endAt）。Qoder 是 10:00 UTC+8 刷新，不是 00:00 */
+  checkinNextAt: number | null
+  /** 上次签到时刻（本地记录，上游不提供） */
+  lastCheckin: number | null
 }
 
 /**
@@ -91,12 +102,36 @@ export interface QoderGrant {
   expired: boolean
 }
 
+/**
+ * 逐笔消耗明细（按时间倒序）。
+ *
+ * 与 TRAE 的同名字段形状相同但**成本来源不同**：TRAE 是 consumed 游标做差
+ * （并发时可能不精确），Qoder 的 cost 是上游 `usage.credits` 直给的单请求扣费
+ * （倍率 × tokens/1000），所以 exact 恒为 true。
+ * cost 为 null = 上游这次没给 credits 字段，不补 0。
+ */
+export interface QoderCreditRecord {
+  ts: number
+  req_id: string
+  account: string
+  account_id: number
+  model: string
+  ms: number | null
+  cost: number | null
+  exact: boolean
+}
+
 export interface QoderModel {
   key: string
   name: string
   prefixed: string
   /** 倍率（上游 price_factor）。相对值，不是积分绝对值 */
   rate: number | null
+  /**
+   * 原价倍率（original_price_factor）。错峰/免费模型的 rate 会是 0
+   * （实测 qfmodel=0、原价 0.1），只显示 rate 会被读成「完全不扣费」。
+   */
+  rateOriginal: number | null
   contextWindow: number | null
   isDefault: boolean
   isFree: boolean
@@ -147,6 +182,10 @@ export const qoderApi = {
     summary: { total: number; enabled: number; refreshExpired: number; errored: number }
     note: string
   }>('/qoder/dashboard'),
+  /** 聊天测试台用的模型清单：**带 qoder/ 前缀**（网关靠前缀分流） */
+  chatlabModels: () => client.get<{
+    models: Array<{ id: string; name: string; prefixed: string }>
+  }>('/chatlab/qoder-models'),
   models: (opts: { refresh?: boolean } = {}) =>
     client.get<{
       models: QoderModel[]
@@ -162,6 +201,8 @@ export const qoderApi = {
       total: number
       valid: number
       unknown: number
+      /** 今日已签到的账号数（只数明确 true 的，查不出的 null 不计入） */
+      checkedIn: number
       /** 签到/赠送积分合计 */
       addOnTotal: number
       /** 订阅内额度合计 */
@@ -174,6 +215,21 @@ export const qoderApi = {
     }
     note: string
   }>('/qoder/credits'),
+  /** 最近 N 条逐笔消耗明细（本地归因账本，不打上游） */
+  creditRecords: (limit = 200) =>
+    client.get<{
+      limit: number
+      rows: QoderCreditRecord[]
+      window: { cost: number; requests: number; exact: number }
+      /**
+       * 账本最早一条的时刻（null = 一本空账）。
+       * **必须展示**：本功能上线前的请求没有逐笔记录、无法追溯，
+       * 不标出起点的话「合计」会被读成「总共只花了这么点」。
+       */
+      since: number | null
+      /** 账本涵盖的请求数（不是全部请求数） */
+      recorded: number
+    }>(`/qoder/credits/records?limit=${limit}`),
   /** 积分过期明细（本地账本，不打上游） */
   grants: (days = 30) => client.get<{
     windowDays: number

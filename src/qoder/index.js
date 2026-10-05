@@ -14,6 +14,7 @@ const cosy = require('./cosy');
 const authStore = require('./auth');
 const session = require('./session');
 const constants = require('./constants');
+const { normalizeError } = require('../errtext');
 
 /** 预热：Qoder 无 wasm 依赖，只检查有没有可用账号 */
 function warmup() {
@@ -63,7 +64,7 @@ function retryable(code, message) {
 }
 
 function markFailure(account, msg) {
-  try { authStore.patch(account.id, { lastError: String(msg).slice(0, 200) }); }
+  try { authStore.patch(account.id, { lastError: normalizeError(msg) }); }
   catch (e) { /* 记不下不影响主流程 */ }
 }
 
@@ -73,7 +74,7 @@ function markFailure(account, msg) {
  * 与千问的 runOnce 结构对应，但签名是本地调用：
  *   buildBody → cosy.encode → newSession(该账号身份) → buildHeaders → post
  */
-async function runOnce(account, payload, onChunk, opts) {
+async function runOnce(account, payload, onChunk, opts, meter) {
   const auth = await session.ensureAccount(authStore, account);
   const region = constants.normalizeRegion(auth.region);
   const ep = constants.endpointsOf(region);
@@ -104,6 +105,16 @@ async function runOnce(account, payload, onChunk, opts) {
   });
 
   const startedAt = Date.now();
+  // 本条请求的 credits（上游 usage 直给）。流式路径逐帧扫、取最大值——
+  // 上游会在多帧里重复带 usage，最后一帧才是整轮合计。
+  let peakCredits = null;
+  // 参数两种形状都收：流式路径给的是整帧（看 j.usage.credits），
+  // 非流式给的是聚合后的 usage 对象本身（看 u.credits）。
+  const noteCredits = (o) => {
+    const u = o && o.usage ? o.usage : o;
+    const v = u ? Number(u.credits) : NaN;
+    if (Number.isFinite(v)) peakCredits = peakCredits == null ? v : Math.max(peakCredits, v);
+  };
   try {
     if (onChunk) {
       let firstErr = null;
@@ -111,8 +122,10 @@ async function runOnce(account, payload, onChunk, opts) {
       const res = await chat.postStream(ep.ChatStreamURL, encBody, headers, (inner) => {
         if (firstErr) return;
         try {
-          const err = chat.payloadError(JSON.parse(inner));
+          const parsed = JSON.parse(inner);
+          const err = chat.payloadError(parsed);
           if (err) { firstErr = err; return; }
+          noteCredits(parsed);
         } catch (e) { /* 正常数据帧 */ }
         sent = true;
         onChunk(inner);
@@ -123,6 +136,7 @@ async function runOnce(account, payload, onChunk, opts) {
         err.sent = sent;
         throw err;
       }
+      meter.settle(peakCredits);
       return res;
     }
     const res = await chat.post(ep.ChatStreamURL, encBody, headers);
@@ -140,7 +154,9 @@ async function runOnce(account, payload, onChunk, opts) {
       payloads.push(...chat.unwrap(raw));
     }
     const out = chat.aggregate(payloads, modelKey);
+    if (out && out.usage) noteCredits(out.usage);
     if (opts && opts.onAccount) { /* 非流式也报一次 */ }
+    meter.settle(peakCredits);
     return out;
   } catch (e) {
     // 网络错误没有 statusCode，标记一下让上层知道可以换号
@@ -155,10 +171,33 @@ const MAX_ATTEMPTS = 3;
 /**
  * 发对话请求。主账号失败且错误「换号有救」时，按可用列表顺序转移。
  */
+/**
+ * 积分归因的记账器。
+ *
+ * 与千问/TRAE 的关键差别：**Qoder 上游直给本条请求的 credits**
+ * （`倍率 × tokens/1000`），所以不用做「相邻两条的差值」——每条独立可归因，
+ * 首条也有值、并发也不会串账。传 null 表示没测到，如实留空不补 0。
+ */
+function makeMeter(account, opts) {
+  return {
+    settle(credits) {
+      try {
+        require('./credits').capture(account, credits, {
+          reqId: opts.reqId || '',
+          model: opts.model || '',
+          ms: opts.startedAt ? Date.now() - opts.startedAt : null,
+        });
+      } catch (e) { /* 记账失败绝不影响已发出的响应 */ }
+    },
+  };
+}
+
 async function send(payload, onChunk, opts = {}) {
   const tried = new Set();
   const errors = [];
   let account = pickAccount();
+  const model = payload && payload.model ? String(payload.model).replace(/^qoder\//, '') : '';
+  const startedAt = Date.now();
 
   for (let i = 0; i < MAX_ATTEMPTS; i++) {
     tried.add(account.id);
@@ -166,8 +205,10 @@ async function send(payload, onChunk, opts = {}) {
       const name = account.nickname || account.uid || `账号 ${account.id}`;
       try { opts.onAccount(name); } catch (e) { /* 上报失败不影响请求 */ }
     }
+    // 每个账号一份：换号重试时归因要记到**实际成功的那个**账号上
+    const meter = makeMeter(account, { ...opts, model, startedAt });
     try {
-      const result = await runOnce(account, payload, onChunk, opts);
+      const result = await runOnce(account, payload, onChunk, opts, meter);
       // 成功即清除上次的失败标记（与千问同一约定：一次瞬时失败不该永远挂着）
       if (account.lastError) {
         try { authStore.patch(account.id, { lastError: '' }); }
@@ -238,8 +279,34 @@ async function listModelEntries() {
 /** 账号的额度与签到（管理端用） */
 function checkin(account) {
   const a = account || pickAccount();
-  // 把账号传下去：签到成功时顺手写本地批次账本（过期提醒的数据源）
-  return session.checkin(a.accessToken, a.region, { account: a });
+  return checkinAndSave(a);
+}
+
+/**
+ * 签到并把结果落盘到账号（`lastCheckin`）。
+ *
+ * 为什么要这层包装：session.checkin 是纯网络动作，不认识本地存储。而界面
+ * 要回答「上次什么时候签的」——这个上游不提供（campaigns 只给当前活动的
+ * claimStatus，不给领取时刻），只能本地记。与 TRAE 的 checkinAndSave 同一定位。
+ *
+ * 失败不打 lastError：签到失败是**瞬时**结果，写进去会让账号永久带着一个
+ * 已经自愈的错误（千问/搭子的 lastError 就是这个坑）。只有确实领到了才记时间。
+ */
+async function checkinAndSave(account) {
+  const a = account || pickAccount();
+  let r;
+  try {
+    // 把账号传下去：签到成功时顺手写本地批次账本（过期提醒的数据源）
+    r = await session.checkin(a.accessToken, a.region, { account: a });
+  } catch (e) {
+    return { ok: false, error: e.message, claimed: [] };
+  }
+  const got = (r.claimed || []).some((x) => x.ok);
+  try {
+    const auth = require('./auth');
+    if (got) auth.patch(a.id, { lastCheckin: Date.now() });
+  } catch (e) { /* 落盘失败不影响本次签到结果 */ }
+  return r;
 }
 
 function quota(account) {

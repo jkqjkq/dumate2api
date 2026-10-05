@@ -163,9 +163,20 @@ async function qoderRows() {
       key: m.key,
       name: m.name || m.display_name || m.key,
       rate: typeof m.rate === 'number' ? m.rate : (typeof m.price_factor === 'number' ? m.price_factor : null),
+      // 原价倍率：免费/错峰模型的 price_factor 会是 0（实测 qfmodel=0、
+      // original_price_factor=0.1），只显示 rate 会被读成「不扣费」
+      rateOriginal: typeof m.rateOriginal === 'number'
+        ? m.rateOriginal
+        : (typeof m.original_price_factor === 'number' ? m.original_price_factor : null),
       ctx: typeof m.contextWindow === 'number' ? m.contextWindow : (typeof m.max_input_tokens === 'number' ? m.max_input_tokens : null),
+      reasoning: m.isReasoning === true || m.is_reasoning === true,
+      multimodal: m.multimodal === true || m.is_vl === true,
+      isFree: m.isFree === true || m.is_free === true,
     }))
-    : constants.FALLBACK_MODELS.map((k) => ({ key: k, name: k, rate: null, ctx: null }));
+    : constants.FALLBACK_MODELS.map((k) => ({
+      key: k, name: k, rate: null, rateOriginal: null, ctx: null,
+      reasoning: false, multimodal: false, isFree: false,
+    }));
   return items.map((m) => ({
     id: m.key,
     name: m.name || m.key,
@@ -176,14 +187,20 @@ async function qoderRows() {
     // 倍率是相对值（price_factor），不是积分绝对值——与 TRAE 同理
     rate: typeof m.rate === 'number' ? m.rate : null,
     rateSource: typeof m.rate === 'number' ? 'upstream' : null,
+    rateOriginal: typeof m.rateOriginal === 'number' ? m.rateOriginal : null,
     contextWindow: typeof m.ctx === 'number' ? m.ctx : null,
     contextWindowMin: null,
     contextSource: typeof m.ctx === 'number' ? 'upstream' : null,
     contextNote: '',
+    // 输出上限：**上游的模型表没有这个字段**（实测字段表里只有
+    // max_input_tokens）。这里给的是网关下发的预算下限（budget.js 的
+    // QD_FLOOR），来源标 config——不拿上下文冒充输出上限，也不编一个值。
     maxTokens: budget.resolveQoderMaxTokens(0),
     maxTokensSource: 'config',
-    capability: 'chat_model',
-    multimodal: false,
+    capability: m.reasoning ? 'reasoning_model' : 'chat_model',
+    multimodal: !!m.multimodal,
+    // 免费档：上游 is_free，与 TRAE 的会员折扣是两回事，界面分开标
+    isFree: !!m.isFree,
     // 便宜档标记：0.1 倍率的适合调试（省额度）
     note: (typeof m.rate === 'number' && m.rate <= 0.1) ? '低倍率，适合开发调试' : '',
   }));

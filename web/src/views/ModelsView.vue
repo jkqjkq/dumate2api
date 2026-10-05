@@ -259,45 +259,15 @@
 
       <a-alert v-if="qdError" type="warning" show-icon class="mt-3" :message="qdError" />
 
-      <a-table
-        v-if="qdModels.length"
-        size="small"
-        :pagination="false"
-        :data-source="qdModels"
-        :columns="qdColumns"
-        row-key="key"
-        class="mt-3"
-      >
-        <template #bodyCell="{ column, record }">
-          <template v-if="column.key === 'name'">
-            <div class="font-medium">
-              {{ record.name }}
-              <a-tag v-if="record.isDefault" color="blue" class="ml-1" size="small">默认</a-tag>
-              <a-tag v-if="record.cheap" color="green" class="ml-1" size="small">省额度</a-tag>
-              <a-tag v-if="record.isNew" color="orange" class="ml-1" size="small">新</a-tag>
-            </div>
-            <div class="font-mono text-xs text-slate-400">{{ record.key }}</div>
-          </template>
-          <template v-else-if="column.key === 'prefixed'">
-            <span class="font-mono text-xs">{{ record.prefixed }}</span>
-          </template>
-          <template v-else-if="column.key === 'rate'">
-            <!-- 倍率是**相对值**，不是积分绝对值——必须标出来，否则会被读成单价 -->
-            <span class="num">{{ record.rate == null ? '—' : record.rate }}</span>
-            <div v-if="record.promotion" class="text-xs text-green-500">
-              错峰 {{ record.promotion.windowStart }}–{{ record.promotion.windowEnd }}
-            </div>
-          </template>
-          <template v-else-if="column.key === 'ctx'">
-            <span class="num">{{ record.contextWindow ? (record.contextWindow / 1000) + 'K' : '—' }}</span>
-          </template>
-        </template>
-      </a-table>
-      <a-empty v-else :description="qdError || '未取到模型列表'" />
+      <!-- 模型信息表：倍率（可排序）/ 上下文 / 输出上限，字段带来源标记。
+           与搭子、千问、TRAE 共用同一个组件——Qoder 原本是单独一份 a-table，
+           那份没有输出上限、也没有倍率排序 -->
+      <ModelInfoTable :channel="'qoder'" :preloaded="qdInfoRows" class="mt-3" />
 
       <div class="text-xs text-slate-500 mt-3">
         调用时用前缀名（如 <span class="font-mono">qoder/gfmodel</span>）；不带前缀的名字一律走搭子。
         <span class="text-amber-500">倍率是相对值（上游 price_factor），实际扣费 = 倍率 × 用量；开发调试请挑「省额度」的 0.1 档。</span>
+        <span class="text-slate-400">倍率为 0 的是错峰/免费模型，旁边并列显示原价——0 表示当前不扣费，不是「这个模型不要钱」。</span>
       </div>
     </a-card>
 
@@ -586,6 +556,8 @@ const qdCredits = ref<QoderCreditRow[]>([])
 // 通道元信息（账号数 / 当前账号 / token 到期）来自 /system/status 的 channels.qoder
 const qdStatus = computed(() => channelStore.infos['qoder'] || null)
 const qdCheapCount = computed(() => qdModels.value.filter((m) => m.cheap).length)
+// 统一形状的模型信息行（倍率 / 原价 / 上下文 / 输出上限），交给 ModelInfoTable 排序
+const qdInfoRows = ref<ModelInfoRow[] | null>(null)
 const qdTotals = computed(() => {
   let addOn = 0, user = 0, ok = 0
   for (const r of qdCredits.value) {
@@ -594,24 +566,24 @@ const qdTotals = computed(() => {
   }
   return { addOn, user, known: ok }
 })
-const qdColumns = [
-  { title: '模型', key: 'name', width: '30%' },
-  { title: '调用名', key: 'prefixed', width: '26%' },
-  { title: '倍率', key: 'rate', width: '22%' },
-  { title: '上下文', key: 'ctx', width: '22%' },
-]
 
 async function loadQd(force = false) {
   try {
-    const [m, c] = await Promise.all([
+    // 三份并行：/qoder/models（倍率 + 上下文，顶部计数用）、
+    // /models/info?channel=qoder（统一形状，表格与倍率排序用）、额度
+    const [m, info, c] = await Promise.all([
       qoderApi.models({ refresh: force }),
+      modelInfoApi.list({ channel: 'qoder', refresh: force })
+        .catch(() => ({ data: { rows: [] as ModelInfoRow[], error: '' } })),
       qoderApi.credits().catch(() => ({ data: { rows: [] as QoderCreditRow[] } })),
     ])
     qdModels.value = (m.data.models || []).slice().sort((a, b) => (a.rate ?? 99) - (b.rate ?? 99))
     qdError.value = m.data.error || ''
+    qdInfoRows.value = info.data.rows || []
     qdCredits.value = (c.data.rows || []) as QoderCreditRow[]
   } catch (e: any) {
     qdModels.value = []
+    qdInfoRows.value = []
     qdError.value = e?.response?.data?.error || e?.message || '读取 Qoder 模型失败'
   }
 }

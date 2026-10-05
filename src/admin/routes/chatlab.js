@@ -14,7 +14,33 @@ const reqlog = require('../../reqlog');
 const accounts = require('../../accounts');
 const pointsCursor = require('../../points-cursor');
 const web = require('../../dumate-web');
+const router = require('../../upstream-router');
 const { sendJSON, readBody } = require('../router');
+
+/**
+ * 直连通道的 provider（千问 / TRAE / Qoder）。搭子返回 null——它走网页池转发。
+ *
+ * 三条通道的凭证、签名、计费都不同，但对外都是同一个 `send(payload, onChunk, opts)`
+ * 形状，所以这里可以统一分发（与网关 server.js 的 handleDirectChannel 同一思路）。
+ */
+function providerOf(channel) {
+  if (channel === 'traework') return require('../../traework');
+  if (channel === 'qoder') return require('../../qoder');
+  if (channel === 'qwenwork') return require('../../qwenwork');
+  return null;
+}
+
+/**
+ * 各通道的输出预算。**三套互不套用**（见 budget.js）：
+ * 搭子下限 65536，直连通道是 16384——套错会把小请求凭空撑大。
+ */
+function budgetFor(kind, requested) {
+  const b = require('../../budget');
+  if (kind === 'qoder') return b.resolveQoderMaxTokens(requested);
+  if (kind === 'traework') return b.resolveTraeworkMaxTokens(requested);
+  if (kind === 'qwenwork') return b.resolveQwenMaxTokens(requested);
+  return b.resolveMaxTokens(requested);
+}
 
 // 可试调的模型名：暴露列表 + 别名。别名也要给，因为「为什么 glm-5 能用
 // 但 claude-3-5-sonnet 不行」这类问题恰恰要先能选中它才试得出来。
@@ -35,6 +61,31 @@ function traeworkModels() {
     return tw.listModels().map((k) => ({ id: k, name: k, prefixed: `traework/${k}` }));
   } catch (e) {
     return [];
+  }
+}
+
+/**
+ * Qoder 的模型清单（**带前缀**）。
+ *
+ * **必须是 `qoder/gfmodel` 这种完整前缀名**，不能只给 `gfmodel`——前端把选中值
+ * 原样回传，网关靠前缀分流；不带前缀的名字会被 `resolve()` 判成搭子，
+ * 于是「明明选了 Qoder 模型，跑的却是搭子」，而且两侧都返回 200，看不出来。
+ *
+ * 上游拿不到时回落静态表（含 0.1 档的便宜模型），避免下拉框空着。
+ */
+async function qoderModels() {
+  try {
+    const qd = require('../../qoder');
+    const entries = await qd.listModelEntries();
+    return entries.map((e) => ({
+      id: e.id.replace(/^qoder\//, ''),
+      name: e.name || e.id,
+      prefixed: e.id,
+    }));
+  } catch (e) {
+    return require('../../qoder/constants').FALLBACK_MODELS.map((k) => ({
+      id: k, name: k, prefixed: `qoder/${k}`,
+    }));
   }
 }
 
@@ -88,6 +139,150 @@ function costOf(accountId, before, after) {
   return Math.round((b - a) * 100) / 100;
 }
 
+/**
+ * 直连通道（千问 / TRAE / Qoder）的试调。
+ *
+ * 与搭子分支的关键差异，改的时候别合并：
+ *
+ * 1. **不走网页池**：网页 cookie 换的是搭子的模型 token，用它去打千问/TRAE/Qoder
+ *    根本不通。所以这里直接调 provider（与网关 server.js 同一条路）。
+ * 2. **模型名已去前缀**（route.model）。千问/TRAE 的 provider 自己也剥前缀，
+ *    Qoder 的不剥——统一在调用前剥掉，两边都对。
+ * 3. **消耗测不到就不补 0**：这三条通道的计费不在搭子的余额里
+ *    （Qoder 扣 credits、千问扣三个池、TRAE 扣单 credits），
+ *    用搭子的网页余额算差值必然是 0，显示成「0 积分」会被读成「这次没花钱」。
+ *    所以直连通道的 cost 一律 null，并附一句 costNote 指到该通道的额度页。
+ * 4. **账号名由 provider 上报**（onAccount）：多账号轮询下只有它知道选中的是哪个。
+ */
+async function handleDirect(req, res, ctx) {
+  const { provider, payload, channel, model, mapped, stream, startedAt } = ctx;
+  const messageCount = Array.isArray(payload && payload.messages) ? payload.messages.length : 0;
+  const reqId = reqlog.newReqId();
+  let accountName = '';
+  const onAccount = (name) => { if (name) accountName = String(name); };
+
+  const record = (status, usage, err) => {
+    reqlog.record({
+      ts: Date.now(), ms: Date.now() - startedAt,
+      // req_id 必须写进埋点：Qoder / TRAE / 千问的逐请求积分归因按它配对。
+      // 漏了这个字段，试调台的消耗就永远配不到日志行上——界面只能显示「—」
+      req_id: reqId,
+      path: '/admin/chatlab', model, mapped_model: mapped,
+      stream, messages: messageCount,
+      status,
+      input_tokens: usage.input, output_tokens: usage.output, total_tokens: usage.total,
+      ip: reqlog.clientIP(req), ua: 'admin-chatlab',
+      key_id: 0, key: '', upstream: channel,
+      // 通道必须标对：不标会被归成「分通道前的历史记录」，而它是当下跑的
+      channel,
+      account: accountName,
+      error: err || '',
+    });
+  };
+
+  const costNote = `${channel === 'qoder' ? 'Qoder' : channel === 'traework' ? 'TRAE' : '千问'} 的计费不在搭子余额里，本条消耗请到该通道的额度页看`;
+
+  // ---- 非流式 ----
+  if (!stream) {
+    try {
+      const out = await provider.send(payload, undefined, { reqId, onAccount });
+      const choice = (out.choices || [])[0] || {};
+      const msg = choice.message || {};
+      const u = reqlog.pickUsage(out.usage);
+      // Qoder 的 usage 直接带 credits（倍率 × tokens/1000）——三条直连通道里
+      // 唯一能精确归因单条请求的消耗，有就展示
+      const cr = out && out.usage && Number.isFinite(Number(out.usage.credits))
+        ? Math.round(Number(out.usage.credits) * 10000) / 10000 : null;
+      record(200, u, '');
+      return sendJSON(res, 200, {
+        ok: true,
+        model, mapped_model: mapped,
+        account: accountName,
+        content: msg.content || '',
+        reasoning: msg.reasoning_content || '',
+        usage: u,
+        cost: cr,
+        // 测不到才给说明——不补 0，0 会被读成「这次没花钱」
+        costNote: cr == null ? costNote : undefined,
+        ms: Date.now() - startedAt,
+      });
+    } catch (e) {
+      const status = Number(e.statusCode) || 502;
+      record(status, { input: 0, output: 0, total: 0 }, e.message);
+      const code = status >= 400 && status < 600 ? status : 502;
+      return sendJSON(res, code, { error: e.message });
+    }
+  }
+
+  // ---- 流式 ----
+  // SSE 协议与搭子分支一致（meta / reasoning / delta / error / done），
+  // 前端不用分通道改解析。差别只在 provider 的调用方式。
+  let settled = false;
+  const send = (obj) => {
+    if (!settled) {
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        Connection: 'keep-alive',
+        'Access-Control-Allow-Origin': '*',
+      });
+      settled = true;
+      try {
+        res.write(`data: ${JSON.stringify({
+          type: 'meta', model, mapped_model: mapped, account: accountName,
+        })}\n\n`);
+      } catch (e) { /* ignore */ }
+    }
+    try { res.write(`data: ${JSON.stringify(obj)}\n\n`); } catch (e) { /* 客户端断开 */ }
+  };
+
+  let seen = '';
+  let usage = { input: 0, output: 0, total: 0 };
+  let err = '';
+  // Qoder 的 usage 直接带 credits（`倍率 × tokens/1000`），是三条直连通道里
+  // 唯一能精确归因单条请求的消耗——扫到就展示，界面不必再去额度页猜。
+  let credits = null;
+  const noteCredits = (j) => {
+    if (j && j.usage && typeof j.usage.credits === 'number' && Number.isFinite(j.usage.credits)) {
+      const prev = credits == null ? 0 : credits;
+      credits = Math.max(prev, j.usage.credits);
+    }
+  };
+  try {
+    await provider.send(payload, (inner) => {
+      if (inner === '[DONE]') return;
+      // usageFromSSE 按 `data:` 行扫描，而 inner 是解信封后的裸 JSON——
+      // 必须补前缀才扫得到，否则流式请求的 token 恒为 0
+      seen += `data: ${inner}\n`;
+      if (seen.length > 65536) seen = seen.slice(-65536);
+      for (const line of String(inner).split('\n')) {
+        const p = line.startsWith('data:') ? line.slice(5).trim() : line.trim();
+        if (!p || p === '[DONE]') continue;
+        try {
+          const j = JSON.parse(p);
+          noteCredits(j);
+          const d = ((j.choices || [])[0] || {}).delta || {};
+          if (d.reasoning_content) send({ type: 'reasoning', text: d.reasoning_content });
+          if (d.content) send({ type: 'delta', text: d.content });
+        } catch (e) { /* 非 JSON 帧跳过 */ }
+      }
+    }, { reqId, onAccount });
+    const scanned = reqlog.usageFromSSE(seen);
+    if (scanned && scanned.total) usage = scanned;
+  } catch (e) {
+    err = e.message;
+  }
+
+  // 测到 credits 就报真实消耗，测不到才给 null + 说明（不补 0）
+  const cost = credits == null ? null : Math.round(credits * 10000) / 10000;
+  send(err
+    ? { type: 'error', error: err, usage, account: accountName }
+    : { type: 'done', usage, account: accountName, cost, costNote: cost == null ? costNote : undefined });
+  record(err ? 502 : 200, usage, err);
+  res.end();
+  return undefined;
+}
+
 const routes = [
   {
     // 模型清单。前端据此渲染下拉框
@@ -101,6 +296,14 @@ const routes = [
     method: 'GET',
     path: '/traework-models',
     handler: ({ res }) => sendJSON(res, 200, { models: traeworkModels() }),
+  },
+  {
+    // Qoder 的模型清单（带 `qoder/` 前缀 + 真实显示名）。
+    // 与搭子分开一个接口：那份映射表描述的是搭子的别名，混进来会让人以为
+    // 改它能影响 Qoder 路由。
+    method: 'GET',
+    path: '/qoder-models',
+    handler: async ({ res }) => sendJSON(res, 200, { models: await qoderModels() }),
   },
   {
     // 本次会话已消耗的积分（相对打开页面时的余额）
@@ -142,12 +345,44 @@ const routes = [
       const model = String((body && body.model) || '').trim();
       if (!messages.length) return sendJSON(res, 400, { error: 'messages 不能为空' });
 
+      // 通道分流：靠**前缀**判定（与网关同一份 upstream-router）。
+      //
+      // 原来这里一律 `modelmap.mapModel(model)`——`qoder/gfmodel` 不在别名表里，
+      // 被兜底成搭子的 `model-text`，于是「选了 Qoder 模型、跑的却是搭子」，
+      // 而且两侧都返回 200，从响应里看不出来。千问/TRAE 同样中招。
+      const route = router.resolve(model);
+      if (route.error) {
+        return sendJSON(res, 400, { error: `未知通道：${route.error.replace('unknown_channel: ', '')}（模型名应为 qoder/xxx、traework/xxx、qwen/xxx 或搭子模型名）` });
+      }
+      const channel = route.channel;
+      const direct = providerOf(channel);
+
+      const stream = !!(body && body.stream);
+      // 预算按通道取：搭子下限 65536，直连通道 16384，套错会把小请求凭空撑大
+      const maxTokens = budgetFor(channel, body && body.max_tokens);
+
+      const startedAt = Date.now();
+      // 请求前拍一次余额快照，用于算这次试调的实测消耗
+      const before = await snapshotBalances();
+
+      // ---- 直连通道（千问 / TRAE / Qoder）：走 provider，不打搭子网页池 ----
+      // 模型名传**去前缀**的上游名（route.model），与网关 server.js 同一约定。
+      if (direct) {
+        const payload = {
+          model: route.model,
+          messages,
+          max_tokens: maxTokens,
+          stream,
+        };
+        if (stream) payload.stream_options = { include_usage: true };
+        return handleDirect(req, res, {
+          provider: direct, payload, channel, model, mapped: route.model,
+          stream, startedAt, before, messages,
+        });
+      }
+
       const cfg = modelmap.load();
       const mapped = modelmap.mapModel(model || cfg.fallback);
-      const stream = !!(body && body.stream);
-      // 预算与正式网关同一条策略：客户端给的小值会被钳到下限，
-      // 否则 reasoning 吃光预算导致空回答（见 budget.js 的实测表）
-      const maxTokens = require('../../budget').resolveMaxTokens(body && body.max_tokens);
 
       const payload = {
         model: mapped,
@@ -156,10 +391,6 @@ const routes = [
         stream,
       };
       if (stream) payload.stream_options = { include_usage: true };
-
-      const startedAt = Date.now();
-      // 请求前拍一次余额快照，用于算这次试调的实测消耗
-      const before = await snapshotBalances();
 
       if (!stream) {
         // 非流式直接用池里的故障转移：它会依次换账号，并把 4xx 判为
