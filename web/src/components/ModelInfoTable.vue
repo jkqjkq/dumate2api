@@ -94,7 +94,7 @@
             <div class="text-xs text-slate-400 num">
               {{ record.rateOriginal }} → {{ record.rateDiscounted }}
             </div>
-            <div class="text-xs" :class="record.discountMatched ? 'text-green-500' : 'text-slate-500'">
+            <div class="text-xs" :class="record.discountMatched ? 'text-green-700' : 'text-slate-500'">
               {{ record.discountMatched ? '本账号已命中' : '未命中（按原价扣）' }}
             </div>
           </template>

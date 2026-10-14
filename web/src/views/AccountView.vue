@@ -396,9 +396,9 @@ const tokenStateText = computed(() => {
 const tokenStateColor = computed(() => {
   const t = qw.value?.token
   if (!t) return '#94a3b8'
-  if (t.refreshExpired) return '#f87171'
-  if (t.accessExpired) return '#fbbf24'
-  return '#34d399'
+  if (t.refreshExpired) return '#dc2626'
+  if (t.accessExpired) return '#d97706'
+  return '#059669'
 })
 
 async function load() {

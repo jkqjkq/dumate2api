@@ -112,7 +112,7 @@
             <div v-if="creditOf(a.id)" class="mt-3 grid grid-cols-2 gap-2">
               <div class="qw-pool">
                 <div class="qw-pool-label">签到积分</div>
-                <div class="qw-pool-value num text-cyan-400">
+                <div class="qw-pool-value num text-cyan-700">
                   {{ fmtQ(creditOf(a.id)!.addOnQuota?.remaining) }}
                 </div>
               </div>
@@ -129,7 +129,7 @@
                  所以这里报最早的到期批次。数据来自本地账本（上游没有逐批余额接口）。 -->
             <div v-if="grantOf(a.id)" class="mt-2 text-xs">
               <span class="text-slate-500">最早到期：</span>
-              <span :class="grantOf(a.id)!.daysLeft <= 3 ? 'text-red-500' : grantOf(a.id)!.daysLeft <= 7 ? 'text-orange-500' : 'text-slate-400'">
+              <span :class="grantOf(a.id)!.daysLeft <= 3 ? 'text-red-600' : grantOf(a.id)!.daysLeft <= 7 ? 'text-orange-700' : 'text-slate-400'">
                 {{ new Date(grantOf(a.id)!.expiresAt).toLocaleDateString('zh-CN') }}
                 （剩 {{ grantOf(a.id)!.daysLeft }} 天，领取额 {{ fmtQ(grantOf(a.id)!.amount) }}）
               </span>

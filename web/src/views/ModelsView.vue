@@ -266,7 +266,7 @@
 
       <div class="text-xs text-slate-500 mt-3">
         调用时用前缀名（如 <span class="font-mono">qoder/gfmodel</span>）；不带前缀的名字一律走搭子。
-        <span class="text-amber-500">倍率是相对值（上游 price_factor），实际扣费 = 倍率 × 用量；开发调试请挑「省额度」的 0.1 档。</span>
+        <span class="text-amber-700">倍率是相对值（上游 price_factor），实际扣费 = 倍率 × 用量；开发调试请挑「省额度」的 0.1 档。</span>
         <span class="text-slate-400">倍率为 0 的是错峰/免费模型，旁边并列显示原价——0 表示当前不扣费，不是「这个模型不要钱」。</span>
       </div>
     </a-card>
@@ -280,7 +280,7 @@
           <a-col :span="12">
             <div class="qw-pool">
               <div class="qw-pool-head"><span class="qw-pool-label">签到积分合计</span></div>
-              <div class="qw-pool-value num text-cyan-400">{{ fmtQw(qdTotals.addOn) }}</div>
+              <div class="qw-pool-value num text-cyan-700">{{ fmtQw(qdTotals.addOn) }}</div>
               <div class="qw-pool-sub">签到/赠送得到，免费用户实际可用</div>
             </div>
           </a-col>

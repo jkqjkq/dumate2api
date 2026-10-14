@@ -5,7 +5,7 @@
         <span class="logo-mark">DM</span>
         <span v-if="!collapsed" class="logo-text">DuMate<span class="logo-accent">控制台</span></span>
       </div>
-      <a-menu theme="dark" mode="inline" :selected-keys="selectedKeys" @click="onMenu">
+      <a-menu theme="light" mode="inline" :selected-keys="selectedKeys" @click="onMenu">
         <a-menu-item v-if="showMenu('dashboard')" key="dashboard">
           <template #icon><DashboardOutlined /></template>
           <span>仪表盘</span>
@@ -167,13 +167,13 @@ onMounted(() => { channelStore.load() })
   background: transparent;
 }
 
-/* 侧栏：比内容区再暗一档，靠明度分层而不是靠边框 */
+/* 侧栏：比内容区再深一档灰，靠明度分层而不是靠边框 */
 .lab-sider {
-  background: #080b11 !important;
+  background: #f1f4f8 !important;
   border-right: 1px solid var(--lab-border);
 }
 .lab-sider :deep(.ant-layout-sider-trigger) {
-  background: #0b0f16;
+  background: #eaeef4;
   border-top: 1px solid var(--lab-border);
   color: var(--lab-text-mute);
 }
@@ -193,13 +193,13 @@ onMounted(() => { channelStore.load() })
   align-items: center;
   justify-content: center;
   border-radius: 9px;
-  background: linear-gradient(135deg, #22d3ee, #0ea5b7);
-  color: #04222a;
+  background: linear-gradient(135deg, #0891b2, #0e7490);
+  color: #ffffff;
   font-family: var(--lab-mono);
   font-weight: 700;
   font-size: 12px;
   letter-spacing: 0.5px;
-  box-shadow: 0 0 18px rgba(34, 211, 238, 0.34);
+  box-shadow: 0 2px 8px rgba(8, 145, 178, 0.28);
 }
 .logo-text {
   font-family: var(--lab-display);
@@ -242,7 +242,7 @@ onMounted(() => { channelStore.load() })
   height: 18px;
   border-radius: 0 3px 3px 0;
   background: var(--lab-primary);
-  box-shadow: 0 0 10px rgba(34, 211, 238, 0.7);
+  box-shadow: 0 0 8px rgba(8, 145, 178, 0.5);
 }
 .lab-sider :deep(.ant-menu-item-selected .anticon) {
   color: var(--lab-primary);
@@ -265,7 +265,7 @@ onMounted(() => { channelStore.load() })
   height: 6px;
   border-radius: 50%;
   background: var(--lab-ok);
-  box-shadow: 0 0 8px rgba(52, 211, 153, 0.8);
+  box-shadow: 0 0 6px rgba(5, 150, 105, 0.6);
 }
 
 /* 顶栏左区：切换器 + 面包屑 */
@@ -302,7 +302,7 @@ onMounted(() => { channelStore.load() })
 }
 .ch-btn:hover {
   color: var(--lab-text);
-  background: rgba(255, 255, 255, 0.04);
+  background: rgba(15, 23, 42, 0.04);
 }
 .ch-btn.on {
   background: var(--lab-primary-dim);
@@ -317,15 +317,15 @@ onMounted(() => { channelStore.load() })
 }
 .ch-dot.ok {
   background: var(--lab-ok);
-  box-shadow: 0 0 8px rgba(52, 211, 153, 0.8);
+  box-shadow: 0 0 6px rgba(5, 150, 105, 0.5);
 }
 .ch-dot.warn {
   background: var(--lab-warn);
-  box-shadow: 0 0 8px rgba(251, 191, 36, 0.8);
+  box-shadow: 0 0 6px rgba(217, 119, 6, 0.5);
 }
 .ch-dot.bad {
   background: var(--lab-danger);
-  box-shadow: 0 0 8px rgba(248, 113, 113, 0.8);
+  box-shadow: 0 0 6px rgba(220, 38, 38, 0.5);
 }
 .ch-dot.unknown {
   background: var(--lab-text-mute);
@@ -339,7 +339,7 @@ onMounted(() => { channelStore.load() })
   padding: 0 20px;
   height: 58px;
   line-height: 58px;
-  background: rgba(13, 18, 25, 0.82);
+  background: rgba(255, 255, 255, 0.82);
   backdrop-filter: blur(12px);
   border-bottom: 1px solid var(--lab-border);
   position: sticky;
@@ -356,7 +356,7 @@ onMounted(() => { channelStore.load() })
   color: var(--lab-text-mute);
 }
 .crumb-sep {
-  color: #33404f;
+  color: #b6c0cd;
 }
 .crumb-cur {
   color: var(--lab-text);

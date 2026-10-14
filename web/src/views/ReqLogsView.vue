@@ -116,13 +116,13 @@
                  按 req_id 精确配对，归因要等结算，刚发出的请求可能还没值 -->
             <template v-if="record.channel === 'qwenwork'">
               <span v-if="record.qw_total !== undefined" class="text-xs">
-                <span :class="record.qw_pool === 'daily' ? 'text-cyan-500' : 'text-blue-500'">
+                <span :class="record.qw_pool === 'daily' ? 'text-cyan-700' : 'text-blue-600'">
                   {{ fmtQw(record.qw_total) }}
                 </span>
                 <div class="text-xs text-slate-400">
                   {{ poolLabel(record.qw_pool) }}
                   <a-tooltip v-if="record.qw_concurrent" title="与相邻请求并发，差值可能含其它请求的消耗">
-                    <span class="text-orange-500">· 并发</span>
+                    <span class="text-orange-700">· 并发</span>
                   </a-tooltip>
                 </div>
               </span>
@@ -133,7 +133,7 @@
               <span v-if="record.tw_cost !== undefined" class="text-xs">
                 <span class="text-purple-500">{{ fmtQw(record.tw_cost) }}</span>
                 <a-tooltip v-if="record.tw_exact === false" title="与同账号相邻请求并发，差值可能含对方的消耗">
-                  <div class="text-xs text-orange-500">并发</div>
+                  <div class="text-xs text-orange-700">并发</div>
                 </a-tooltip>
               </span>
               <span v-else-if="record.tw_account" class="text-xs text-slate-400">
@@ -144,13 +144,13 @@
             </template>
             <!-- Qoder：上游 usage 直给本条 credits，三条直连通道里唯一精确归因的 -->
             <template v-else-if="record.channel === 'qoder'">
-              <span v-if="record.qoder_cost !== undefined" class="text-xs text-orange-500">
+              <span v-if="record.qoder_cost !== undefined" class="text-xs text-orange-700">
                 {{ fmtQw(record.qoder_cost) }}
               </span>
               <span v-else class="text-xs text-slate-400">—</span>
             </template>
             <!-- 搭子通道：余额游标差 -->
-            <span v-else-if="record.points_delta !== undefined" class="text-xs" :class="record.points_delta > 0 ? 'text-green-600' : 'text-slate-600'">
+            <span v-else-if="record.points_delta !== undefined" class="text-xs" :class="record.points_delta > 0 ? 'text-green-700' : 'text-slate-600'">
               {{ record.points_delta > 0 ? '+' : '' }}{{ record.points_delta }}
             </span>
             <span v-else class="text-xs text-slate-400">—</span>
@@ -199,7 +199,7 @@
             <span class="text-xs">{{ record.account }}</span>
           </template>
           <template v-else-if="column.key === 'points'">
-            <span class="text-xs text-red-500">{{ record.points }}</span>
+            <span class="text-xs text-red-600">{{ record.points }}</span>
           </template>
         </template>
       </a-table>
@@ -244,7 +244,7 @@
               {{ detail.account }}
               <span
                 v-if="detail.tw_account && detail.tw_account !== detail.account"
-                class="text-xs text-orange-500"
+                class="text-xs text-orange-700"
               >
                 （归因记录为 {{ detail.tw_account }}）
               </span>
@@ -281,9 +281,9 @@
                 </a-tag>
                 <!-- 「每日免费额度」vs「付费积分」是用户明确要看的区分 -->
                 <div class="text-xs mt-1">
-                  <span class="text-cyan-500">免费 {{ fmtQw(detail.qw_free) }}</span>
+                  <span class="text-cyan-700">免费 {{ fmtQw(detail.qw_free) }}</span>
                   <span class="mx-1 text-slate-400">·</span>
-                  <span class="text-blue-500">付费 {{ fmtQw(detail.qw_paid) }}</span>
+                  <span class="text-blue-600">付费 {{ fmtQw(detail.qw_paid) }}</span>
                 </div>
                 <!-- 千问是单账号直连，但显示出来便于核对「这条是不是我的号」 -->
                 <div v-if="detail.qw_account" class="text-xs text-slate-400 mt-1">
@@ -295,7 +295,7 @@
                   月度 {{ fmtQw(detail.qw_balance.monthly) }} ·
                   长期 {{ fmtQw(detail.qw_balance.longterm) }}
                 </div>
-                <div v-if="detail.qw_concurrent" class="text-xs text-orange-500">
+                <div v-if="detail.qw_concurrent" class="text-xs text-orange-700">
                   与相邻请求并发，差值可能含其它请求的消耗
                 </div>
               </template>
@@ -319,7 +319,7 @@
                 <div v-if="detail.tw_remain != null" class="text-xs text-slate-400">
                   剩余 {{ fmtQw(detail.tw_remain) }}
                 </div>
-                <div v-if="detail.tw_exact === false" class="text-xs text-orange-500">
+                <div v-if="detail.tw_exact === false" class="text-xs text-orange-700">
                   与同账号相邻请求并发，差值可能含对方的消耗
                 </div>
               </template>
@@ -350,7 +350,7 @@
             </template>
             <template v-else-if="detail.points_delta !== undefined">
               {{ detail.points_delta > 0 ? '+' : '' }}{{ detail.points_delta }}
-              <span v-if="detail.points_exact === false" class="text-xs text-orange-500">
+              <span v-if="detail.points_exact === false" class="text-xs text-orange-700">
                 （与相邻请求并发，差值可能含其它请求的消耗）
               </span>
             </template>

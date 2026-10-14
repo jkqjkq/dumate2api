@@ -99,8 +99,8 @@ async function onSubmit() {
   inset: 0;
   pointer-events: none;
   background-image:
-    linear-gradient(rgba(255, 255, 255, 0.022) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(255, 255, 255, 0.022) 1px, transparent 1px);
+    linear-gradient(rgba(15, 23, 42, 0.028) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(15, 23, 42, 0.028) 1px, transparent 1px);
   background-size: 46px 46px;
   mask-image: radial-gradient(circle at 50% 42%, #000 0%, transparent 72%);
 }
@@ -108,20 +108,20 @@ async function onSubmit() {
   position: absolute;
   border-radius: 50%;
   filter: blur(90px);
-  opacity: 0.5;
+  opacity: 0.35;
   pointer-events: none;
 }
 .glow-1 {
   width: 460px;
   height: 460px;
-  background: #0e7490;
+  background: #67e8f9;
   top: -140px;
   left: -100px;
 }
 .glow-2 {
   width: 380px;
   height: 380px;
-  background: #0b3b4a;
+  background: #a5f3fc;
   bottom: -160px;
   right: -80px;
 }
@@ -131,11 +131,11 @@ async function onSubmit() {
   z-index: 1;
   width: 404px;
   padding: 34px 34px 26px;
-  background: rgba(18, 24, 36, 0.9);
+  background: rgba(255, 255, 255, 0.92);
   backdrop-filter: blur(16px);
   border: 1px solid var(--lab-border-strong);
   border-radius: 18px;
-  box-shadow: 0 30px 70px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(34, 211, 238, 0.05);
+  box-shadow: 0 24px 60px rgba(16, 24, 40, 0.14), 0 0 0 1px rgba(8, 145, 178, 0.06);
 }
 
 .brand {
@@ -148,8 +148,8 @@ async function onSubmit() {
   height: 46px;
   flex: none;
   border-radius: 13px;
-  background: linear-gradient(135deg, #22d3ee, #0ea5b7);
-  color: #04222a;
+  background: linear-gradient(135deg, #0891b2, #0e7490);
+  color: #ffffff;
   font-family: var(--lab-mono);
   font-weight: 700;
   font-size: 16px;
@@ -157,7 +157,7 @@ async function onSubmit() {
   display: flex;
   align-items: center;
   justify-content: center;
-  box-shadow: 0 0 26px rgba(34, 211, 238, 0.4);
+  box-shadow: 0 3px 12px rgba(8, 145, 178, 0.32);
 }
 .brand-titles h1 {
   margin: 0;

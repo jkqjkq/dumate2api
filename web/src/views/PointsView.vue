@@ -120,7 +120,7 @@
                 <span v-else class="text-slate-400">—</span>
               </template>
               <template v-else-if="column.key === 'err'">
-                <span v-if="record.error" class="text-xs text-red-500">{{ record.error }}</span>
+                <span v-if="record.error" class="text-xs text-red-600">{{ record.error }}</span>
                 <span v-else class="text-slate-400">—</span>
               </template>
             </template>
@@ -208,7 +208,7 @@
               <a-statistic
                 :title="w.label"
                 :value="fmtQw(w.balance)"
-                :value-style="w.kind === 'free' ? 'color:#22d3ee' : 'color:#60a5fa'"
+                :value-style="w.kind === 'free' ? 'color:#0891b2' : 'color:#60a5fa'"
               />
               <div class="text-xs text-slate-500 mt-2">
                 <a-tag :color="w.kind === 'free' ? 'cyan' : 'blue'">
@@ -227,7 +227,7 @@
               <a-statistic
                 title="今日消耗"
                 :value="fmtQw(qwCredits.today.total)"
-                value-style="color:#fbbf24"
+                value-style="color:#d97706"
               />
               <div class="text-xs text-slate-500 mt-2">
                 免费 {{ fmtQw(qwCredits.today.free) }} · 付费 {{ fmtQw(qwCredits.today.paid) }} ·
@@ -260,7 +260,7 @@
               「今日全部消耗」= <span class="text-slate-400">无法推算</span>
               —— 尚有账号未观测到满额状态，上限只能取配置值，差值不可信。
             </div>
-            <div v-if="qwCredits.failedAccounts > 0" class="text-orange-500">
+            <div v-if="qwCredits.failedAccounts > 0" class="text-orange-700">
               注意：{{ qwCredits.failedAccounts }} 个账号余额查询失败，上面各池合计
               只含查询成功的 {{ qwCredits.accountCount }} 个账号。
             </div>
@@ -297,10 +297,10 @@
               </a-tag>
             </template>
             <template v-else-if="column.key === 'free'">
-              <span class="text-cyan-500">{{ fmtQw(record.free) }}</span>
+              <span class="text-cyan-700">{{ fmtQw(record.free) }}</span>
             </template>
             <template v-else-if="column.key === 'paid'">
-              <span class="text-blue-500">{{ fmtQw(record.paid) }}</span>
+              <span class="text-blue-600">{{ fmtQw(record.paid) }}</span>
             </template>
             <template v-else-if="column.key === 'total'">
               <span class="font-medium">{{ fmtQw(record.total) }}</span>
@@ -338,7 +338,7 @@
               <a-statistic
                 title="已消耗（签到积分）"
                 :value="qdUsed.addOn ?? '—'"
-                value-style="color:#fbbf24"
+                value-style="color:#d97706"
               />
               <div class="text-xs text-slate-500 mt-2">
                 上游累积真值 · 含客户端直连
@@ -350,7 +350,7 @@
               <a-statistic
                 title="已消耗（订阅额度）"
                 :value="qdUsed.user ?? '—'"
-                value-style="color:#fbbf24"
+                value-style="color:#d97706"
               />
               <div class="text-xs text-slate-500 mt-2">
                 Free 套餐恒为 0
@@ -362,7 +362,7 @@
               <a-statistic
                 title="剩余可用合计"
                 :value="qdTotals.left ?? '—'"
-                value-style="color:#22d3ee"
+                value-style="color:#0891b2"
               />
               <div class="text-xs text-slate-500 mt-2">
                 签到 {{ fmtQw(qdTotals.addOn) }} · 订阅 {{ fmtQw(qdTotals.user) }}
@@ -393,7 +393,7 @@
               签到积分（addOnQuota）是签到 / 赠送得到的，订阅额度（userQuota）是套餐内的——
               上游分两个池子返回，合起来没有意义。
             </div>
-            <div v-if="qdExpiring.count" class="text-orange-500">
+            <div v-if="qdExpiring.count" class="text-orange-700">
               {{ qdExpiring.count }} 个批次将在 7 天内到期，合计领取额
               {{ fmtQw(qdExpiring.amount) }}（<b>领取额不是剩余额</b>——上游不给逐批余额）。
             </div>
@@ -471,7 +471,7 @@
                 </div>
               </template>
               <template v-else-if="column.key === 'err'">
-                <span v-if="record.error" class="text-xs text-red-500">{{ record.error }}</span>
+                <span v-if="record.error" class="text-xs text-red-600">{{ record.error }}</span>
                 <a-tag v-else-if="record.isQuotaExceeded" color="red">已超限</a-tag>
                 <span v-else class="text-slate-400">—</span>
               </template>
@@ -599,7 +599,7 @@
           <template #bodyCell="{ column, record }">
             <template v-if="column.key === 'name'">
               <div>{{ record.name }}</div>
-              <div v-if="!record.ok" class="text-xs text-red-500">{{ record.error }}</div>
+              <div v-if="!record.ok" class="text-xs text-red-600">{{ record.error }}</div>
             </template>
             <template v-else-if="column.key === 'left'">
               <span v-if="record.ok" class="font-medium">{{ fmt(record.left) }}</span>
@@ -911,13 +911,13 @@
             <template v-if="record.type === 'checkin'">
               {{ opCheckinText(record.result) }}
               <a-tag v-if="!record.ok" color="red" class="ml-1">失败</a-tag>
-              <span v-if="record.error" class="text-xs text-red-500 ml-1">{{ record.error }}</span>
+              <span v-if="record.error" class="text-xs text-red-600 ml-1">{{ record.error }}</span>
             </template>
             <template v-else-if="record.type === 'task'">
               {{ record.title }}
               <a-tag v-if="record.already" color="default" class="ml-1">已发放</a-tag>
               <a-tag v-if="!record.ok" color="red" class="ml-1">失败</a-tag>
-              <span v-if="record.error" class="text-xs text-red-500 ml-1">{{ record.error }}</span>
+              <span v-if="record.error" class="text-xs text-red-600 ml-1">{{ record.error }}</span>
               <div class="text-xs text-slate-400 mt-1">
                 <span v-if="record.via === 'query-then-complete'">发消息+上报</span>
                 <span v-else-if="record.via === 'complete-only'">仅上报</span>
@@ -942,7 +942,7 @@
           </template>
           <template v-else-if="column.key === 'points'">
             <template v-if="record.points_delta !== null && record.points_delta !== undefined">
-              <span :class="record.points_delta > 0 ? 'text-green-600' : 'text-slate-400'">
+              <span :class="record.points_delta > 0 ? 'text-green-700' : 'text-slate-400'">
                 余额 {{ record.points_delta > 0 ? '+' + record.points_delta : record.points_delta }}
                 <span v-if="record.points_before !== null && record.points_after !== null" class="text-xs text-slate-400">
                   ({{ fmt(record.points_before) }} → {{ fmt(record.points_after) }})

@@ -1,6 +1,6 @@
 <template>
-  <!-- 全局主题：深色控制台。
-       走 ConfigProvider 的 darkAlgorithm 而不是逐个组件写 :deep 覆盖——
+  <!-- 全局主题：浅色控制台。
+       走 ConfigProvider 的默认亮色算法 + token，而不是逐个组件写 :deep 覆盖——
        Select 下拉、Modal、DatePicker、Message 这些浮层不在卡片内，
        scoped 样式够不到，只有 token 能一次改干净。 -->
   <a-config-provider :theme="themeConfig" :locale="zhCN">
@@ -9,30 +9,28 @@
 </template>
 
 <script setup lang="ts">
-import { theme } from 'ant-design-vue'
 import zhCN from 'ant-design-vue/es/locale/zh_CN'
 
 // 与 style.css 的 --lab-* 变量同源：这里改一处，AntD 组件和自定义样式一起走。
 const themeConfig = {
-  algorithm: theme.darkAlgorithm,
   token: {
-    colorPrimary: '#22d3ee',
-    colorInfo: '#38bdf8',
-    colorSuccess: '#34d399',
-    colorWarning: '#fbbf24',
-    colorError: '#f87171',
+    colorPrimary: '#0891b2',
+    colorInfo: '#0284c7',
+    colorSuccess: '#059669',
+    colorWarning: '#d97706',
+    colorError: '#dc2626',
 
-    colorBgBase: '#0a0e14',
-    colorBgContainer: '#121824',
-    colorBgElevated: '#172030',
-    colorBgLayout: '#0a0e14',
-    colorBorder: '#212b3b',
-    colorBorderSecondary: '#1a2230',
+    colorBgBase: '#f4f6f9',
+    colorBgContainer: '#ffffff',
+    colorBgElevated: '#ffffff',
+    colorBgLayout: '#f4f6f9',
+    colorBorder: '#cdd5e0',
+    colorBorderSecondary: '#e3e8ef',
 
-    colorText: '#e8eef7',
-    colorTextSecondary: '#93a1b5',
-    colorTextTertiary: '#5f6f86',
-    colorTextQuaternary: '#44526a',
+    colorText: '#1e293b',
+    colorTextSecondary: '#5c6b80',
+    colorTextTertiary: '#8b99ad',
+    colorTextQuaternary: '#c2cad6',
 
     borderRadius: 10,
     borderRadiusLG: 14,
@@ -46,21 +44,21 @@ const themeConfig = {
     wireframe: false,
   },
   components: {
-    Card: { colorBgContainer: '#121824' },
+    Card: { colorBgContainer: '#ffffff' },
     Table: {
-      headerBg: '#151d2a',
-      headerColor: '#93a1b5',
-      rowHoverBg: '#18202e',
-      borderColor: '#1a2230',
+      headerBg: '#f6f8fb',
+      headerColor: '#5c6b80',
+      rowHoverBg: '#f1f5f9',
+      borderColor: '#e3e8ef',
     },
     Menu: {
-      darkItemBg: 'transparent',
-      darkSubMenuItemBg: 'transparent',
-      darkItemSelectedBg: 'rgba(34, 211, 238, 0.14)',
-      darkItemSelectedColor: '#22d3ee',
-      darkItemColor: '#8b98ad',
-      darkItemHoverBg: 'rgba(255,255,255,0.04)',
-      darkItemHoverColor: '#e8eef7',
+      itemBg: 'transparent',
+      subMenuItemBg: 'transparent',
+      itemSelectedBg: 'rgba(8, 145, 178, 0.10)',
+      itemSelectedColor: '#0891b2',
+      itemColor: '#5c6b80',
+      itemHoverBg: 'rgba(15, 23, 42, 0.04)',
+      itemHoverColor: '#1e293b',
     },
   },
 }

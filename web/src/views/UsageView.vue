@@ -18,7 +18,7 @@
     <a-row :gutter="[16, 16]">
       <a-col :span="6">
         <a-card :bordered="false" class="h-full">
-          <a-statistic title="今日请求" :value="data?.cards.today.requests ?? '—'" value-style="color:#22d3ee" />
+          <a-statistic title="今日请求" :value="data?.cards.today.requests ?? '—'" value-style="color:#0891b2" />
           <div class="text-xs text-slate-500 mt-2">
             <template v-if="data">{{ compact(data.cards.today.tokens) }} Token</template>
             <span v-else>—</span>
@@ -28,7 +28,7 @@
 
       <a-col :span="6">
         <a-card :bordered="false" class="h-full">
-          <a-statistic title="本周请求" :value="data?.cards.week.requests ?? '—'" value-style="color:#fbbf24" />
+          <a-statistic title="本周请求" :value="data?.cards.week.requests ?? '—'" value-style="color:#d97706" />
           <div class="text-xs text-slate-500 mt-2">
             <template v-if="data">{{ compact(data.cards.week.tokens) }} Token</template>
             <span v-else>—</span>
@@ -50,7 +50,7 @@
                 : (data?.cards.today.consumed_points ?? '—')"
             :precision="isQw || isTw || data?.cards.today.consumed_points == null ? undefined : 2"
             :suffix="isQw && qw?.ok ? `/ ${qw.dailyCap}` : ''"
-            :value-style="isQw || isTw ? 'color:#22d3ee' : undefined"
+            :value-style="isQw || isTw ? 'color:#0891b2' : undefined"
           />
           <div class="text-xs text-slate-500 mt-2">
             <template v-if="isTw">
@@ -78,7 +78,7 @@
 
       <a-col :span="6">
         <a-card :bordered="false" class="h-full">
-          <a-statistic title="活跃密钥" :value="data?.cards.active_keys ?? '—'" value-style="color:#34d399" />
+          <a-statistic title="活跃密钥" :value="data?.cards.active_keys ?? '—'" value-style="color:#059669" />
           <div class="text-xs text-slate-500 mt-2">
             <template v-if="data">
               主力模型 {{ data.cards.top_model || '—' }}
@@ -162,7 +162,7 @@
               <span v-if="c.avg_first_token_ms != null" class="opacity-70">
                 · 首字 {{ fmtMs(c.avg_first_token_ms) }}
               </span>
-              <span v-if="c.failed" class="text-red-500 ml-1">失败 {{ c.failed }}</span>
+              <span v-if="c.failed" class="text-red-600 ml-1">失败 {{ c.failed }}</span>
             </a-tag>
           </div>
           <div v-if="hasUntagged" class="text-xs text-slate-400 mt-1">
@@ -326,7 +326,7 @@
           <template #bodyCell="{ column, record }">
             <template v-if="column.key === 'name'">
               {{ record.nickname || record.uid || '未命名' }}
-              <div v-if="record.error" class="text-xs text-red-500">{{ record.error }}</div>
+              <div v-if="record.error" class="text-xs text-red-600">{{ record.error }}</div>
             </template>
             <template v-else-if="column.key === 'remain'">
               <span v-if="record.remain != null" class="font-medium num">
@@ -369,7 +369,7 @@
         <template #bodyCell="{ column, record }">
           <template v-if="column.key === 'name'">
             {{ record.name }}
-            <div v-if="!record.ok" class="text-xs text-red-500">{{ record.error }}</div>
+            <div v-if="!record.ok" class="text-xs text-red-600">{{ record.error }}</div>
           </template>
           <template v-else-if="column.key === 'consumed'">
             <span v-if="record.ok">{{ fmt(record.consumed_points) }}</span>
@@ -503,7 +503,7 @@ const successRateText = computed(() => {
 })
 const successRateColor = computed(() => {
   const r = data.value?.cards.today.success_rate ?? 0
-  return r >= 99 ? 'text-green-600' : r >= 95 ? 'text-orange-500' : 'text-red-500'
+  return r >= 99 ? 'text-green-700' : r >= 95 ? 'text-orange-700' : 'text-red-600'
 })
 
 const chartEl = ref<HTMLElement | null>(null)
@@ -526,7 +526,7 @@ function renderChart() {
         return `<div style="color:${INK.muted};font-size:11px">${row.day}</div>`
           + `<div style="margin-top:2px">Token <b>${exactNum(row.total_tokens)}</b></div>`
           + `<div>请求 <b>${exactNum(row.requests)}</b></div>`
-          + (row.failed ? `<div style="color:#f87171">失败 <b>${exactNum(row.failed)}</b></div>` : '')
+          + (row.failed ? `<div style="color:#dc2626">失败 <b>${exactNum(row.failed)}</b></div>` : '')
       },
     },
     xAxis: {

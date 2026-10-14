@@ -563,7 +563,7 @@ defineExpose({ openDialog })
   line-height: 16px;
 }
 .src-tag-warn {
-  background: rgba(251, 191, 36, 0.16);
+  background: rgba(217, 119, 6, 0.14);
   color: var(--lab-warn);
 }
 

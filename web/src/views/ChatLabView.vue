@@ -512,11 +512,11 @@ onMounted(async () => {
   width: 8px;
 }
 .chat-scroll::-webkit-scrollbar-thumb {
-  background: #26313f;
+  background: #cdd5e0;
   border-radius: 4px;
 }
 .chat-scroll::-webkit-scrollbar-thumb:hover {
-  background: #33404f;
+  background: #aeb9c7;
 }
 
 /* ---------- 空态 ---------- */
@@ -600,8 +600,8 @@ onMounted(async () => {
   margin-top: 2px;
 }
 .avatar-user {
-  background: linear-gradient(135deg, #22d3ee, #0ea5b7);
-  color: #04222a;
+  background: linear-gradient(135deg, #0891b2, #0ea5b7);
+  color: #ffffff;
 }
 .avatar-bot {
   background: var(--lab-surface-3);
@@ -630,7 +630,7 @@ onMounted(async () => {
 .bubble-error {
   margin-top: 8px;
   padding-top: 8px;
-  border-top: 1px dashed rgba(248, 113, 113, 0.4);
+  border-top: 1px dashed rgba(220, 38, 38, 0.4);
   font-size: 12px;
   color: var(--lab-danger);
   display: flex;
@@ -736,8 +736,8 @@ onMounted(async () => {
   color: var(--lab-text-mute);
 }
 .chip-cost {
-  background: rgba(52, 211, 153, 0.12);
-  border-color: rgba(52, 211, 153, 0.3);
+  background: rgba(5, 150, 105, 0.10);
+  border-color: rgba(5, 150, 105, 0.28);
   color: var(--lab-ok);
   font-weight: 500;
 }
@@ -762,7 +762,7 @@ onMounted(async () => {
   resize: none;
 }
 .composer-input:hover {
-  border-color: #33404f !important;
+  border-color: #b6c0cd !important;
 }
 .composer-input:focus,
 .composer-input:focus-within {
@@ -809,14 +809,14 @@ onMounted(async () => {
   font-size: 14px;
 }
 .send-btn.ready {
-  background: linear-gradient(135deg, #22d3ee, #0ea5b7);
-  color: #04222a;
+  background: linear-gradient(135deg, #0891b2, #0ea5b7);
+  color: #ffffff;
   cursor: pointer;
-  box-shadow: 0 3px 12px rgba(34, 211, 238, 0.32);
+  box-shadow: 0 3px 12px rgba(8, 145, 178, 0.26);
 }
 .send-btn.ready:hover {
   transform: translateY(-1px);
-  box-shadow: 0 5px 16px rgba(34, 211, 238, 0.42);
+  box-shadow: 0 5px 16px rgba(8, 145, 178, 0.34);
 }
 
 /* ---------- 页脚 ---------- */

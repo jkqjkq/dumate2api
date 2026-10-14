@@ -31,7 +31,7 @@
         </a-col>
         <a-col :span="5">
           <a-card :bordered="false" class="h-full">
-            <a-statistic title="有效期内" :value="twSummary?.valid ?? '—'" value-style="color:#34d399">
+            <a-statistic title="有效期内" :value="twSummary?.valid ?? '—'" value-style="color:#059669">
               <template #suffix><span class="text-sm text-slate-400">个</span></template>
             </a-statistic>
             <div class="text-xs text-slate-500 mt-2">
@@ -49,7 +49,7 @@
               title="即将过期积分"
               :value="twExpiringPoints"
               :precision="2"
-              :value-style="twExpiringPoints > 0 ? 'color:#fbbf24' : ''"
+              :value-style="twExpiringPoints > 0 ? 'color:#d97706' : ''"
             />
             <div class="text-xs text-slate-500 mt-2">
               <template v-if="twExpiring.length">
@@ -71,7 +71,7 @@
         </a-col>
         <a-col :span="4">
           <a-card :bordered="false" class="h-full">
-            <a-statistic title="今日请求" :value="usage?.cards.today.requests ?? '—'" value-style="color:#22d3ee" />
+            <a-statistic title="今日请求" :value="usage?.cards.today.requests ?? '—'" value-style="color:#0891b2" />
             <div class="text-xs text-slate-500 mt-2">
               <template v-if="usage">{{ compact(usage.cards.today.tokens) }} Token</template>
               <span v-else>—</span>
@@ -106,7 +106,7 @@
               <a-tag :color="record.daysLeft <= 3 ? 'red' : 'orange'">{{ record.name }}</a-tag>
             </template>
             <template v-else-if="column.key === 'remain'">
-              <span class="font-medium text-amber-500">{{ fmt(record.remain) }}</span>
+              <span class="font-medium text-amber-700">{{ fmt(record.remain) }}</span>
               <span v-if="record.limit" class="text-xs text-slate-400 ml-1">/ {{ fmt(record.limit) }}</span>
             </template>
             <template v-else-if="column.key === 'expireAt'">
@@ -213,11 +213,11 @@
                   <template v-else-if="a.daysAlive !== null">已用 {{ a.daysAlive }} 天</template>
                   <template v-else>额度未知</template>
                 </span>
-                <span :class="a.checkedInToday ? 'text-green-500' : 'text-slate-500'">
+                <span :class="a.checkedInToday ? 'text-green-700' : 'text-slate-500'">
                   {{ a.checkedInToday ? '今日已签' : '今日未签' }}
                 </span>
               </div>
-              <div v-if="a.lastError" class="text-xs text-red-500 mt-1">{{ a.lastError }}</div>
+              <div v-if="a.lastError" class="text-xs text-red-600 mt-1">{{ a.lastError }}</div>
             </div>
           </a-col>
         </a-row>
@@ -344,7 +344,7 @@
               title="即将过期积分"
               :value="qdCreditsSummary?.expiringAmount ?? 0"
               :precision="4"
-              :value-style="(qdCreditsSummary?.expiringAmount ?? 0) > 0 ? 'color:#fbbf24' : ''"
+              :value-style="(qdCreditsSummary?.expiringAmount ?? 0) > 0 ? 'color:#d97706' : ''"
             />
             <div class="text-xs text-slate-500 mt-2">
               <template v-if="qdCreditsSummary?.expiringCount">
@@ -395,7 +395,7 @@
             </template>
             <template v-else-if="column.key === 'amount'">
               <!-- 明确标注这是「领取额」：上游不给逐批剩余，标成剩余会误导 -->
-              <span class="font-medium text-amber-500 num">{{ fmt(record.amount) }}</span>
+              <span class="font-medium text-amber-700 num">{{ fmt(record.amount) }}</span>
               <span class="text-xs text-slate-400 ml-1">领取额</span>
             </template>
             <template v-else-if="column.key === 'grantedAt'">
@@ -532,7 +532,7 @@
                 <div class="flex items-center justify-between text-xs">
                   <span class="text-slate-500">
                     签到积分
-                    <span class="text-cyan-400 num ml-1">{{ fmtQd(qdCreditOf(a.id)!.addOnQuota?.remaining) }}</span>
+                    <span class="text-cyan-700 num ml-1">{{ fmtQd(qdCreditOf(a.id)!.addOnQuota?.remaining) }}</span>
                     <span class="text-slate-500" v-if="qdCreditOf(a.id)!.addOnQuota?.total">
                       / {{ fmtQd(qdCreditOf(a.id)!.addOnQuota!.total) }}
                     </span>
@@ -544,7 +544,7 @@
                 <!-- 最早到期的批次。签到积分领取后 30 天作废，所以「最早到期」
                      才是要提醒的那个。数据来自本地账本（上游无逐批余额接口）。 -->
                 <div v-if="qdGrantOf(a.id)" class="text-xs mt-1"
-                  :class="qdGrantOf(a.id)!.daysLeft <= 3 ? 'text-red-500' : qdGrantOf(a.id)!.daysLeft <= 7 ? 'text-orange-500' : 'text-slate-500'">
+                  :class="qdGrantOf(a.id)!.daysLeft <= 3 ? 'text-red-600' : qdGrantOf(a.id)!.daysLeft <= 7 ? 'text-orange-700' : 'text-slate-500'">
                   最早到期 {{ new Date(qdGrantOf(a.id)!.expiresAt).toLocaleDateString('zh-CN') }}
                   （剩 {{ qdGrantOf(a.id)!.daysLeft }} 天）
                 </div>
@@ -554,7 +554,7 @@
               </template>
               <div v-else class="text-xs mt-2 text-slate-500">额度未查询</div>
 
-              <div v-if="a.lastError" class="text-xs mt-1" :class="errFresh(a) ? 'text-red-500' : 'text-slate-500'">
+              <div v-if="a.lastError" class="text-xs mt-1" :class="errFresh(a) ? 'text-red-600' : 'text-slate-500'">
                 <span class="text-slate-500">{{ errorWhen(a.lastErrorAt) }}</span>{{ a.lastError }}
               </div>
             </div>
@@ -590,7 +590,7 @@
         </a-col>
         <a-col :span="5">
           <a-card :bordered="false" class="h-full">
-            <a-statistic title="有效期内" :value="qwSummary?.valid ?? '—'" value-style="color:#34d399">
+            <a-statistic title="有效期内" :value="qwSummary?.valid ?? '—'" value-style="color:#059669">
               <template #suffix><span class="text-sm text-slate-400">个</span></template>
             </a-statistic>
             <div class="text-xs text-slate-500 mt-2">
@@ -607,7 +607,7 @@
               title="即将过期积分"
               :value="qwSummary?.expiringSoonPoints ?? '—'"
               :precision="4"
-              :value-style="(qwSummary?.expiringSoonPoints ?? 0) > 0 ? 'color:#fbbf24' : ''"
+              :value-style="(qwSummary?.expiringSoonPoints ?? 0) > 0 ? 'color:#d97706' : ''"
             />
             <div class="text-xs text-slate-500 mt-2">
               <template v-if="qwSummary?.expiringSoon">
@@ -631,7 +631,7 @@
         </a-col>
         <a-col :span="4">
           <a-card :bordered="false" class="h-full">
-            <a-statistic title="今日请求" :value="usage?.cards.today.requests ?? '—'" value-style="color:#22d3ee" />
+            <a-statistic title="今日请求" :value="usage?.cards.today.requests ?? '—'" value-style="color:#0891b2" />
             <div class="text-xs text-slate-500 mt-2">
               <template v-if="usage">{{ compact(usage.cards.today.tokens) }} Token</template>
               <span v-else>—</span>
@@ -670,7 +670,7 @@
               <a-tag :color="record.daysLeft <= 3 ? 'red' : 'orange'">{{ record.name }}</a-tag>
             </template>
             <template v-else-if="column.key === 'remain'">
-              <span class="font-medium text-amber-500">{{ fmtQw(record.remain) }}</span>
+              <span class="font-medium text-amber-700">{{ fmtQw(record.remain) }}</span>
             </template>
             <template v-else-if="column.key === 'expireAt'">
               <span class="text-xs">{{ new Date(record.expireAt).toLocaleString('zh-CN', { hour12: false }) }}</span>
@@ -693,7 +693,7 @@
         <a-col v-for="w in qwWallets" :key="w.id" :span="6">
           <a-card :bordered="false" class="h-full">
             <a-statistic :title="w.label" :value="w.balance ?? '—'" :precision="2"
-              :value-style="w.kind === 'free' && (w.balance ?? 0) < 20 ? 'color:#fbbf24' : ''">
+              :value-style="w.kind === 'free' && (w.balance ?? 0) < 20 ? 'color:#d97706' : ''">
               <template #suffix><span class="text-sm text-slate-400">积分</span></template>
             </a-statistic>
             <div class="text-xs text-slate-500 mt-2">
@@ -728,19 +728,19 @@
               <div v-if="qw && (qw.accountCount > 1 || qw.failedAccounts > 0 || qw.retriedAccounts > 0 || qw.correctedAccounts > 0)" class="text-slate-400">
                 <template v-if="qw.accountCount > 1">{{ qw.accountCount }} 个账号合计</template>
                 <template v-if="qw.failedAccounts > 0">
-                  <span class="text-orange-500">
+                  <span class="text-orange-700">
                     · {{ qw.failedAccounts }} 个账号余额查询失败，未计入
                   </span>
                 </template>
                 <!-- 上游 wallets 偶尔谎报 0，已用 account-context 还原出真实值。
                      这是「已校正」不是「已用尽」，不要与下面那条混为一谈 -->
                 <template v-if="qw.correctedAccounts > 0">
-                  <span class="text-sky-500">
+                  <span class="text-sky-700">
                     · {{ qw.correctedAccounts }} 个账号余额已校正（上游瞬时读失败）
                   </span>
                 </template>
                 <template v-if="qw.retriedAccounts > 0">
-                  <span class="text-amber-500">
+                  <span class="text-amber-700">
                     · {{ qw.retriedAccounts }} 个账号重试后仍为 0（可能已用尽）
                   </span>
                 </template>
@@ -877,7 +877,7 @@
                   {{ a.wallets ? '合计 ' + fmtQw(a.wallets.total) : '积分未知' }}
                 </span>
               </div>
-              <div v-if="a.lastError" class="text-xs mt-1" :class="errFresh(a) ? 'text-red-500' : 'text-slate-500'">
+              <div v-if="a.lastError" class="text-xs mt-1" :class="errFresh(a) ? 'text-red-600' : 'text-slate-500'">
                 <span class="text-slate-500">{{ errTimeText(a.lastErrorAt) }}</span>{{ a.lastError }}
               </div>
             </div>
@@ -942,10 +942,10 @@
               </a-tag>
             </template>
             <template v-else-if="column.key === 'free'">
-              <span class="text-cyan-500">{{ fmtQw(record.free) }}</span>
+              <span class="text-cyan-700">{{ fmtQw(record.free) }}</span>
             </template>
             <template v-else-if="column.key === 'paid'">
-              <span class="text-blue-500">{{ fmtQw(record.paid) }}</span>
+              <span class="text-blue-600">{{ fmtQw(record.paid) }}</span>
             </template>
             <template v-else-if="column.key === 'total'">
               <span class="font-medium">{{ fmtQw(record.total) }}</span>
@@ -981,7 +981,7 @@
 
       <a-col :span="5">
         <a-card :bordered="false" class="h-full">
-          <a-statistic title="有效期内" :value="dash?.summary.valid ?? '—'" value-style="color:#34d399">
+          <a-statistic title="有效期内" :value="dash?.summary.valid ?? '—'" value-style="color:#059669">
             <template #suffix><span class="text-sm text-slate-400">个</span></template>
           </a-statistic>
           <div class="text-xs text-slate-500 mt-2">
@@ -999,7 +999,7 @@
             title="即将过期积分"
             :value="dash?.summary.expiring_points ?? '—'"
             :precision="2"
-            :value-style="(dash?.summary.expiring_points ?? 0) > 0 ? 'color:#fbbf24' : ''"
+            :value-style="(dash?.summary.expiring_points ?? 0) > 0 ? 'color:#d97706' : ''"
           />
           <div class="text-xs text-slate-500 mt-2">
             <template v-if="dashExpiringRows.length">
@@ -1030,7 +1030,7 @@
 
       <a-col :span="4">
         <a-card :bordered="false" class="h-full">
-          <a-statistic title="今日 Token" :value="todayTokensText" value-style="color:#22d3ee" />
+          <a-statistic title="今日 Token" :value="todayTokensText" value-style="color:#0891b2" />
           <div class="text-xs text-slate-500 mt-2">
             <template v-if="stats">{{ stats.today.requests }} 次请求</template>
             <span v-else>—</span>
@@ -1069,7 +1069,7 @@
             <span class="text-xs">{{ record.date }}</span>
           </template>
           <template v-else-if="column.key === 'points'">
-            <span class="font-medium text-amber-500">{{ fmt(record.points) }}</span>
+            <span class="font-medium text-amber-700">{{ fmt(record.points) }}</span>
             <span class="text-xs text-slate-400 ml-1">（{{ record.count }} 个包）</span>
           </template>
           <template v-else-if="column.key === 'sources'">
@@ -1174,11 +1174,11 @@
                   · 已用 {{ a.days_alive }} 天
                 </span>
               </span>
-              <span :class="a.points !== null && a.points < 200 ? 'text-orange-500' : 'text-slate-600'">
+              <span :class="a.points !== null && a.points < 200 ? 'text-orange-700' : 'text-slate-600'">
                 {{ a.points !== null ? fmt(a.points) + ' 积分' : '积分未知' }}
               </span>
             </div>
-            <div v-if="a.last_error" class="text-xs text-red-500 mt-1">{{ a.last_error }}</div>
+            <div v-if="a.last_error" class="text-xs text-red-600 mt-1">{{ a.last_error }}</div>
           </div>
         </a-col>
       </a-row>
@@ -1608,9 +1608,9 @@ function healthColorQw(a: QwAccount) {
 function dailyClassQw(a: QwAccount) {
   const d = a.wallets ? a.wallets.daily : null
   if (d === null) return 'text-slate-400'
-  if (d <= 0) return 'text-red-500'
-  if (d < 20) return 'text-orange-500'
-  return 'text-cyan-400'
+  if (d <= 0) return 'text-red-600'
+  if (d < 20) return 'text-orange-700'
+  return 'text-cyan-700'
 }
 
 // TRAE 版：与千问同一套视觉规则（0 用灰、异常用红/橙、在线用绿），

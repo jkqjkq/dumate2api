@@ -46,7 +46,7 @@
           <a-statistic
             title="通道状态"
             :value="status?.ready ? '就绪' : '不可用'"
-            :value-style="status?.ready ? 'color:#34d399' : 'color:#f87171'"
+            :value-style="status?.ready ? 'color:#059669' : 'color:#dc2626'"
           />
           <div class="text-xs text-slate-500 mt-2">
             {{ status?.ready ? '至少有一个启用且凭证完整的账号' : (status?.error || '—') }}
@@ -58,7 +58,7 @@
           <a-statistic
             title="最近到期"
             :value="soonestText"
-            :value-style="soonestSoon ? 'color:#fbbf24' : undefined"
+            :value-style="soonestSoon ? 'color:#d97706' : undefined"
           />
           <div class="text-xs text-slate-500 mt-2">
             <template v-if="soonestAt">access token 最早到期的账号</template>
@@ -124,7 +124,7 @@
             <span class="font-mono text-xs">…{{ record.refreshTail || '—' }}</span>
           </template>
           <template v-else-if="column.key === 'err'">
-            <span v-if="record.lastError" class="text-xs text-red-500">{{ record.lastError }}</span>
+            <span v-if="record.lastError" class="text-xs text-red-600">{{ record.lastError }}</span>
             <span v-else class="text-slate-400">—</span>
           </template>
         </template>

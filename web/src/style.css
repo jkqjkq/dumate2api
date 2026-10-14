@@ -3,43 +3,46 @@
 @tailwind utilities;
 
 /* ============================================================
-   设计基线 · 深色控制台
+   设计基线 · 浅色控制台
    ------------------------------------------------------------
    这套系统的本体是「模型网关的控制室」：请求量、账号池、
-   上游健康、积分流水。信息密度高、看数时间长，所以走深色
-   工程化方向——近黑分层底 + 单一青色信号色 + 等宽数字。
+   上游健康、积分流水。信息密度高、看数时间长，走白底分层
+   + 深青信号色 + 等宽数字的方向。
 
    全站共用这一份。改这里等于全站生效，避免每个页面各写一遍
    卡片圆角/阴影/表格样式后又各自漂移。
    ============================================================ */
 
+
 :root {
-  /* 分层底色：越靠前越亮，用明度而不是边框来区分层级 */
-  --lab-bg: #0a0e14;
-  --lab-bg-2: #0d1219;
-  --lab-surface: #121824;
-  --lab-surface-2: #172030;
-  --lab-surface-3: #1c2634;
+  color-scheme: light;
+  /* 分层底色：页面底是灰、卡片是白，用明度而不是边框来区分层级 */
+  --lab-bg: #f4f6f9;
+  --lab-bg-2: #edf0f5;
+  --lab-surface: #ffffff;
+  --lab-surface-2: #f6f8fb;
+  --lab-surface-3: #eef1f6;
 
-  --lab-border: #1a2230;
-  --lab-border-strong: #26313f;
+  --lab-border: #e3e8ef;
+  --lab-border-strong: #cdd5e0;
 
-  --lab-text: #e8eef7;
-  --lab-text-sub: #93a1b5;
-  --lab-text-mute: #5f6f86;
+  --lab-text: #1e293b;
+  --lab-text-sub: #5c6b80;
+  --lab-text-mute: #8b99ad;
 
-  /* 信号色：整站唯一强调色，用在选中态、主按钮、关键数值 */
-  --lab-primary: #22d3ee;
-  --lab-primary-dim: rgba(34, 211, 238, 0.14);
-  --lab-primary-line: rgba(34, 211, 238, 0.34);
+  /* 信号色：整站唯一强调色，用在选中态、主按钮、关键数值。
+     浅底上用 cyan-600（#0891b2）——亮青 #22d3ee 在白底上对比不足 */
+  --lab-primary: #0891b2;
+  --lab-primary-dim: rgba(8, 145, 178, 0.10);
+  --lab-primary-line: rgba(8, 145, 178, 0.32);
 
-  --lab-ok: #34d399;
-  --lab-warn: #fbbf24;
-  --lab-danger: #f87171;
+  --lab-ok: #059669;
+  --lab-warn: #d97706;
+  --lab-danger: #dc2626;
 
   --lab-radius: 14px;
-  --lab-shadow: 0 1px 0 rgba(255, 255, 255, 0.03) inset, 0 6px 20px rgba(0, 0, 0, 0.34);
-  --lab-shadow-hover: 0 1px 0 rgba(255, 255, 255, 0.05) inset, 0 12px 30px rgba(0, 0, 0, 0.46);
+  --lab-shadow: 0 1px 2px rgba(16, 24, 40, 0.04), 0 4px 14px rgba(16, 24, 40, 0.05);
+  --lab-shadow-hover: 0 2px 4px rgba(16, 24, 40, 0.05), 0 10px 26px rgba(16, 24, 40, 0.10);
 
   --lab-mono: 'JetBrains Mono', 'Cascadia Mono', 'SF Mono', Consolas, 'Liberation Mono', monospace;
   --lab-display: 'Bahnschrift', 'DIN Alternate', 'Segoe UI Variable Display', sans-serif;
@@ -61,7 +64,7 @@ body {
   -moz-osx-font-smoothing: grayscale;
 }
 
-/* 背景层：近黑底 + 极淡网格 + 左上角青色辉光。
+/* 背景层：灰底 + 极淡网格 + 左上角青色辉光。
    纯色底会让整屏发闷，网格给「工程面板」的质感，
    辉光把视觉重心压到内容区左上（阅读起点）。 */
 body::before {
@@ -71,10 +74,10 @@ body::before {
   z-index: 0;
   pointer-events: none;
   background-image:
-    radial-gradient(1100px 520px at 8% -8%, rgba(34, 211, 238, 0.07), transparent 62%),
-    radial-gradient(900px 480px at 100% 0%, rgba(56, 189, 248, 0.045), transparent 60%),
-    linear-gradient(rgba(255, 255, 255, 0.016) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(255, 255, 255, 0.016) 1px, transparent 1px);
+    radial-gradient(1100px 520px at 8% -8%, rgba(8, 145, 178, 0.06), transparent 62%),
+    radial-gradient(900px 480px at 100% 0%, rgba(2, 132, 199, 0.04), transparent 60%),
+    linear-gradient(rgba(15, 23, 42, 0.022) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(15, 23, 42, 0.022) 1px, transparent 1px);
   background-size: auto, auto, 44px 44px, 44px 44px;
 }
 #app {
@@ -91,7 +94,7 @@ body::before {
   letter-spacing: -0.2px;
 }
 
-/* ---------- 卡片：靠明度分层，边框退成发丝线 ---------- */
+/* ---------- 卡片：白面浮在灰底上，阴影极轻 ---------- */
 .ant-card {
   border-radius: var(--lab-radius);
   border: 1px solid var(--lab-border);
@@ -149,7 +152,7 @@ body::before {
   margin-left: 4px;
 }
 
-/* ---------- 表格：表头压暗、行悬停、去掉重边框 ---------- */
+/* ---------- 表格：表头压灰、行悬停、去掉重边框 ---------- */
 .ant-table {
   font-size: 13px;
   background: transparent;
@@ -170,7 +173,7 @@ body::before {
   border-bottom: 1px solid var(--lab-border);
 }
 .ant-table-tbody > tr:hover > td {
-  background: #18202e !important;
+  background: #f1f5f9 !important;
 }
 .ant-table-tbody > tr.row-selected > td {
   background: var(--lab-primary-dim) !important;
@@ -190,12 +193,12 @@ body::before {
   font-weight: 500;
 }
 .ant-btn-primary {
-  color: #04222a;
+  color: #ffffff;
   font-weight: 600;
-  box-shadow: 0 4px 14px rgba(34, 211, 238, 0.24);
+  box-shadow: 0 3px 10px rgba(8, 145, 178, 0.22);
 }
 .ant-btn-primary:hover {
-  box-shadow: 0 6px 20px rgba(34, 211, 238, 0.34);
+  box-shadow: 0 5px 16px rgba(8, 145, 178, 0.30);
 }
 .ant-input,
 .ant-input-affix-wrapper,
@@ -219,9 +222,9 @@ body::before {
   border: 1px solid transparent;
 }
 
-/* ---------- 空态：插图压暗，别让它在近黑底上成为最亮的东西 ---------- */
+/* ---------- 空态：浅色下插图本来就淡，稍微收一点即可 ---------- */
 .ant-empty-image {
-  opacity: 0.45;
+  opacity: 0.8;
 }
 .ant-empty-description {
   color: var(--lab-text-mute);
@@ -249,11 +252,11 @@ body::before {
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: #26313f;
+  background: #cdd5e0;
   border-radius: 5px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #33404f;
+  background: #aeb9c7;
 }
 
 /* ---------- 载入错峰：卡片依次浮起，一次编排好过满屏微动效 ---------- */

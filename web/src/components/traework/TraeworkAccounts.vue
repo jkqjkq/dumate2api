@@ -120,7 +120,7 @@
               </div>
               <div>
                 <div class="text-xs text-slate-400">token 到期</div>
-                <div class="text-xs" :class="tokenExpired(a) ? 'text-red-500' : ''">
+                <div class="text-xs" :class="tokenExpired(a) ? 'text-red-600' : ''">
                   {{ a.expiresAt ? dateText(a.expiresAt) : '—' }}
                 </div>
               </div>

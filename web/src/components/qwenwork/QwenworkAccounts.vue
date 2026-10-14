@@ -91,7 +91,7 @@
             <div v-if="a.wallets" class="mt-3 grid grid-cols-3 gap-2">
               <div class="qw-pool">
                 <div class="qw-pool-label">每日免费</div>
-                <div class="qw-pool-value num text-cyan-400">{{ fmt(a.wallets.daily) }}</div>
+                <div class="qw-pool-value num text-cyan-700">{{ fmt(a.wallets.daily) }}</div>
               </div>
               <div class="qw-pool">
                 <div class="qw-pool-label">月度积分</div>
@@ -106,7 +106,7 @@
             <div class="mt-3 grid grid-cols-2 gap-2 text-sm">
               <div>
                 <div class="text-xs text-slate-400">access token 到期</div>
-                <div class="text-xs" :class="tokenExpired(a) ? 'text-red-500' : ''">
+                <div class="text-xs" :class="tokenExpired(a) ? 'text-red-600' : ''">
                   {{ a.tokenExpiresAt ? dateText(a.tokenExpiresAt) : '—' }}
                 </div>
               </div>

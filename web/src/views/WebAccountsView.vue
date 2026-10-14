@@ -209,11 +209,11 @@
         <template #bodyCell="{ column, record }">
           <template v-if="column.key === 'name'">
             <div>{{ record.name }}</div>
-            <div v-if="!record.ok" class="text-xs text-red-500">{{ record.error }}</div>
+            <div v-if="!record.ok" class="text-xs text-red-600">{{ record.error }}</div>
           </template>
           <template v-else-if="column.key === 'tasks'">
             <div v-for="t in record.tasks" :key="t.task_id" class="text-xs leading-5">
-              <span :class="t.done ? 'text-green-600' : 'text-slate-400'">
+              <span :class="t.done ? 'text-green-700' : 'text-slate-400'">
                 {{ t.done ? '✓' : '○' }}
               </span>
               <span class="ml-1">{{ t.title }}</span>
@@ -272,7 +272,7 @@
         <template #bodyCell="{ column, record }">
           <template v-if="column.key === 'name'">
             <div>{{ record.name }}</div>
-            <div v-if="record.last_error" class="text-xs text-red-500">
+            <div v-if="record.last_error" class="text-xs text-red-600">
               {{ record.last_error }}
             </div>
           </template>
@@ -346,7 +346,7 @@
             </a-button>
           </a-space>
 
-          <div v-if="!browserAvailable" class="text-xs text-red-500 mt-2">
+          <div v-if="!browserAvailable" class="text-xs text-red-600 mt-2">
             未检测到 Edge 或 Chrome，请改用右侧的「手动粘贴」
           </div>
         </a-tab-pane>
