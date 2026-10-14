@@ -792,7 +792,7 @@
                   {{ qwInfo?.ready ? (qwInfo.refreshExpired ? '可用·待重登' : '正常') : '不可用' }}
                 </a-tag>
               </a-descriptions-item>
-              <a-descriptions-item label="wasm">
+              <a-descriptions-item label="签名">
                 <span class="font-mono text-xs">{{ qwInfo?.wasm || '—' }}</span>
               </a-descriptions-item>
               <a-descriptions-item label="主账号">
@@ -1854,8 +1854,11 @@ async function refresh(force = false) {
   try {
     const [s, p, a, st, dy, db, u] = await Promise.all([
       client.get('/system/status'),
-      client.get('/points/points' + (force ? '?refresh=1' : '')),
-      client.get('/points/accounts'),
+      // 桌面凭证不存在时（客户端已卸载）这两个接口必然 502——这是预期状态
+      // 不是故障。它们只喂两张次要卡片，不能让 Promise.all 短路把整页数据
+      // 拖成空白（实测过的崩溃形态：全页只剩「部分数据获取失败」一条）。
+      client.get('/points/points' + (force ? '?refresh=1' : '')).catch(() => ({ data: null })),
+      client.get('/points/accounts').catch(() => ({ data: null })),
       client.get('/stats/summary'),
       client.get('/stats/daily?days=14'),
       client.get('/web-accounts/dashboard'),

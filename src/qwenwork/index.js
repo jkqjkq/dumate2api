@@ -28,16 +28,22 @@ function warmup() {
   return bridge.warmup();
 }
 
-/** 通道是否可用：wasm 找到 + 至少有一个可用账号 */
+/** 通道是否可用：签名方式就绪 + 至少有一个可用账号 */
 function status() {
-  const w = wasmPath.resolveDetailed();
   const usable = authStore.findUsable();
+  const mode = bridge.signer();
+  // 本地签名（默认）没有任何外部依赖，只有 wasm 模式才需要探测 wasm 文件
+  const w = mode === 'wasm' ? wasmPath.resolveDetailed() : null;
+  const signerReady = mode === 'local' || !!w;
   return {
-    ready: !!(w && usable.length),
+    ready: !!(signerReady && usable.length),
+    signer: mode,
     wasm: w ? { file: w.file, version: w.version } : null,
     loggedIn: usable.length > 0,
     accounts: usable.length,
-    error: !w ? 'wasm 未找到' : (usable.length ? '' : '尚未添加千问账号（需先登录一次）'),
+    error: !signerReady
+      ? 'wasm 未找到（DUMATE_QWENWORK_USE_WASM=1 时才需要它）'
+      : (usable.length ? '' : '尚未添加千问账号（需先登录一次）'),
   };
 }
 

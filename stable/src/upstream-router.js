@@ -153,6 +153,23 @@ function resolve(model) {
  * 它不再依赖本地 8787 的 Key（那是走 Buddy2api 中转时的遗留）。
  */
 function availability(channel) {
+  if (channel === 'dumate') {
+    // 显式只用网页凭证时（DUMATE_DUMATE_SOURCE=web），桌面链路根本不参与，
+    // 这个通道的可用性就是「网页池里有没有可用账号」。
+    // 在这里判而不是在转发层判：四个协议入口都走这个函数，一处改动全覆盖，
+    // 且能给出明确原因——转发层只能回一句笼统的 upstream unavailable。
+    if (process.env.DUMATE_DUMATE_SOURCE === 'web') {
+      try {
+        const fb = require('./fallback-web');
+        return fb.available()
+          ? { ok: true }
+          : { ok: false, reason: 'DUMATE_DUMATE_SOURCE=web，但网页账号池里没有可用账号' };
+      } catch (e) {
+        return { ok: false, reason: e.message };
+      }
+    }
+    return { ok: true };
+  }
   if (channel === 'qwenwork') {
     try {
       const st = require('./qwenwork').status();

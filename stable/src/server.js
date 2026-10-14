@@ -442,19 +442,42 @@ function forwardWithFallback(portOrTarget, path, method, headers, body, clientRe
     return done;
   };
 
-  const tryWebFallback = () => {
+  const tryWebFallback = (why) => {
     if (!isDumate || !webFallback.available()) return false;
     let parsed;
     try { parsed = JSON.parse(body); } catch (e) { return false; }
-    log('桌面链路不可用，回落到网页凭证池');
+    log(why === 'forced'
+      ? '按 DUMATE_DUMATE_SOURCE=web 直接走网页凭证池'
+      : '桌面链路不可用，回落到网页凭证池');
     useWebFallback(parsed);
     return true;
   };
 
-  // 端口解析也要纳入回落范围。**这是主场景**：桌面凭证失效时
-  // dumate-main-server.exe 会拒绝启动或直接退出，ensureUpstream() 于是抛错——
-  // 而「客户端登录态过期」正是这个回落机制要解决的唯一问题。
-  // 若把端口解析留在调用点（原来的写法），它先抛错、根本走不到回落。
+  // 显式只用网页凭证：**跳过整个桌面链路**（含端口探测与 PowerShell 查询）。
+  // 客户端卸载后回落虽能兜住，但每个请求都要先探一遍桌面端口再失败——
+  // 设了这个开关就没有那笔开销，凭证来源也从「兜底」变成「主链路」。
+  // 池子可不可用由路由层（router.availability）先判，那里会给出明确原因。
+  if (isDumate && process.env.DUMATE_DUMATE_SOURCE === 'web') {
+    if (tryWebFallback('forced')) return null;
+    // 竞态：availability 通过之后池子变空。如实报 502，**不静默退回桌面链路**
+    // ——用户明确要求走 web，偷偷换凭证来源等于瞒着他。
+    callback({ fakeResponse: true, statusCode: 502, headers: {}, write() {}, end() {} });
+    return null;
+  }
+
+  // 端口解析也要纳入回落范围。桌面凭证失效时 dumate-main-server.exe 会拒绝
+  // 启动或直接退出，ensureUpstream() 于是抛错——这条分支让那种情况也能走到
+  // 回落，而不是在调用点先抛错。
+  //
+  // **注意：默认配置下这条分支走不到。** upstream-router 给 dumate 的
+  // defaultPort 是 8980，且 portOf() 保证返回有效数字，所以 t.port 恒有值。
+  // 真实的失败路径是下面的 startForward(t)：连一次本地 8980 →
+  // ECONNREFUSED（回环连接，毫秒级）→ 回调里 tryWebFallback()。
+  // 也就是说「客户端没装」**不会**给每个请求带来探测开销，不必给失败结果加
+  // 缓存——2026-10-14 实测确认（打桩 discovery 计数：客户端缺失时连发 5 个
+  // 请求，discoverPort 一次都没被调用）。真正的探测开销只在**启动时**那一次
+  // discoverPort（要跑 PowerShell 查询，实测约 3 秒），已由
+  // DUMATE_DUMATE_SOURCE=web 跳过。
   if (isDumate && t && !t.port) {
     ensureUpstream().then(
       (port) => { t.port = port; startForward(t); },
@@ -759,14 +782,39 @@ async function handleOpenAIChat(req, res) {
       });
       const finishStream = () => {
         logRequest(req, res, startedAt, info, upstreamRes.statusCode, reqlog.usageFromSSE(seen));
-        res.end();
+        // 已结束还写会抛 ERR_STREAM_WRITE_AFTER_END——同样是未捕获异常，
+        // 一样能打挂进程。守卫与 send() 同款。
+        if (!res.writableEnded && !res.destroyed) res.end();
       };
       upstreamRes.on('aborted', finishStream);
       upstreamRes.on('error', finishStream);
+
+      // 网页回落返回的是**伪上游响应**（EventEmitter + statusCode/headers，
+      // 见 fallback-web.js）——它没有 pipe 方法。原先这里无条件
+      // `upstreamRes.pipe(res)`，回落时抛 `TypeError: upstreamRes.pipe is not
+      // a function`：未捕获异常，**直接打挂整个网关进程**（不是单个请求失败，
+      // 实测 9082 整个端口消失）。
+      //
+      // 桌面凭证可用时走的是真响应（IncomingMessage，有 pipe），所以这个洞
+      // 只在回落路径上暴露——而卸载客户端后回落恰恰是唯一链路，必现。
+      //
+      // 真响应仍走 pipe（自带背压处理）；伪响应改为事件转发。两者的 chunk
+      // 都是 string（真响应 setEncoding('utf8')，伪响应由 web-pool 透传），
+      // res.write 与 StringDecoder 都能直接吃，不必转换。
+      const canPipe = typeof upstreamRes.pipe === 'function';
+      if (!canPipe) {
+        upstreamRes.on('data', (c) => {
+          if (res.writableEnded || res.destroyed) return;
+          res.write(c);
+        });
+      }
       upstreamRes.on('end', () => {
         logRequest(req, res, startedAt, info, upstreamRes.statusCode, reqlog.usageFromSSE(seen));
+        // pipe 会自动 end res；伪响应没有 pipe，不自己收尾的话客户端会
+        // 永久挂在半开的流上（表现为「内容都到了但请求一直不返回」）。
+        if (!canPipe && !res.writableEnded && !res.destroyed) res.end();
       });
-      upstreamRes.pipe(res);
+      if (canPipe) upstreamRes.pipe(res);
     } else {
       // Pass-through non-streaming
       let data = '';
@@ -1362,18 +1410,24 @@ const server = http.createServer(async (req, res) => {
         // 「qwen/ 请求会在哪一步失败」。千问是进程内直连，没有端口，
         // 所以报的是 wasm 版本与登录态而不是 port。
         channels: {
-          dumate: {
-            port: upstreamPort,
-            ready: !!upstreamPort,
-            // 桌面凭证不可用时会自动回落到网页凭证池（见 forwardWithFallback）。
-            // 报出来是为了让「现在到底走的哪条链路」一眼可见——
-            // 桌面 ready=false 且 fallback.available=true 时，请求仍然能成功，
-            // 但走的是网页池，排障时不知道这点会看错方向。
-            fallback: (() => {
-              try { return { available: webFallback.available(), enabled: webFallback.enabled() }; }
-              catch (e) { return { available: false, enabled: false }; }
-            })(),
-          },
+          dumate: (() => {
+            let fb = { available: false, enabled: false };
+            try { fb = { available: webFallback.available(), enabled: webFallback.enabled() }; }
+            catch (e) { /* 池子读不到就按不可用报，别让 health 自己抛错 */ }
+            // 凭证来源：auto = 桌面优先、不可用时回落；web = 显式只用网页池
+            // （DUMATE_DUMATE_SOURCE=web，此时桌面链路根本不参与）
+            const source = process.env.DUMATE_DUMATE_SOURCE === 'web' ? 'web' : 'auto';
+            return {
+              port: upstreamPort,
+              // ready 的语义是「这个通道现在能不能跑」：
+              //   auto → 看桌面链路；web → 看网页池（桌面链路被跳过）。
+              // 桌面 ready=false 且 fallback.available=true 时请求仍能成功，
+              // 排障时不知道这点会看错方向（见 forwardWithFallback）。
+              ready: source === 'web' ? fb.available : !!upstreamPort,
+              source,
+              fallback: fb,
+            };
+          })(),
           qwenwork: {
             direct: true,
             ready: !!(qwenworkUp && router.availability('qwenwork').ok),
@@ -1522,42 +1576,54 @@ async function start() {
   log('Starting dumate2api...');
   log(`Proxy will listen on ${PROXY_HOST}:${PROXY_PORT}`);
 
-  try {
-    const port = await discoverPort();
-    if (port) {
-      const valid = await verifyPort(port);
-      if (valid) {
-        upstreamPort = port;
-        upstreamManaged = port === require('./discovery').MANAGED_PORT && (process.env.DUMATE_AUTOSTART || 'auto') !== 'off';
-        lastDiscoveryTime = Date.now();
-        log(`✓ DuMate main-server verified on port ${port}` + (upstreamManaged ? ' (headless, no DuMate GUI needed)' : ''));
+  // 显式只用网页凭证时跳过初始发现——桌面链路根本不参与，
+  // 这次探测（要跑 PowerShell 查询，实测约 3 秒）纯属浪费启动时间。
+  if (process.env.DUMATE_DUMATE_SOURCE === 'web') {
+    log('· 搭子凭证来源：网页池（DUMATE_DUMATE_SOURCE=web，不探测桌面链路）');
+  } else {
+    try {
+      const port = await discoverPort();
+      if (port) {
+        const valid = await verifyPort(port);
+        if (valid) {
+          upstreamPort = port;
+          upstreamManaged = port === require('./discovery').MANAGED_PORT && (process.env.DUMATE_AUTOSTART || 'auto') !== 'off';
+          lastDiscoveryTime = Date.now();
+          log(`✓ DuMate main-server verified on port ${port}` + (upstreamManaged ? ' (headless, no DuMate GUI needed)' : ''));
+        } else {
+          log(`⚠ Found dumate-main-server on port ${port} but endpoint verification failed`);
+          upstreamPort = port; // still try to use it
+          lastDiscoveryTime = Date.now();
+        }
       } else {
-        log(`⚠ Found dumate-main-server on port ${port} but endpoint verification failed`);
-        upstreamPort = port; // still try to use it
-        lastDiscoveryTime = Date.now();
+        log('⚠ DuMate main-server not detected. Will retry on first request.');
+        log('  Make sure DuMate desktop app is running and logged in.');
       }
-    } else {
-      log('⚠ DuMate main-server not detected. Will retry on first request.');
-      log('  Make sure DuMate desktop app is running and logged in.');
+    } catch (e) {
+      log('⚠ Initial discovery failed:', e.message);
     }
-  } catch (e) {
-    log('⚠ Initial discovery failed:', e.message);
   }
-  // 千问办公通道：进程内直连（经官方 wasm），**不需要拉起任何外部服务**。
+  // 千问办公通道：进程内直连，**不需要拉起任何外部服务、也不需要客户端**。
+  // 签名默认走本地算法（见 qwenwork/cosy-sign.js）；只有
+  // DUMATE_QWENWORK_USE_WASM=1 时才需要官方 wasm（保留为退路）。
   // 早期版本走 Buddy2api（8787）中转，后来发现它的 wasm_helper.mjs 本身就是
   // 纯 Node 脚本、Python 只是一层壳，改为直连后少一个进程、少一层鉴权。
   // 预热失败不阻断启动：搭子是主链路，千问只是可选通道。
   if ((process.env.DUMATE_QWENWORK_AUTOSTART || 'auto') !== 'off') {
     try {
       const qwmod = require('./qwenwork');
-      const qw = qwmod.warmup();
+      qwmod.warmup();
       const st = qwmod.status();
-      qwenworkUp = st.loggedIn ? 'ready' : null;
-      // 凭证自持后「有没有账号」是这里唯一的可变因素——wasm 找不到是安装问题，
-      // 没账号是配置问题，日志要能一眼分清是哪一种
-      log(st.loggedIn
-        ? `✓ QwenWork 通道就绪（wasm ${qw.version}，账号 ${st.accounts} 个）`
-        : '· QwenWork 通道未就绪：尚未添加账号（到管理端用浏览器登录一次即可，不需要开千问客户端）');
+      // 签名方式如实上报给 /health（前端三处展示位读这个字段）。
+      // 原来恒为 'ready' 是 wasm 单路径时代的写法，现在有 local/wasm 两种。
+      const mode = st.signer === 'wasm'
+        ? `wasm ${(st.wasm && st.wasm.version) || ''}`.trim()
+        : 'local';
+      qwenworkUp = st.ready ? mode : null;
+      // 「有没有账号」与「签名能不能用」是两回事，日志要能一眼分清是哪一种
+      log(st.ready
+        ? `✓ QwenWork 通道就绪（签名 ${mode}，账号 ${st.accounts} 个）`
+        : `· QwenWork 通道未就绪：${st.error || '尚未添加账号（到管理端用浏览器登录一次即可，不需要开千问客户端）'}`);
     } catch (e) {
       log('⚠ QwenWork 通道不可用（搭子链路不受影响）:', e.message);
       qwenworkUp = null;

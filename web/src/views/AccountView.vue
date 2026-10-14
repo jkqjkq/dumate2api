@@ -60,7 +60,7 @@
               />
               <div class="text-xs text-slate-500 mt-2">
                 {{ qw.ready ? '通道就绪' : '通道未就绪' }}
-                <template v-if="qw.wasm"> · wasm {{ qw.wasm }}</template>
+                <template v-if="qw.wasm"> · 签名 {{ qw.wasm }}</template>
               </div>
             </a-card>
           </a-col>

@@ -174,7 +174,11 @@ export const channelStore = reactive({
   warning(): string {
     const i = this.info()
     if (!i) return ''
-    if (!i.ready) return i.error || '通道不可用'
+    if (!i.ready) {
+      // 与 MainLayout 的 titleFor 同口径：回落可用时请求仍能成功，不是「不可用」
+      if (i.fallback?.available) return '桌面凭证失效，请求走网页凭证池'
+      return i.error || '通道不可用'
+    }
     if (i.refreshExpired) return 'refresh token 已过期，需重开客户端登录'
     return ''
   },

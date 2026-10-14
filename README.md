@@ -22,7 +22,7 @@ Claude Code ──── Anthropic ────────┼──→ dumate2a
 - **三协议网关** —— OpenAI / Anthropic（含原生工具）/ Google Generative Language，外加 Responses 适配层（Codex CLI 0.155+ 只认它）
 - **四通道前缀分流** —— 百度搭子 / 千问办公 / TRAE Work / Qoder，靠模型名前缀显式路由，不猜名字
 - **零第三方依赖** —— 网关本体只用 Node 内置模块（`playwright-core` 仅管理端登录器需要）
-- **凭证自持** —— 千问 / TRAE / Qoder 三条通道走 OAuth Device Flow 自取凭证，不依赖官方客户端
+- **凭证自持，零客户端依赖** —— 千问办公 / TRAE / Qoder 三条通道走 OAuth Device Flow 自取凭证、请求签名纯本地算法，**不需要装任何官方客户端**；搭子也能显式只用网页凭证（`DUMATE_DUMATE_SOURCE=web`），连桌面客户端一并省掉
 - **无 GUI 运行** —— 自动拉起 `dumate-main-server.exe`，不需要打开搭子界面
 - **网页控制台** —— 仪表盘、模型管理、API Key、积分明细、请求日志、聊天测试台
 - **积分自动化** —— 签到幂等可定时；抽奖消耗不可逆，只留手动
@@ -49,12 +49,16 @@ curl http://127.0.0.1:9080/v1/chat/completions \
 
 ## 四条通道
 
-| 通道 | 上游 | 凭证 | 依赖客户端 |
+| 通道 | 上游 | 凭证 | 需要官方客户端 |
 |---|---|---|---|
-| **百度搭子**（DuMate） | 本地 :8980（千帆 GLM） | 桌面登录态 / 网页 cookie | 是（搭子） |
-| **千问办公**（QwenWork） | 云端网关，进程内直连 | 自持（OAuth Device Flow） | 否（仅需其 wasm 文件） |
+| **百度搭子**（DuMate） | 本地 :8980（千帆 GLM） | 桌面登录态 / 网页 cookie | 默认是；设 `DUMATE_DUMATE_SOURCE=web` 后可**完全不用** |
+| **千问办公**（QwenWork） | 云端网关，进程内直连 | 自持（OAuth Device Flow） | **否**（签名纯本地） |
 | **TRAE Work** | 云端网关，进程内直连 | 自持（OAuth） | 否 |
 | **Qoder** | 云端网关，进程内直连 | 自持（OAuth Device Flow） | **否**（签名纯本地） |
+
+> **搭子有两条凭证链路，能力一致**：桌面凭证（`dumate-main-server.exe` + `auth.json`，需装客户端）与网页凭证（`data/web-accounts.json`，浏览器 cookie）。
+> 桌面凭证不可用时**自动回落到网页池**，四条协议（含 Codex 只认的 `responses`）与 `count_tokens` 在回落路径上都实测可用；
+> 想彻底不要客户端就设 `DUMATE_DUMATE_SOURCE=web` —— 跳过桌面链路（含启动时约 3 秒的探测），凭证来源从「兜底」变「主链路」。
 
 **靠模型名前缀分流**，不猜模型名：
 
@@ -67,6 +71,14 @@ curl http://127.0.0.1:9080/v1/chat/completions \
 | 未知前缀（如 `qwn/pro`） | **400 报错，不静默回落** |
 
 > 用前缀而不是猜名字：两侧模型名会撞车（搭子有 `glm-5`，千问上游也是 GLM 系），猜错了两侧都返回 200，从响应里根本看不出来。未知前缀若静默跑到搭子，会拿到「看起来成功但完全不是想要的结果」，比直接 400 难查得多。
+
+### 千问办公通道
+
+与 Qoder **同一套 COSY 协议** —— 同一个 `client_id`、同一个聊天路径、同一套 `Encode=1` 自定义 base64、同一个 `Bearer COSY.<payload>.<sig>` 信封，连服务端公钥都是同一把。所以两者**共用 `src/cosy.js` 一份签名实现**，差异只有 `cosyVersion`（千问 `1.1.52` / Qoder `1.0.10`）与几个客户端身份头。
+
+签名是**纯本地算法**（RSA 加密临时密钥 + AES 加密身份 + MD5 签名），**不需要官方 wasm、不需要装客户端**。早期版本必须调客户端的 `qoder_auth_wasm_bg.wasm` 生成请求体，客户端一卸载通道就死；现在本地签名直接发到 `gateway.qwenwork.cn`。
+
+上游只有 `pro` / `flash` 两个模型。**做重创作 / 长任务用 `pro`** —— `flash` 会把进度播报当成回合终点、不调工具就收尾（实测三种纪律写法都救不回来），只适合轻量问答。
 
 ### Qoder 通道
 
@@ -107,9 +119,12 @@ node test/qoder-cli.js chat "你好"          # 默认用最省的 gfmodel
 - **Node.js >= 18**，**仅 Windows**（依赖 PowerShell 进程查询、`%APPDATA%` 路径、`taskkill`）
 - **至少配置一条通道** —— 任一条不可用时网关仍会监听，`/health` 的 `channels.*.ready` 报 false，**不阻断启动**
 
-**百度搭子** —— 安装 DuMate 桌面客户端（[下载](https://cloud.baidu.com/doc/Dumate/index.html)）并登录一次。之后不再需要启动客户端界面。登录态在 `%APPDATA%\qianfan-desktop-app\auth.json`；安装目录非默认时设 `DUMATE_INSTALL_DIR`。
+**百度搭子** —— 二选一：
 
-**千问办公** —— 登录一次即可，之后不依赖官方客户端。但需要官方客户端的 wasm 文件（运行时从安装目录读，**不进仓库**），探测不到时设 `DUMATE_QWENWORK_INSTALL` 或 `CB_QWENWORK_WASM`。
+- **桌面凭证** —— 安装 DuMate 桌面客户端（[下载](https://cloud.baidu.com/doc/Dumate/index.html)）并登录一次，之后不必再打开界面。登录态在 `%APPDATA%\qianfan-desktop-app\auth.json`；安装目录非默认时设 `DUMATE_INSTALL_DIR`。
+- **网页凭证（不用装客户端）** —— 在管理端用浏览器登录器登一次 `www.dumate.cn`（或手动粘贴 cookie），再设 `DUMATE_DUMATE_SOURCE=web` 把它变成主链路。
+
+**千问办公** —— 独立 OAuth 登录，**不需要客户端**。请求签名是纯本地算法（与 Qoder 共用 `src/cosy.js`：同一套 COSY 协议、同一个 `client_id`、同一把服务端公钥）。早期版本必须读客户端的 `qoder_auth_wasm_bg.wasm`，现已不需要——只有当本地签名被上游改协议拒掉时，才需要切回官方 wasm（`DUMATE_QWENWORK_USE_WASM=1` + 装客户端）。
 
 **TRAE Work** / **Qoder** —— 独立 OAuth 登录，完全不依赖客户端。
 
@@ -192,11 +207,13 @@ DUMATE_ADMIN_GATEWAY_PORT=9082 npm run admin
 | `DUMATE_ADMIN_PORT` | `9081` | 管理端监听 |
 | `DUMATE_ADMIN_GATEWAY_PORT` | `9080` | 管理端读哪个网关；**开发实例设 `9082`** |
 | `DUMATE_ADMIN_DATA` | `<repo>/data` | 数据目录，管理端与网关**必须一致** |
+| `DUMATE_DUMATE_SOURCE` | 未设（`auto`） | 设 `web` = 搭子**只用网页凭证**，跳过桌面链路（含启动那约 3 秒探测），**不需要装客户端** |
+| `DUMATE_WEB_FALLBACK` | 未设（开启） | `0` 关闭「桌面凭证失效时回落到网页池」 |
 | `DUMATE_QWENWORK_AUTOSTART` | `auto` | `off` 关闭千问通道 |
+| `DUMATE_QWENWORK_USE_WASM` | 未设（本地签名） | 设 `1` 切回官方 wasm 签名（退路，需要装千问客户端） |
 | `DUMATE_TRAEWORK_AUTOSTART` | `auto` | `off` 关闭 TRAE 通道 |
 | `DUMATE_AUTO_CHECKIN_HOUR` / `_MINUTE` | `9` / `17` | 每日自动签到（**两个都要设**） |
 | `DUMATE_TASK_POLL_MINUTES` | `30` | 任务轮询（`0` 关闭，低于 5 分钟会被拒） |
-| `DUMATE_WEB_FALLBACK` | 未设（开启） | `0` 关闭「桌面凭证失效时回落到网页池」 |
 
 > 完整列表见 [CLAUDE.md](CLAUDE.md)。`DUMATE2API_KEY` 是历史遗留的死变量，代码中从未读取——真实开关是 `DUMATE_REQUIRE_KEY`。
 
@@ -204,10 +221,10 @@ DUMATE_ADMIN_GATEWAY_PORT=9082 npm run admin
 
 - **输出预算下限是硬需求，不是可选优化**。GLM 的思维链与正文共用同一个 `max_tokens`，reasoning 实测在 57~8492 tokens 间浮动，预算不足会拿到空正文或半句截断。网关统一抬到 65536 以上。
 - **思考强度调不了** —— 上游忽略 `reasoning_effort`，实测各档 reasoning token 数无差异（`is_reasoning` 硬编码 `false`）。想要更深入的分析，只能靠提示词。
-- **上游不支持 function calling / 图像** —— 工具调用被降级为纯文本（`[Tool Use: 名字]`），这是能力边界不是实现缺陷。
+- **搭子上游不支持 function calling / 图像** —— 工具调用被降级为纯文本（`[Tool Use: 名字]`）。这是**搭子上游**的能力边界；三条直连通道（千问 / TRAE / Qoder）原生支持工具调用，走的是各自的真实 `tool_calls`。
 - **搭子上游只有三个真实模型** —— `model-text` / `model-artifact-validate` / `glm-5`，传别的名字硬性报 `api not registered`。
 - **`count_tokens` 是估算**（字节数 / 4），只用于让 Claude Code 的上下文预算不报错。
-- **cookie 过期必须开一次 DuMate 客户端重登** —— 这是唯一绕不过去的。
+- **搭子桌面凭证的 cookie 过期必须开一次客户端重登** —— 桌面链路唯一绕不过去的一步。不想装客户端就走网页凭证（`DUMATE_DUMATE_SOURCE=web`），过期后用管理端的浏览器登录器重登即可（要浏览器，不要搭子客户端）。
 
 ## 项目结构
 
@@ -219,9 +236,10 @@ src/
   google.js              Google Generative Language ↔ OpenAI
   upstream-router.js     模型名前缀 → 通道
   channels.js            通道 id 单一来源
+  cosy.js                COSY 协议签名算法（千问与 Qoder 共用一份）
   qwenwork/  traework/  qoder/    三条直连通道
   admin/                 管理端（路由、存储、鉴权）
-stable/                  9080 跑的冻结快照（36 个 .js，不随开发改动）
+stable/                  9080 跑的冻结快照（47 个 .js，不随开发改动）
 web/                     管理端前端（Vue 3 + Vite + ant-design-vue）
 test/                    冒烟测试与离线验证脚本
 data/                    运行时数据（**已 gitignore**，含凭证）
@@ -251,6 +269,9 @@ node test/verify-channel.js              # 通道过滤 + 积分归因配对
 node test/verify-qoder-cosy.js           # Qoder 签名算法（Go 参考实现生成的向量）
 node test/verify-qoder-channel.js        # Qoder 通道逻辑
 node test/verify-qoder-grants.js         # Qoder 积分批次账本
+node test/verify-qwenwork-local-sign.js  # 千问本地签名（不依赖 wasm 的那条路）
+node test/verify-dumate-source.js        # 搭子凭证来源开关与真实失败路径
+node test/verify-fallback-stream-pipe.js # 回落路径的流式转发（伪响应没有 pipe）
 node test/verify-traework-gained.js      # TRAE 签到到账差值
 node test/verify-traework-repair.js      # TRAE「播报即收尾」修复
 node test/verify-qwen-daily-aggregate.js # 千问每日额度多账号合计
@@ -275,4 +296,4 @@ node test/verify-display-name.js         # 账号显示名解析
 
 ---
 
-**免责声明**：本项目是独立的第三方开源项目，与百度 / 阿里（千问办公、Qoder）/ 字节（TRAE）及 Anthropic / OpenAI / Google 等主体无任何隶属、合作或背书关系，文中产品名仅为指代用途。本项目通过协议适配实现与本地已安装客户端的互操作，**不破解、不绕过任何付费墙或授权机制**，**不分发任何上游二进制资产**（千问的 wasm 运行时从你本机安装目录读取），也**不上报任何数据** —— 所有凭证与日志只存本机。积分自动化功能可能违反上游服务条款并导致账号受限，**是否使用及其后果由你自行承担**。本项目按「现状」提供，不附带任何担保。有问题请通过仓库 Issue 联系。
+**免责声明**：本项目是独立的第三方开源项目，与百度 / 阿里（千问办公、Qoder）/ 字节（TRAE）及 Anthropic / OpenAI / Google 等主体无任何隶属、合作或背书关系，文中产品名仅为指代用途。本项目通过协议适配实现与本地已安装客户端的互操作，**不破解、不绕过任何付费墙或授权机制**，**不分发任何上游二进制资产**，也**不上报任何数据** —— 所有凭证与日志只存本机。积分自动化功能可能违反上游服务条款并导致账号受限，**是否使用及其后果由你自行承担**。本项目按「现状」提供，不附带任何担保。有问题请通过仓库 Issue 联系。

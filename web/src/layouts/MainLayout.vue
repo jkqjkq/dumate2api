@@ -121,12 +121,17 @@ function onChannel(id: string) {
 function titleFor(id: string): string {
   const i = channelStore.infos[id]
   if (!i) return ''
-  if (!i.ready) return i.error || '不可用'
+  if (!i.ready) {
+    // 桌面凭证失效但网页池可用 → 请求仍能成功（走回落），不是「不可用」。
+    // 与模型管理页「凭证来源」的三分支判定同口径。
+    if (i.fallback?.available) return '桌面凭证失效 · 网页凭证回落中'
+    return i.error || '不可用'
+  }
   if (i.kind === 'direct') {
-    // 千问有 wasm 依赖；Qoder/TRAE 没有（Qoder 签名纯本地）。
-    // 对没有 wasm 的通道显示「wasm 未知」是凭空报一个不存在的故障。
+    // 千问的签名方式有 local / wasm 两种（默认 local，不需要客户端）；
+    // Qoder/TRAE 没有这个概念，对它们显示「签名未知」是凭空报一个不存在的故障。
     const bits = ['直连']
-    if (i.wasm) bits.push(`wasm ${i.wasm}`)
+    if (i.wasm) bits.push(`签名 ${i.wasm}`)
     if (i.accounts != null && i.accounts > 0) bits.push(`${i.accounts} 个账号`)
     if (i.account) bits.push(i.account)
     if (i.refreshExpired) bits.push('refresh token 已过期，需重新登录')
@@ -135,11 +140,11 @@ function titleFor(id: string): string {
   return `端口 ${i.port || '—'}` + (i.managed ? ' · 自托管' : '')
 }
 
-// 状态点：绿=就绪，黄=就绪但登录态将失效，红=不可用，灰=未知
+// 状态点：绿=就绪，黄=登录态将失效 / 桌面凭证失效但网页池回落可用（请求仍通），红=真不可用，灰=未知
 function dotClass(id: string): string {
   const i = channelStore.infos[id]
   if (!i) return 'unknown'
-  if (!i.ready) return 'bad'
+  if (!i.ready) return i.fallback?.available ? 'warn' : 'bad'
   if (i.refreshExpired) return 'warn'
   return 'ok'
 }

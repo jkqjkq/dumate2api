@@ -51,7 +51,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 1. **签名不需要官方 wasm**——纯本地算法（RSA 加密临时密钥 + AES 加密身份 + MD5 签名，
    公钥硬编码，见 `src/qoder/cosy.js`）。所以这条通道**不需要装任何客户端**
-   （`/health` 的 `needsClient: false`）。千问必须读客户端的 wasm，Qoder 不用。
+   （`/health` 的 `needsClient: false`）。**千问现在也是同一套本地算法**
+   （2026-10-14 起，见下文「千问通道的硬约束」第 1 条），两个通道共用
+   `src/cosy.js` 一份实现。
 2. **额度分两块且不能相加**：`userQuota`（订阅套餐内，Free 恒为 0）与
    `addOnQuota`（签到/赠送，**免费用户实际能用的就是这个**）。
 
@@ -124,10 +126,10 @@ inspector，再用 WebSocket 连 `:9229` 发 `Debugger.pause` 抓调用栈。
 不能只读 `setQoderModels` 写的快照——快照由网关进程写入，而 `/models/info` 跑在管理端进程，
 两者模块状态独立。TRAE 同理（`traeworkRows` 直接 `fetchModels`）。
 
-**千问办公是进程内直连，不需要任何外部服务。** 早期版本经 Buddy2api（8787）中转，后来发现它的 `wasm_helper.mjs` 本身就是纯 Node ESM 脚本、Python 只是一层没必要的壳，改为直连后少一个进程、少一层鉴权、少一个故障点。`src/qwenwork/` 直接调官方 wasm 生成请求并发到云端网关。
+**千问办公是进程内直连，不需要任何外部服务、也不再需要客户端。** 早期版本经 Buddy2api（8787）中转，后来发现它的 `wasm_helper.mjs` 本身就是纯 Node ESM 脚本、Python 只是一层没必要的壳，改为直连后少一个进程、少一层鉴权、少一个故障点。`src/qwenwork/` 现在**默认用本地算法签名**（`cosy-sign.js`，见下文「硬约束」第 1 条），请求直接发到云端网关。
 
 **千问通道的硬约束**：
-1. **必须依赖官方 wasm**。千问办公的数据面要求请求体由 `qoder_auth_wasm_bg.wasm` 生成（`Encode=1`），本地自实现的编码会被服务端拒（`400 Invalid agent chat JSON body`）。wasm 文件**不能复制进仓库**——它是客户端二进制资产，必须运行时从安装目录读（`src/qwenwork/wasm-path.js` 自动探测并取版本号最大的目录）。
+1. **签名默认走本地算法，不依赖 wasm、也不依赖客户端**（2026-10-14 改）。原实现只有 wasm 一条路，理由是「本地自实现的编码会被服务端拒（`400 Invalid agent chat JSON body`）」——那是 2026-09-23 的结论，当时还没有 `cosy.js`（Qoder 通道 10-02 才接入，其签名算法与参考实现逐字节比对过 22 项测试向量）。而千问与 Qoder **是同一套协议栈**：同一个 client_id、同一个聊天路径、同一套 `Encode=1` 自定义 base64、连服务端公钥都是同一把。所以那份算法直接适用于千问——差异只有 cosyVersion（1.1.52 vs 1.0.10）与几个客户端身份头。实测用同一套算法签名 → `gateway.qwenwork.cn` 返回 200 并正常出流（19 帧、正文 "OK"、usage 完整）。实现见 `src/qwenwork/cosy-sign.js`，算法本体在 `src/cosy.js`（与 Qoder 共用一份，**不要再复制第二份**）。官方 wasm 保留为退路：`DUMATE_QWENWORK_USE_WASM=1` 切回；wasm 是客户端二进制资产，**不能复制进仓库**，只能运行时从安装目录读（`src/qwenwork/wasm-path.js` 自动探测并取版本号最大的目录）。**顺带解决两件事**：客户端卸载后通道不再直接死（wasm 随卸载消失，用户 2026-10-14 卸载后即遇到），且不再每请求 spawn 一个 Node 子进程跑 wasm。
 2. **不套 `mapModel`**。千问的模型名（`pro`/`flash`）不在搭子别名表里，过 `mapModel` 会被兜底成 `model-text`，前缀随之失效。
 3. **外层永远 HTTP 200**，真实错误在信封的 `statusCodeValue` 里。**且它不发 `data: [DONE]`**，而是用 `event:finish` 收尾——转发时必须按 OpenAI 规范补发 `[DONE]`，否则 Codex 等客户端认为响应未完成。
 4. **请求体必须带 `business` 对象**，否则无论签名是否正确都 `503 Model catalog unavailable`。
@@ -219,7 +221,7 @@ Codex 把「无工具调用」判定成任务完成退出——用户看到「�
 
 **历史记录（无 `channel` 字段的旧日志）归入搭子**：分通道埋点上线前只有搭子一条通道，单列「未标注」会让用户切到搭子时数字凭空变小。只有「查看全部通道」时才显示 `untagged` 一栏。服务端过滤在 `usage.js` / `reqlogs.js` 的 `channel` 参数里做——前端筛只能筛掉当前页的行，分页总数仍是全通道的。
 
-**千问通道失败不阻断启动**：搭子是主链路。wasm 找不到或登录态缺失时网关照常监听，`/health` 的 `channels.qwenwork.ready` 报 false。
+**千问通道失败不阻断启动**：搭子是主链路。没有可用账号时网关照常监听，`/health` 的 `channels.qwenwork.ready` 报 false（本地签名不依赖任何外部文件，所以 2026-10-14 起唯一会缺的就是账号）。
 
 **TRAE Work 的额度要按 `usage_summary` 解析，不是额度包字段。**
 `ide_user_ent_usage` 返回的是 `{ usage_summary: { total_amount, consumed_amount } }`，
@@ -277,7 +279,7 @@ provider config 自带顶层 `model_context_window = 200000` +
 任何一个可选模型），catalog 条目另补 per-model 的 context_window。
 脚本：`~/.cc-switch/fix_traework_context.py`（幂等，带备份）。
 
-**每请求 spawn 一次 Node 子进程**（调 wasm_helper.mjs）。若实测成为延迟瓶颈，改成长驻子进程只需改 `src/qwenwork/bridge.js`——`wasm_helper.mjs` 已预留 `serve` 模式，上层 `chat.js` 不受影响。
+**每请求 spawn 一次 Node 子进程**（调 wasm_helper.mjs）——**这已是历史**：2026-10-14 起千问默认走本地签名（`src/qwenwork/cosy-sign.js`），不再 spawn 子进程。只有 `DUMATE_QWENWORK_USE_WASM=1` 时才回到 wasm 那条路；那时若成为延迟瓶颈，改成长驻子进程只需改 `src/qwenwork/bridge.js`——`wasm_helper.mjs` 已预留 `serve` 模式，上层 `chat.js` 不受影响。
 
 用前缀而不是猜模型名的理由：两侧模型名会撞车（搭子有 `glm-5`，千问上游也是 GLM 系），猜错了两侧都返回 200，从响应里根本看不出来；且隐式路由会让同一名字今天走 A 明天走 B。未知前缀若静默跑到搭子，会拿到「看起来成功但完全不是想要的结果」，比直接 400 难查得多。
 
@@ -327,20 +329,38 @@ provider config 自带顶层 `model_context_window = 200000` +
 注意 TRAE/千问账号是另一套存储（`traework/auth.js`、`qwenwork/auth.js`），它们的 `nickname || uid` 兜底是合法的，不要一起改。离线验证：`node test/verify-display-name.js`。
 
 **桌面凭证不可用时，搭子会自动回落到网页凭证池**（`src/fallback-web.js`）。
-不整体切到网页凭证的原因：桌面链路有三个网页链路没有的能力——`responses`
-（Codex CLI 0.155+ 只认它）、`count_tokens`、三通道前缀分流；整体切过去等于
-把这些一起丢掉。而桌面凭证唯一的硬伤是「同一时刻只有一份登录态、过期必须开
-客户端重登」，那正好是回落能补的。两边是同一个账号，不会造成额度混用。
+回落把网页池包装成伪上游响应交给四个协议处理器复用，所以**能力与桌面链路
+一致**——四条协议（含 Codex 只认的 `responses`）与 `count_tokens` 都实测通过
+（2026-10-14）。**别再把「网页链路没有 responses」当成回落的局限**：那是
+**9084 独立网关**（`web-gateway.js`）的，两者常被混为一谈。
+桌面凭证唯一的硬伤是「同一时刻只有一份登录态、过期必须开客户端重登」，
+回落正好补上。两边是同一个账号，不会造成额度混用。
+
+**要彻底不要客户端**：设 `DUMATE_DUMATE_SOURCE=web`——凭证来源从「兜底」
+变成「主链路」，跳过启动时那次 `discoverPort`（PowerShell 查询，实测约 3 秒），
+且池子不可用时由路由层（`router.availability`）给出明确原因而不是笼统的 502。
+
+**一个容易误判的点（2026-10-14 实测）**：客户端没装时，回落路径上**每个请求
+并不会跑探测链**。`upstream-router` 给 dumate 的 `defaultPort` 是 8980 且
+`portOf()` 保证返回有效数字，所以 `target.port` 恒有值，`forwardWithFallback`
+里 `!t.port` 那条分支（会调 `ensureUpstream` → `discoverPort`）**默认走不到**。
+真实路径是 `startForward` → 连一次本地 8980 → ECONNREFUSED（回环，毫秒级）
+→ 回调里 `tryWebFallback()`。所以**不需要给探测失败加缓存**——曾经加过一版
+静默窗口，打桩 discovery 计数实测（连发 5 个请求，`discoverPort` 一次都没被
+调用）证明是死代码，已移除。真正的探测开销只在启动那一次。
 
 回落把网页池包装成**伪上游响应**（EventEmitter + statusCode + headers），
 四个协议处理器原样复用——**不要为它重写翻译层**，那三套 SSE 状态机是踩了
-十几个坑才稳定的。两个易错点：
+十几个坑才稳定的。三个易错点：
 
 - **状态码时序**：处理器拿到上游响应会立刻 `res.writeHead(statusCode)`，
   而网页池的状态码要等云端响应头。所以必须「缓冲 → 等 ready → 交出去 → flush」，
   否则失败时头已按 200 发出，客户端收到空的 200（静默失败）。
-- **端口解析也在回落范围内**：凭证失效时 `dumate-main-server.exe` 拒绝启动、
-  `ensureUpstream()` 抛错——这正是主场景，把端口解析留在调用点就永远走不到回落。
+- **伪响应没有 `pipe`**：OpenAI 直通分支曾经无条件 `upstreamRes.pipe(res)`，
+  回落时抛未捕获的 TypeError **打挂整个进程**（2026-10-14 修，
+  `test/verify-fallback-stream-pipe.js` 锁定）。
+- **`!t.port` 那条分支默认走不到**（见上），但保留着——它是为「target 没有
+  端口」的形态准备的，删掉会让那种情况在调用点先抛错、走不到回落。
 
 触发条件严格限定为「还没交给回调」：后端连不上（fakeResponse）或回 4xx/5xx。
 一旦开始写下游就不再换链路（半截响应 + 换链路会让客户端收到两段拼接的内容）。
@@ -353,11 +373,12 @@ provider config 自带顶层 `model_context_window = 200000` +
 `auth-v2.dat` → 现在的自持凭证账号池），不是并行两条链路。所以上面那张表里
 「网页凭证」只适用于搭子。
 
-**千问不需要「走客户端」，但仍有两处依赖安装目录**（别把它读成「要走客户端」）：
+**千问不需要「走客户端」，安装目录也不再是必需**（2026-10-14 起）：
 
-1. **官方 wasm**（`qoder_auth_wasm_bg.wasm`）——请求体必须由它签名，无法自实现。
-   运行时从安装目录读（`wasm-path.js` 取版本号最大的目录），**不复制进仓库**。
-   客户端升级后新 wasm 若签名规则变了，这里会失效——但实测 1.1.0 与 1.2.0 的
+1. **签名默认本地算**，不读 wasm（见上文「千问通道的硬约束」第 1 条）。
+   只有 `DUMATE_QWENWORK_USE_WASM=1` 才回到官方 wasm 那条路：它运行时从安装目录读
+   （`wasm-path.js` 取版本号最大的目录），**不复制进仓库**。
+   客户端升级后新 wasm 若签名规则变了，wasm 路径会失效——但实测 1.1.0 与 1.2.0 的
    wasm **完全相同**（同 md5），所以升级客户端本身不影响签名。
 2. **machineId**（`credentials.machineId()` 读 `~/.qoderworkcn/.auth/machine_id`）——
    登录时生成，之后每账号固定不变（改了等于换设备）。**装过客户端才有这个值**；
@@ -647,8 +668,9 @@ Claude Code ── Anthropic ───────┼──→ 网关 :9080 ─�
 | `DUMATE_AUTO_CHECKIN_HOUR` / `_MINUTE` | `9` / `17` | 每日自动签到时刻（**两个都要**，只设 HOUR 不生效） |
 | `DUMATE_BROWSER_PATH` | 自动探测 Edge/Chrome | 登录器找不到浏览器时手动指定 |
 | `DUMATE_QWENWORK_AUTOSTART` | `auto` | `auto`=启用千问通道 / `off`=关闭（进程内直连，不拉起外部服务） |
-| `DUMATE_QWENWORK_INSTALL` | 自动探测 | 千问办公安装根（wasm 探测失败时手动指定） |
-| `CB_QWENWORK_WASM` | 自动探测 | 直接指定 `qoder_auth_wasm_bg.wasm` 的完整路径 |
+| `DUMATE_QWENWORK_USE_WASM` | 未设（本地签名） | 设 `1` 切回官方 wasm 签名（本地签名被上游拒时的退路；需要装千问办公客户端） |
+| `DUMATE_QWENWORK_INSTALL` | 自动探测 | 千问办公安装根（**仅 wasm 模式用**；wasm 探测失败时手动指定） |
+| `CB_QWENWORK_WASM` | 自动探测 | 直接指定 `qoder_auth_wasm_bg.wasm` 的完整路径（**仅 wasm 模式用**） |
 | `DUMATE_QWENWORK_DAILY_CREDITS` | `100` | 千问每日免费额度的**配置兜底下限**（接口不返回上限，只作推断的下界） |
 | `DUMATE_QWENWORK_MIN_MAX_TOKENS` | `16384` | 千问输出预算下限（与搭子的 `DUMATE_MIN_MAX_TOKENS` 分开） |
 | `DUMATE_QWENWORK_DEFAULT_MAX_TOKENS` | `131072` | 千问**默认**输出预算（客户端未给 `max_tokens` 时；搭子用 `DEFAULT_BUDGET=32768`，但会被 FLOOR 抬到 65536——**下限优先于默认值**）。取上游上限，见上文实测 |
@@ -660,6 +682,7 @@ Claude Code ── Anthropic ───────┼──→ 网关 :9080 ─�
 | `DUMATE_TRAEWORK_MODELS_CACHE_MS` | `300000` | TRAE 模型表缓存时长（5 分钟）。模型表只在登录/刷新时变，不必每次打上游 |
 | `DUMATE_TRAEWORK_REPAIR_RETRY` | `1` | 「播报即收尾」的重试次数上限。`0` 关闭整个修复（见上文 TRAE 段落） |
 | `DUMATE_TRAEWORK_HOLD_CAP` | `600` | 正文缓冲门的阈值（字符）。超过就转直发，避免长回答被扣住等判定 |
+| `DUMATE_DUMATE_SOURCE` | 未设（`auto`） | 设 `web` = 搭子**只用网页凭证**：跳过桌面链路（含启动那次约 3 秒的探测），凭证来源从「兜底」变「主链路」。池子不可用时路由层直接拒绝并说明原因，不静默退回桌面链路 |
 | `DUMATE_WEB_FALLBACK` | 未设（开启） | 设 `0` 关闭「桌面凭证不可用时回落到网页池」（见上文回落机制）。关闭后桌面凭证失效即请求全失败 |
 | `DUMATE_POINTS_METER` | 未设（开启） | 设 `0` 关闭搭子的余额游标采集（`points-cursor.js`）。关闭后请求日志不再有逐条消耗 |
 | `DUMATE_LAG_MONITOR` | 未设（开启） | 设 `0` 关闭事件循环卡顿监控（`startLagMonitor`）。开启时同步代码卡顿超阈值会打日志 |
