@@ -5,7 +5,7 @@
 ![platform](https://img.shields.io/badge/platform-Windows-blue)
 ![deps](https://img.shields.io/badge/dependencies-0-brightgreen)
 
-**百度搭子（DuMate）本地网关** —— 把百度搭子、千问办公、TRAE Work、Qoder 四条上游统一转成 **OpenAI / Anthropic / Google 兼容 API**，给 Codex CLI、Claude Code、cc-switch 用；无 GUI 拉起搭子后端，自带网页管理端。
+**百度搭子（DuMate）本地网关** —— 把百度搭子、千问办公、TRAE Work、Qoder 四条上游统一转成 **OpenAI / Anthropic / Google 兼容 API**，给 Codex CLI、Claude Code、cc-switch 用；无 GUI 拉起搭子后端，自带网页管理端。完整使用说明（安装配置 / 管理端逐页指南 / FAQ 排查）见 **[用户使用手册](docs/USER_MANUAL.md)**。
 
 <p align="center">
   <img src="assets/screenshots/dashboard.png" alt="管理端仪表盘" width="860" />
