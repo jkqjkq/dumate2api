@@ -477,10 +477,11 @@ onMounted(async () => {
 }
 .lab-title h2 {
   margin: 0;
-  font-size: 17px;
+  font-family: var(--lab-display);
+  font-size: 19px;
   font-weight: 600;
   color: var(--lab-text);
-  letter-spacing: 0.2px;
+  letter-spacing: 0.4px;
 }
 .lab-title p {
   margin: 4px 0 0;

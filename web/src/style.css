@@ -41,8 +41,8 @@
   --lab-danger: #dc2626;
 
   --lab-radius: 14px;
-  --lab-shadow: 0 1px 2px rgba(16, 24, 40, 0.04), 0 4px 14px rgba(16, 24, 40, 0.05);
-  --lab-shadow-hover: 0 2px 4px rgba(16, 24, 40, 0.05), 0 10px 26px rgba(16, 24, 40, 0.10);
+  --lab-shadow: 0 1px 2px rgba(16, 24, 40, 0.05), 0 6px 18px rgba(16, 24, 40, 0.06);
+  --lab-shadow-hover: 0 2px 4px rgba(16, 24, 40, 0.06), 0 12px 28px rgba(16, 24, 40, 0.11);
 
   --lab-mono: 'JetBrains Mono', 'Cascadia Mono', 'SF Mono', Consolas, 'Liberation Mono', monospace;
   --lab-display: 'Bahnschrift', 'DIN Alternate', 'Segoe UI Variable Display', sans-serif;
@@ -94,12 +94,14 @@ body::before {
   letter-spacing: -0.2px;
 }
 
-/* ---------- 卡片：白面浮在灰底上，阴影极轻 ---------- */
+/* ---------- 卡片：白面浮在灰底上，阴影极轻 ----------
+   box-shadow 必须 !important：AntD 的 css-in-js 注入晚于全局 CSS，
+   同权重会被组件默认值覆盖（实测 boxShadowTertiary token 也压不住） */
 .ant-card {
   border-radius: var(--lab-radius);
   border: 1px solid var(--lab-border);
   background: var(--lab-surface);
-  box-shadow: var(--lab-shadow);
+  box-shadow: var(--lab-shadow) !important;
 }
 .ant-card-bordered {
   border: 1px solid var(--lab-border);

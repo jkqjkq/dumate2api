@@ -169,11 +169,11 @@ onMounted(() => { channelStore.load() })
 
 /* 侧栏：比内容区再深一档灰，靠明度分层而不是靠边框 */
 .lab-sider {
-  background: #f1f4f8 !important;
+  background: #edf1f6 !important;
   border-right: 1px solid var(--lab-border);
 }
 .lab-sider :deep(.ant-layout-sider-trigger) {
-  background: #eaeef4;
+  background: #e4e9f0;
   border-top: 1px solid var(--lab-border);
   color: var(--lab-text-mute);
 }

@@ -32,6 +32,12 @@ const themeConfig = {
     colorTextTertiary: '#8b99ad',
     colorTextQuaternary: '#c2cad6',
 
+    // 与 style.css 的 --lab-shadow 同值：AntD 的样式注入晚于全局 CSS，
+    // .ant-card 的 box-shadow 若只写在 style.css 会被组件默认值盖掉——
+    // 必须在 token 层覆盖 boxShadowTertiary（Card 默认阴影走的就是它）。
+    boxShadowTertiary:
+      '0 1px 2px rgba(16, 24, 40, 0.05), 0 6px 18px rgba(16, 24, 40, 0.06)',
+
     borderRadius: 10,
     borderRadiusLG: 14,
     borderRadiusSM: 7,
