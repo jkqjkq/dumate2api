@@ -44,13 +44,17 @@ const DEFAULT_ALIASES = {
 // 上游真正认识的 ID。其余名字必须经别名映射后才能用。
 const DEFAULT_UPSTREAM = ['model-text', 'model-artifact-validate', 'glm-5'];
 
-// /v1/models 对外暴露的条目，与改造前保持一致
+// /v1/models 对外暴露的条目。
+//
+// **只列上游真实模型**（2026-10-21）：`claude-3-5-sonnet-20241022` / `gpt-4o`
+// 不是上游模型，只是客户端协议名——网关会经别名把它们转到 model-text。
+// 列在模型列表里会让客户端以为它们是独立模型（cc-switch 里会单独显示成
+// dumate-proxy 一组）。别名映射本身保留（aliases 不动），所以客户端仍可
+// 传这些名字，只是不再出现在「可选模型」清单里。
 const DEFAULT_EXPOSED = [
   'model-text',
   'model-artifact-validate',
   'glm-5',
-  'claude-3-5-sonnet-20241022',
-  'gpt-4o',
 ];
 
 const DEFAULTS = {
@@ -135,8 +139,31 @@ function mapModel(name) {
   return cfg.aliases[name] || cfg.fallback;
 }
 
+/**
+ * 上游模型 ID 的**可读标注**。
+ *
+ * 搭子上游没有模型列表接口（`/models` 404、`/model/list` 400，2026-10-21
+ * 用网页凭证复测确认），这三个 ID 是**探测**出来的、上游唯一接受的名字：
+ * 传 `glm-5.2` / `glm-5.1` / `glm-4.6` 一律 404 `api not registered`。
+ *
+ * 因此下面的中文名是**本地标注**，不是百度下发的官方名称——界面必须标明
+ * 来源，不能让人以为这是上游给的元信息。
+ */
+const MODEL_NAMES = {
+  'model-text': '文本模型（上游默认）',
+  'model-artifact-validate': '制品校验模型',
+  'glm-5': 'GLM-5',
+};
+
+/** 上游 ID → 可读名；没有标注就原样返回（别名表里的 claude-* / gpt-* 属于客户端协议名） */
+function displayName(id) {
+  return MODEL_NAMES[id] || id;
+}
+
 module.exports = {
   DEFAULTS,
+  MODEL_NAMES,
+  displayName,
   DEFAULT_ALIASES,
   DEFAULT_UPSTREAM,
   DEFAULT_EXPOSED,

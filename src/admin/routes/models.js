@@ -67,7 +67,9 @@ const TW_NAMES = { 'glm-5.2': 'GLM-5.2' };
 async function channelView(cfg) {
   const out = [{
     id: 'dumate', label: '百度搭子', editable: true, prefix: null,
-    models: cfg.exposed.map((id) => ({ id, name: id })),
+    // 显示名与 /v1/models 同源：可读标注来自 modelmap.displayName，
+    // 别名原样返回（它们没有上游标注）
+    models: cfg.exposed.map((id) => ({ id, name: modelmap.displayName(id) })),
   }];
   try {
     const qw = require('../../qwenwork');

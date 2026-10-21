@@ -626,9 +626,11 @@ async function handleOpenAIModels(req, res) {
     // 区分「上游直接认识」与「靠别名转换」——后者换名字也能用，
     // 但前者才是上游真实模型，界面与客户端据此判断
     owned_by: upstream.has(id) ? 'dumate' : 'dumate-proxy',
-    // name 与 id 相同：搭子的模型名就是别名表里的名字（`glm-5` 等），
-    // 没有独立的显示名。带上是为了与其它通道形状一致——cc-switch 读 `name`。
-    name: id,
+    // 可读名来自 modelmap.displayName：上游没有模型列表接口，这几个名字是
+    // **本地标注**（`model-text` → 文本模型），不是百度下发的元信息。
+    // 别名（claude-* / gpt-*）没有标注，原样返回。
+    // 带上 name 是为了与其它通道形状一致——cc-switch 读 `name` 显示模型名。
+    name: modelmap.displayName(id),
   }));
 
   // 千问办公的模型带 qwen/ 前缀列出来，否则客户端无从发现这个通道
