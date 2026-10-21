@@ -50,6 +50,9 @@ function sendJSON(res, status, data) {
   res.writeHead(status, {
     'Content-Type': 'application/json',
     'Access-Control-Allow-Origin': '*',
+    // 管理端接口是实时数据（模型表、账号、埋点）。浏览器/中间层一旦缓存
+    // 就会把「上游已更新」看成「界面还是旧的」，且普通刷新也不会重新请求。
+    'Cache-Control': 'no-store',
     'Content-Length': Buffer.byteLength(body),
   });
   res.end(body);
