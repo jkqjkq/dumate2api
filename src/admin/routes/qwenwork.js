@@ -30,7 +30,27 @@ async function walletsOf(account) {
   const key = String(account.id);
   const hit = cache.data.get(key);
   if (hit && Date.now() - hit.at < CACHE_MS) return hit.w;
-  const w = await credits.fetchWallets({ account });
+  // 查余额前先按需换票（判据与 chat.ensureAccount 相同）。
+  //
+  // 为什么必须在这里换：聊天链路的 runOnce 会 ensureAccount，管理端却直接拿
+  // 存档里的 accessToken 去打 /user/wallets。备用账号不被使用，token 到期后
+  // 永远没人续——于是余额读成 0、到期时间标红，界面看起来像「账号失效」，
+  // 其实 refresh token 完全有效、额度也还在（2026-10-21 实测：账号 2 的
+  // access token 18:04 过期后，wallets 全 0，而 account-context 报剩余 100）。
+  //
+  // 换票成功会落盘并清掉 lastError（exchange 返回 lastError:''）——备用号
+  // 上一次的瞬时失败（如 5 天前的 402）也就顺手清掉了，不会一直挂在卡上。
+  // 换票失败不阻断查询：用旧 token 试一次，结果如实上报（余额取不到显示 —）。
+  let acc = account;
+  if (authStore.needsRefresh(account)) {
+    try {
+      const r = await authStore.exchange(account);
+      if (r && r.ok) {
+        acc = authStore.patch(account.id, r.patch) || { ...account, ...r.patch };
+      }
+    } catch (e) { /* 换票异常就用旧凭证试，失败会体现在 w.ok 上 */ }
+  }
+  const w = await credits.fetchWallets({ account: acc });
   cache.data.set(key, { at: Date.now(), w });
   cache.at = Date.now();
   return w;

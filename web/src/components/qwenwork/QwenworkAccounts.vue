@@ -108,8 +108,14 @@
             <div class="mt-3 grid grid-cols-2 gap-2 text-sm">
               <div>
                 <div class="text-xs text-slate-400">access token 到期</div>
-                <div class="text-xs" :class="tokenExpired(a) ? 'text-red-600' : ''">
+                <!-- access token 过期不等于账号失效：refresh token 还在时，
+                     下次请求会自动换票（管理端查余额时也会先换）。只有
+                     凭证不可用（refresh 缺失/过期）才标红。 -->
+                <div class="text-xs" :class="tokenExpired(a) && !a.usable ? 'text-red-600' : ''">
                   {{ a.tokenExpiresAt ? dateText(a.tokenExpiresAt) : '—' }}
+                  <span v-if="tokenExpired(a) && a.usable" class="text-slate-400">
+                    （已过期，下次调用自动续期）
+                  </span>
                 </div>
               </div>
               <div>
