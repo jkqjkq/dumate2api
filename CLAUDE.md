@@ -336,18 +336,26 @@ provider config 自带顶层 `model_context_window = 200000` +
 桌面凭证唯一的硬伤是「同一时刻只有一份登录态、过期必须开客户端重登」，
 回落正好补上。两边是同一个账号，不会造成额度混用。
 
-**要彻底不要客户端**：设 `DUMATE_DUMATE_SOURCE=web`——凭证来源从「兜底」
-变成「主链路」，跳过启动时那次 `discoverPort`（PowerShell 查询，实测约 3 秒），
-且池子不可用时由路由层（`router.availability`）给出明确原因而不是笼统的 502。
+**默认就是「不要客户端」（2026-10-22 改）**：`DUMATE_DUMATE_SOURCE` 未设时
+凭证来源是 `web`——桌面链路完全不参与，跳过启动那次 `discoverPort`（PowerShell
+查询，实测约 3 秒），池子不可用时由路由层（`router.availability`）给出明确原因
+而不是笼统的 502。依据是实测而非偏好：客户端卸载后桌面链路必然失败
+（`auth.json` 不存在），`auto` 只是让它先探测再撞 ECONNREFUSED 才回落；而
+网页链路首字 p50 **826ms**，比桌面链路的 **1570ms** 快近一倍（少了本地 Go 中转
+那一跳），长尾差距更大（p90 2819ms vs 12569ms）。桌面链路保留为显式退路：
+`DUMATE_DUMATE_SOURCE=auto`（别名 `desktop`）恢复「桌面优先、不可用回落」。
+它唯一的独占价值是「凭证明文不进网关进程」，留着是为了网页接口被风控时还有
+一条路。无法识别的取值按默认（web）处理并在启动日志告警，**不静默当 auto**。
 
 **一个容易误判的点（2026-10-14 实测）**：客户端没装时，回落路径上**每个请求
 并不会跑探测链**。`upstream-router` 给 dumate 的 `defaultPort` 是 8980 且
 `portOf()` 保证返回有效数字，所以 `target.port` 恒有值，`forwardWithFallback`
-里 `!t.port` 那条分支（会调 `ensureUpstream` → `discoverPort`）**默认走不到**。
+里 `!t.port` 那条分支（会调 `ensureUpstream` → `discoverPort`）**走不到**
+（默认 `web` 模式下更早就在来源分支返回了；`auto` 模式下它同样走不到）。
 真实路径是 `startForward` → 连一次本地 8980 → ECONNREFUSED（回环，毫秒级）
 → 回调里 `tryWebFallback()`。所以**不需要给探测失败加缓存**——曾经加过一版
 静默窗口，打桩 discovery 计数实测（连发 5 个请求，`discoverPort` 一次都没被
-调用）证明是死代码，已移除。真正的探测开销只在启动那一次。
+调用）证明是死代码，已移除。真正的探测开销只在启动那一次，且只有 `auto` 模式会跑。
 
 回落把网页池包装成**伪上游响应**（EventEmitter + statusCode + headers），
 四个协议处理器原样复用——**不要为它重写翻译层**，那三套 SSE 状态机是踩了
@@ -682,7 +690,7 @@ Claude Code ── Anthropic ───────┼──→ 网关 :9080 ─�
 | `DUMATE_TRAEWORK_MODELS_CACHE_MS` | `300000` | TRAE 模型表缓存时长（5 分钟）。模型表只在登录/刷新时变，不必每次打上游 |
 | `DUMATE_TRAEWORK_REPAIR_RETRY` | `1` | 「播报即收尾」的重试次数上限。`0` 关闭整个修复（见上文 TRAE 段落） |
 | `DUMATE_TRAEWORK_HOLD_CAP` | `600` | 正文缓冲门的阈值（字符）。超过就转直发，避免长回答被扣住等判定 |
-| `DUMATE_DUMATE_SOURCE` | 未设（`auto`） | 设 `web` = 搭子**只用网页凭证**：跳过桌面链路（含启动那次约 3 秒的探测），凭证来源从「兜底」变「主链路」。池子不可用时路由层直接拒绝并说明原因，不静默退回桌面链路 |
+| `DUMATE_DUMATE_SOURCE` | 未设（`web`） | 搭子凭证来源。未设 = **只用网页凭证**（桌面链路不参与，跳过启动那次约 3 秒的探测；池子不可用时路由层直接拒绝并说明原因，不静默退回桌面链路）。设 `auto`（别名 `desktop`）= 桌面优先、不可用时回落网页池。**无法识别的值按 `web` 处理并在启动日志告警** |
 | `DUMATE_WEB_FALLBACK` | 未设（开启） | 设 `0` 关闭「桌面凭证不可用时回落到网页池」（见上文回落机制）。关闭后桌面凭证失效即请求全失败 |
 | `DUMATE_POINTS_METER` | 未设（开启） | 设 `0` 关闭搭子的余额游标采集（`points-cursor.js`）。关闭后请求日志不再有逐条消耗 |
 | `DUMATE_LAG_MONITOR` | 未设（开启） | 设 `0` 关闭事件循环卡顿监控（`startLagMonitor`）。开启时同步代码卡顿超阈值会打日志 |

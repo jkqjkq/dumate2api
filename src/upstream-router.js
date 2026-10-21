@@ -148,22 +148,45 @@ function resolve(model) {
 }
 
 /**
+ * 搭子的凭证来源：`'web'`（默认）或 `'auto'`。
+ *
+ * 默认值已从 `auto` 改成 `web`（2026-10-22）。依据是实测而非偏好：
+ * 客户端卸载后桌面链路必然失败（`auth.json` 不存在），`auto` 只是让它
+ * 先花约 3 秒探测、再在每个请求上撞一次 ECONNREFUSED 才回落；而网页链路
+ * 实测首字 p50 826ms，比桌面链路的 1570ms 快近一倍（少了本地 Go 中转那一跳），
+ * 四条协议与三个模型在网页链路上全部验证通过。
+ *
+ * `DUMATE_DUMATE_SOURCE=auto`（等价写法 `desktop`）恢复旧行为：桌面优先、
+ * 不可用时回落网页池。桌面链路仍然保留——它唯一的独占价值是「凭证明文
+ * 不进网关进程」，留着作为网页接口被风控时的退路，只是不再默认启用。
+ *
+ * 无法识别的值按默认（web）处理，由启动日志告警，不静默当 auto。
+ */
+function dumateSource() {
+  const v = String(process.env.DUMATE_DUMATE_SOURCE || '').trim().toLowerCase();
+  if (!v) return 'web';
+  if (v === 'web') return 'web';
+  if (v === 'auto' || v === 'desktop') return 'auto';
+  return 'web';
+}
+
+/**
  * 某通道是否可用。
  * 千问的可用来判断两件事：官方 wasm 能不能找到、登录态能不能解出来——
  * 它不再依赖本地 8787 的 Key（那是走 Buddy2api 中转时的遗留）。
  */
 function availability(channel) {
   if (channel === 'dumate') {
-    // 显式只用网页凭证时（DUMATE_DUMATE_SOURCE=web），桌面链路根本不参与，
-    // 这个通道的可用性就是「网页池里有没有可用账号」。
+    // 只用网页凭证时，桌面链路根本不参与，这个通道的可用性就是
+    // 「网页池里有没有可用账号」。
     // 在这里判而不是在转发层判：四个协议入口都走这个函数，一处改动全覆盖，
     // 且能给出明确原因——转发层只能回一句笼统的 upstream unavailable。
-    if (process.env.DUMATE_DUMATE_SOURCE === 'web') {
+    if (dumateSource() === 'web') {
       try {
         const fb = require('./fallback-web');
         return fb.available()
           ? { ok: true }
-          : { ok: false, reason: 'DUMATE_DUMATE_SOURCE=web，但网页账号池里没有可用账号' };
+          : { ok: false, reason: '搭子当前只用网页凭证，但网页账号池里没有可用账号（想用桌面链路请设 DUMATE_DUMATE_SOURCE=auto）' };
       } catch (e) {
         return { ok: false, reason: e.message };
       }
@@ -204,5 +227,6 @@ module.exports = {
   UPSTREAMS,
   resolve,
   availability,
+  dumateSource,
   exposedFor,
 };
