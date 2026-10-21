@@ -2,7 +2,7 @@
   <a-layout class="min-h-screen lab-shell">
     <a-layout-sider v-model:collapsed="collapsed" collapsible :width="216" class="lab-sider">
       <div class="lab-logo">
-        <span class="logo-mark">DM</span>
+        <span class="logo-mark"><AppLogo :size="19" /></span>
         <span v-if="!collapsed" class="logo-text">DuMate<span class="logo-accent">控制台</span></span>
       </div>
       <a-menu theme="light" mode="inline" :selected-keys="selectedKeys" @click="onMenu">
@@ -92,6 +92,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { DashboardOutlined, DeploymentUnitOutlined, KeyOutlined, UserOutlined, WalletOutlined, TeamOutlined, BarChartOutlined, FileTextOutlined, CommentOutlined } from '@ant-design/icons-vue'
+import AppLogo from '@/components/AppLogo.vue'
 import { auth } from '@/stores/auth'
 import { channelStore, CHANNELS } from '@/stores/channel'
 
@@ -185,6 +186,12 @@ onMounted(() => { channelStore.load() })
   padding: 0 18px;
   border-bottom: 1px solid var(--lab-border);
 }
+/* 折叠后侧栏只剩 80px，18px 的左内边距会让标记明显偏左。
+   .ant-layout-sider-collapsed 是 AntD 折叠时加在 sider 根元素上的类 */
+.lab-sider.ant-layout-sider-collapsed .lab-logo {
+  padding: 0;
+  justify-content: center;
+}
 .logo-mark {
   width: 30px;
   height: 30px;
@@ -195,11 +202,12 @@ onMounted(() => { channelStore.load() })
   border-radius: 9px;
   background: linear-gradient(135deg, #0891b2, #0e7490);
   color: #ffffff;
-  font-family: var(--lab-mono);
-  font-weight: 700;
-  font-size: 12px;
-  letter-spacing: 0.5px;
   box-shadow: 0 2px 8px rgba(8, 145, 178, 0.28);
+  transition: box-shadow 0.25s ease, transform 0.25s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.logo-mark:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 14px rgba(8, 145, 178, 0.4);
 }
 .logo-text {
   font-family: var(--lab-display);

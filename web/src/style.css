@@ -17,32 +17,38 @@
 :root {
   color-scheme: light;
   /* 分层底色：页面底是灰、卡片是白，用明度而不是边框来区分层级 */
-  --lab-bg: #f4f6f9;
-  --lab-bg-2: #edf0f5;
+  --lab-bg: #f2f4f8;
+  --lab-bg-2: #eceff4;
   --lab-surface: #ffffff;
-  --lab-surface-2: #f6f8fb;
-  --lab-surface-3: #eef1f6;
+  --lab-surface-2: #f7f9fc;
+  --lab-surface-3: #eff2f7;
 
-  --lab-border: #e3e8ef;
-  --lab-border-strong: #cdd5e0;
+  --lab-border: #e2e7ee;
+  --lab-border-strong: #ccd4df;
 
-  --lab-text: #1e293b;
-  --lab-text-sub: #5c6b80;
-  --lab-text-mute: #8b99ad;
+  --lab-text: #1a2332;
+  --lab-text-sub: #4e5f75;
+  --lab-text-mute: #8494a9;
 
   /* 信号色：整站唯一强调色，用在选中态、主按钮、关键数值。
      浅底上用 cyan-600（#0891b2）——亮青 #22d3ee 在白底上对比不足 */
   --lab-primary: #0891b2;
-  --lab-primary-dim: rgba(8, 145, 178, 0.10);
-  --lab-primary-line: rgba(8, 145, 178, 0.32);
+  --lab-primary-dim: rgba(8, 145, 178, 0.08);
+  --lab-primary-line: rgba(8, 145, 178, 0.28);
+  --lab-primary-glow: rgba(8, 145, 178, 0.05);
 
   --lab-ok: #059669;
+  --lab-ok-dim: rgba(5, 150, 105, 0.08);
   --lab-warn: #d97706;
+  --lab-warn-dim: rgba(217, 119, 6, 0.08);
   --lab-danger: #dc2626;
+  --lab-danger-dim: rgba(220, 38, 38, 0.08);
 
   --lab-radius: 14px;
-  --lab-shadow: 0 1px 2px rgba(16, 24, 40, 0.05), 0 6px 18px rgba(16, 24, 40, 0.06);
-  --lab-shadow-hover: 0 2px 4px rgba(16, 24, 40, 0.06), 0 12px 28px rgba(16, 24, 40, 0.11);
+  --lab-radius-sm: 10px;
+  --lab-shadow: 0 1px 2px rgba(16, 24, 40, 0.04), 0 4px 14px rgba(16, 24, 40, 0.05);
+  --lab-shadow-hover: 0 2px 4px rgba(16, 24, 40, 0.05), 0 12px 32px rgba(16, 24, 40, 0.10);
+  --lab-shadow-card: 0 1px 3px rgba(16, 24, 40, 0.03), 0 2px 8px rgba(16, 24, 40, 0.04);
 
   --lab-mono: 'JetBrains Mono', 'Cascadia Mono', 'SF Mono', Consolas, 'Liberation Mono', monospace;
   --lab-display: 'Bahnschrift', 'DIN Alternate', 'Segoe UI Variable Display', sans-serif;
@@ -62,9 +68,10 @@ body {
     'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Helvetica Neue', Helvetica, Arial, sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
 }
 
-/* 背景层：灰底 + 极淡网格 + 左上角青色辉光。
+/* 背景层：灰底 + 极淡网格 + 左上/右上角青色辉光。
    纯色底会让整屏发闷，网格给「工程面板」的质感，
    辉光把视觉重心压到内容区左上（阅读起点）。 */
 body::before {
@@ -74,11 +81,12 @@ body::before {
   z-index: 0;
   pointer-events: none;
   background-image:
-    radial-gradient(1100px 520px at 8% -8%, rgba(8, 145, 178, 0.06), transparent 62%),
-    radial-gradient(900px 480px at 100% 0%, rgba(2, 132, 199, 0.04), transparent 60%),
-    linear-gradient(rgba(15, 23, 42, 0.022) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(15, 23, 42, 0.022) 1px, transparent 1px);
-  background-size: auto, auto, 44px 44px, 44px 44px;
+    radial-gradient(1200px 560px at 6% -6%, rgba(8, 145, 178, 0.07), transparent 65%),
+    radial-gradient(1000px 500px at 98% -2%, rgba(2, 132, 199, 0.05), transparent 62%),
+    radial-gradient(800px 400px at 50% 100%, rgba(8, 145, 178, 0.02), transparent 55%),
+    linear-gradient(rgba(15, 23, 42, 0.018) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(15, 23, 42, 0.018) 1px, transparent 1px);
+  background-size: auto, auto, auto, 44px 44px, 44px 44px;
 }
 #app {
   position: relative;
@@ -102,23 +110,25 @@ body::before {
   border: 1px solid var(--lab-border);
   background: var(--lab-surface);
   box-shadow: var(--lab-shadow) !important;
+  transition: box-shadow 0.25s cubic-bezier(0.22, 1, 0.36, 1),
+              border-color 0.25s cubic-bezier(0.22, 1, 0.36, 1);
 }
 .ant-card-bordered {
   border: 1px solid var(--lab-border);
 }
 .ant-card-head {
   border-bottom: 1px solid var(--lab-border);
-  min-height: 46px;
-  padding: 0 18px;
+  min-height: 48px;
+  padding: 0 20px;
 }
 .ant-card-head-title {
   font-size: 13px;
   font-weight: 600;
   color: var(--lab-text);
-  letter-spacing: 0.2px;
+  letter-spacing: 0.3px;
 }
 .ant-card-body {
-  padding: 18px;
+  padding: 20px;
 }
 .ant-card-extra {
   color: var(--lab-text-sub);
@@ -130,31 +140,34 @@ body::before {
   box-shadow: var(--lab-shadow-hover);
   border-color: var(--lab-border-strong);
   transform: translateY(-2px);
-  transition: all 0.22s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 /* ---------- 统计数值：等宽、加大、收紧字距 ---------- */
 .ant-statistic-title {
-  font-size: 12px;
+  font-size: 11.5px;
   color: var(--lab-text-mute);
-  margin-bottom: 6px;
-  letter-spacing: 0.3px;
+  margin-bottom: 8px;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  font-weight: 500;
 }
 .ant-statistic-content {
   font-family: var(--lab-mono);
-  font-size: 26px;
-  font-weight: 600;
-  letter-spacing: -0.6px;
+  font-size: 28px;
+  font-weight: 700;
+  letter-spacing: -0.8px;
   font-variant-numeric: tabular-nums;
   color: var(--lab-text);
+  line-height: 1.15;
 }
 .ant-statistic-content-suffix {
   font-size: 12px;
   color: var(--lab-text-mute);
   margin-left: 4px;
+  font-weight: 400;
 }
 
-/* ---------- 表格：表头压灰、行悬停、去掉重边框 ---------- */
+/* ---------- 表格：表头压灰、行悬停、斑马纹、去掉重边框 ---------- */
 .ant-table {
   font-size: 13px;
   background: transparent;
@@ -162,20 +175,26 @@ body::before {
 .ant-table-thead > tr > th {
   background: var(--lab-surface-2) !important;
   color: var(--lab-text-sub) !important;
-  font-weight: 500 !important;
-  font-size: 11.5px;
-  letter-spacing: 0.4px;
+  font-weight: 600 !important;
+  font-size: 11px;
+  letter-spacing: 0.6px;
   text-transform: uppercase;
   border-bottom: 1px solid var(--lab-border) !important;
+  padding: 10px 12px !important;
 }
 .ant-table-thead > tr > th::before {
   display: none !important;
 }
 .ant-table-tbody > tr > td {
   border-bottom: 1px solid var(--lab-border);
+  padding: 10px 12px !important;
+  transition: background 0.15s ease;
+}
+.ant-table-tbody > tr:nth-child(even) > td {
+  background: rgba(15, 23, 42, 0.012);
 }
 .ant-table-tbody > tr:hover > td {
-  background: #f1f5f9 !important;
+  background: #eef2f7 !important;
 }
 .ant-table-tbody > tr.row-selected > td {
   background: var(--lab-primary-dim) !important;
@@ -191,23 +210,29 @@ body::before {
 
 /* ---------- 按钮 / 输入：统一圆角与聚焦环 ---------- */
 .ant-btn {
-  border-radius: 9px;
+  border-radius: var(--lab-radius-sm);
   font-weight: 500;
+  transition: all 0.2s cubic-bezier(0.22, 1, 0.36, 1);
 }
 .ant-btn-primary {
   color: #ffffff;
   font-weight: 600;
-  box-shadow: 0 3px 10px rgba(8, 145, 178, 0.22);
+  box-shadow: 0 2px 8px rgba(8, 145, 178, 0.20);
 }
 .ant-btn-primary:hover {
-  box-shadow: 0 5px 16px rgba(8, 145, 178, 0.30);
+  box-shadow: 0 4px 14px rgba(8, 145, 178, 0.28);
+  transform: translateY(-1px);
+}
+.ant-btn-primary:active {
+  transform: translateY(0);
 }
 .ant-input,
 .ant-input-affix-wrapper,
 .ant-select-selector,
 .ant-input-number,
 .ant-picker {
-  border-radius: 9px !important;
+  border-radius: var(--lab-radius-sm) !important;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
 }
 .ant-input:focus,
 .ant-input-focused,
@@ -219,14 +244,29 @@ body::before {
 /* ---------- 标签：去掉过重描边，走半透明底 ---------- */
 .ant-tag {
   border-radius: 6px;
-  font-size: 11.5px;
+  font-size: 11px;
   font-weight: 500;
   border: 1px solid transparent;
+  padding: 1px 8px;
+  line-height: 18px;
+}
+
+/* ---------- 描述列表：标签/值分明 ---------- */
+.ant-descriptions-item-label {
+  color: var(--lab-text-mute) !important;
+  font-size: 12px !important;
+}
+.ant-descriptions-item-content {
+  color: var(--lab-text) !important;
+  font-size: 13px !important;
+}
+.ant-descriptions-bordered .ant-descriptions-item-label {
+  background: var(--lab-surface-2) !important;
 }
 
 /* ---------- 空态：浅色下插图本来就淡，稍微收一点即可 ---------- */
 .ant-empty-image {
-  opacity: 0.8;
+  opacity: 0.65;
 }
 .ant-empty-description {
   color: var(--lab-text-mute);
@@ -243,29 +283,53 @@ body::before {
 }
 .ant-modal-content {
   border: 1px solid var(--lab-border-strong);
+  border-radius: var(--lab-radius) !important;
+}
+.ant-modal-header {
+  border-bottom: 1px solid var(--lab-border);
+}
+
+/* ---------- Alert 提示条 ---------- */
+.ant-alert {
+  border-radius: var(--lab-radius-sm);
+}
+.ant-alert-info {
+  background: var(--lab-primary-glow);
+  border-color: var(--lab-primary-line);
+}
+.ant-alert-warning {
+  background: var(--lab-warn-dim);
+}
+.ant-alert-error {
+  background: var(--lab-danger-dim);
+}
+
+/* ---------- 进度条 ---------- */
+.ant-progress-bg {
+  border-radius: 4px;
 }
 
 /* ---------- 滚动条 ---------- */
 ::-webkit-scrollbar {
-  width: 9px;
-  height: 9px;
+  width: 8px;
+  height: 8px;
 }
 ::-webkit-scrollbar-track {
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: #cdd5e0;
-  border-radius: 5px;
+  background: #c8d0db;
+  border-radius: 4px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #aeb9c7;
+  background: #a8b4c4;
 }
 
 /* ---------- 载入错峰：卡片依次浮起，一次编排好过满屏微动效 ---------- */
 @keyframes lab-rise {
   from {
     opacity: 0;
-    transform: translateY(8px);
+    transform: translateY(10px);
   }
   to {
     opacity: 1;
@@ -274,7 +338,7 @@ body::before {
 }
 @media (prefers-reduced-motion: no-preference) {
   .page > * {
-    animation: lab-rise 0.42s cubic-bezier(0.22, 1, 0.36, 1) both;
+    animation: lab-rise 0.45s cubic-bezier(0.22, 1, 0.36, 1) both;
   }
   .page > *:nth-child(1) { animation-delay: 0.02s; }
   .page > *:nth-child(2) { animation-delay: 0.07s; }
@@ -306,19 +370,22 @@ body::before {
   justify-content: space-between;
   gap: 16px;
   flex-wrap: wrap;
+  padding-bottom: 4px;
 }
 .page-head h2 {
   margin: 0;
   font-family: var(--lab-display);
-  font-size: 19px;
-  font-weight: 600;
+  font-size: 20px;
+  font-weight: 700;
   color: var(--lab-text);
-  letter-spacing: 0.4px;
+  letter-spacing: 0.5px;
+  line-height: 1.3;
 }
 .page-head .sub {
-  margin: 5px 0 0;
-  font-size: 12px;
+  margin: 6px 0 0;
+  font-size: 12.5px;
   color: var(--lab-text-mute);
+  line-height: 1.5;
 }
 .page-head .actions {
   display: flex;
@@ -332,24 +399,257 @@ body::before {
   font-size: 13px;
   font-weight: 600;
   color: var(--lab-text);
+  letter-spacing: 0.2px;
 }
 
 /* 次级说明文字 */
 .hint-text {
   font-size: 12px;
   color: var(--lab-text-mute);
+  line-height: 1.6;
 }
 
 /* 页头右侧的浅色按钮：多个页面共用，放全局避免各组件 scoped 样式各写一遍
    （scoped 只在声明它的组件内生效，写在某个页面里其余页面拿不到） */
 .ghost-btn {
-  border-radius: 9px;
+  border-radius: var(--lab-radius-sm);
   color: var(--lab-text-sub);
   background: transparent;
   border-color: var(--lab-border-strong);
+  transition: all 0.2s ease;
 }
 .ghost-btn:hover {
   color: var(--lab-primary) !important;
   border-color: var(--lab-primary-line) !important;
   background: var(--lab-primary-dim);
+}
+
+/* ============================================================
+   账号健康快照卡：内嵌账号卡片的统一样式
+   各通道（搭子/千问/TRAE/Qoder）共用同一套视觉规则
+   ============================================================ */
+.account-card {
+  padding: 14px;
+  border: 1px solid var(--lab-border);
+  border-radius: var(--lab-radius-sm);
+  background: var(--lab-surface-2);
+  transition: all 0.2s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.account-card:hover {
+  border-color: var(--lab-border-strong);
+  background: var(--lab-surface);
+  box-shadow: var(--lab-shadow-card);
+}
+.account-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+.account-card-name {
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--lab-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.account-card-meta {
+  font-size: 11px;
+  color: var(--lab-text-mute);
+  font-family: var(--lab-mono);
+  margin-bottom: 8px;
+}
+.health-bar {
+  height: 5px;
+  background: var(--lab-surface-3);
+  border-radius: 3px;
+  overflow: hidden;
+  margin-bottom: 8px;
+}
+.health-bar-fill {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.5s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.account-card-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 11.5px;
+}
+.account-card-error {
+  font-size: 11px;
+  margin-top: 6px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: var(--lab-danger-dim);
+  color: var(--lab-danger);
+  line-height: 1.4;
+}
+
+/* ============================================================
+   趋势图容器
+   ============================================================ */
+.trend-block + .trend-block {
+  margin-top: 4px;
+}
+.trend-label {
+  font-size: 11px;
+  color: var(--lab-text-mute);
+  padding-left: 2px;
+  font-weight: 500;
+  letter-spacing: 0.3px;
+}
+.trend-chart {
+  height: 112px;
+  width: 100%;
+}
+
+/* ============================================================
+   积分池小卡（.qw-pool）：用量 / 模型 / 账号三个页面共用。
+   历史上三页各写一份且样式漂移（padding、字号都不一样），
+   收敛到全局后改一处全站生效。
+   ============================================================ */
+.qw-pool {
+  padding: 14px 16px;
+  border: 1px solid var(--lab-border);
+  border-radius: var(--lab-radius-sm);
+  background: var(--lab-surface-2);
+  height: 100%;
+  transition: all 0.2s cubic-bezier(0.22, 1, 0.36, 1);
+  position: relative;
+  overflow: hidden;
+}
+/* 顶部一条 2px 青色渐变线：给「池子」一个视觉锚点 */
+.qw-pool::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: linear-gradient(90deg, var(--lab-primary), transparent 70%);
+  opacity: 0.35;
+}
+.qw-pool:hover {
+  background: var(--lab-surface);
+  border-color: var(--lab-border-strong);
+  box-shadow: var(--lab-shadow-card);
+  transform: translateY(-1px);
+}
+.qw-pool-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.qw-pool-label {
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--lab-text-mute);
+  letter-spacing: 0.4px;
+}
+.qw-pool-value {
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--lab-text);
+  line-height: 1.25;
+  letter-spacing: -0.4px;
+}
+.qw-pool-cap {
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--lab-text-mute);
+}
+.qw-pool-sub {
+  margin-top: 5px;
+  font-size: 11px;
+  color: var(--lab-text-mute);
+  line-height: 1.6;
+}
+.qw-mini {
+  font-size: 10px;
+  line-height: 16px;
+  padding: 0 6px;
+  margin: 0;
+}
+
+/* ============================================================
+   通用组件打磨（AntD 全局细节）
+   ============================================================ */
+
+/* Tabs：选中态加粗并带底部滑动条 */
+.ant-tabs-tab {
+  transition: color 0.2s ease;
+}
+.ant-tabs-tab:hover {
+  color: var(--lab-primary);
+}
+
+/* Switch：打开时用信号色 */
+.ant-switch.ant-switch-checked {
+  background: var(--lab-primary);
+}
+
+/* Tooltip：与图表 tooltip 同一套外壳 */
+.ant-tooltip .ant-tooltip-inner {
+  border-radius: 8px;
+  font-size: 12px;
+}
+
+/* Popover / Popconfirm：圆角与阴影对齐卡片 */
+.ant-popover .ant-popover-inner {
+  border-radius: var(--lab-radius-sm);
+  box-shadow: var(--lab-shadow-hover);
+}
+
+/* Pagination：选中页用信号色描边 */
+.ant-pagination .ant-pagination-item-active {
+  border-color: var(--lab-primary);
+  font-weight: 600;
+}
+.ant-pagination .ant-pagination-item {
+  border-radius: 8px;
+}
+
+/* Skeleton：加载占位更柔和 */
+.ant-skeleton .ant-skeleton-content .ant-skeleton-title,
+.ant-skeleton .ant-skeleton-content .ant-skeleton-paragraph > li {
+  border-radius: 6px;
+}
+
+/* Badge：计数徽标对齐信号色体系 */
+.ant-badge .ant-badge-count {
+  box-shadow: none;
+}
+
+/* 描述列表的 label 单元格宽度更紧凑 */
+.ant-descriptions-bordered .ant-descriptions-item-label,
+.ant-descriptions-bordered .ant-descriptions-item-content {
+  padding: 10px 14px !important;
+}
+
+/* 行内代码：说明文字里的环境变量、模型前缀等。
+   默认 <code> 在 AntD 下无样式，与正文混在一起看不出是可复制的字面值 */
+code {
+  padding: 1px 6px;
+  border-radius: 5px;
+  background: var(--lab-surface-3);
+  border: 1px solid var(--lab-border);
+  font-family: var(--lab-mono);
+  font-size: 11.5px;
+  color: var(--lab-primary);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 卡片内小节标题行：标题 + 右侧操作（KeysView 等多个页面共用） */
+.card-head-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
 }

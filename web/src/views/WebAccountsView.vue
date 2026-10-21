@@ -25,10 +25,10 @@
     </a-alert>
 
     <a-card :bordered="false">
-      <div class="flex items-center justify-between mb-3">
+      <div class="card-head-row">
         <div>
-          <span class="font-medium">账号列表</span>
-          <span class="text-slate-500 text-sm ml-2">
+          <span class="section-title">账号列表</span>
+          <span class="hint-text ml-2">
             共 {{ accounts.length }} 个 · 启用 {{ enabledCount }} 个
           </span>
         </div>
@@ -927,21 +927,5 @@ watch(() => channelStore.current, async () => {
 </script>
 
 <style scoped>
-/* 千问账号卡里的积分池小卡 */
-.qw-pool {
-  padding: 8px 10px;
-  border: 1px solid var(--lab-border);
-  border-radius: 8px;
-  background: var(--lab-surface-2);
-}
-.qw-pool-label {
-  font-size: 11px;
-  color: var(--lab-text-mute);
-  margin-bottom: 2px;
-}
-.qw-pool-value {
-  font-size: 16px;
-  font-weight: 600;
-  color: var(--lab-text);
-}
+/* 千问账号卡里的积分池小卡 .qw-pool 已收敛到全局 style.css */
 </style>

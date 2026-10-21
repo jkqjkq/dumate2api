@@ -26,10 +26,10 @@
     </a-alert>
 
     <a-card :bordered="false">
-      <div class="flex items-center justify-between mb-3">
+      <div class="card-head-row">
         <div>
-          <span class="font-medium">API Key</span>
-          <span class="text-slate-500 text-sm ml-2">近 {{ data?.days ?? 30 }} 天用量</span>
+          <span class="section-title">API Key</span>
+          <span class="hint-text ml-2">近 {{ data?.days ?? 30 }} 天用量</span>
           <a-tag v-if="isQw" color="cyan" class="ml-2">千问办公</a-tag>
           <a-tag v-else-if="isTw" color="purple" class="ml-2">TRAE Work</a-tag>
         </div>

@@ -423,22 +423,5 @@ onMounted(load)
 </script>
 
 <style scoped>
-/* 千问套餐额度卡：与其它页面的积分池卡同一套视觉 */
-.qw-pool {
-  padding: 12px 14px;
-  border: 1px solid var(--lab-border);
-  border-radius: 10px;
-  background: var(--lab-surface-2);
-}
-.qw-pool-label {
-  font-size: 12px;
-  color: var(--lab-text-sub);
-  margin-bottom: 4px;
-}
-.qw-pool-value {
-  font-size: 20px;
-  font-weight: 600;
-  color: var(--lab-text);
-  line-height: 1.3;
-}
+/* 千问套餐额度卡 .qw-pool 已收敛到全局 style.css（与其它页面共用一套视觉） */
 </style>

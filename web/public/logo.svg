@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <!-- favicon：自带圆角渐变底——标签栏背景明暗不定，不能依赖透明底。
+       几何与 AppLogo.vue 同源，整体缩到 32 格内并留出安全边距。 -->
+  <defs>
+    <linearGradient id="dm" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0ea5b7"/>
+      <stop offset="1" stop-color="#0e7490"/>
+    </linearGradient>
+  </defs>
+  <rect width="32" height="32" rx="7.5" fill="url(#dm)"/>
+  <path d="M16 5.5 25.09 10.75V21.25L16 26.5 6.91 21.25V10.75Z"
+        fill="none" stroke="#ffffff" stroke-width="1.9"
+        stroke-linejoin="round" stroke-opacity="0.6"/>
+  <g stroke="#ffffff" stroke-width="2.4" stroke-linecap="round">
+    <path d="M16 16V8.2"/>
+    <path d="m16 16-6.75 3.9"/>
+    <path d="m16 16 6.75 3.9"/>
+  </g>
+</svg>

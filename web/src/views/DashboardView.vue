@@ -187,25 +187,25 @@
         <a-empty v-if="!twAccounts.length" description="还没有添加 TRAE Work 账号，到「账号管理」加一个" />
         <a-row v-else :gutter="[16, 16]">
           <a-col v-for="a in twAccounts" :key="a.id" :span="8">
-            <div class="p-3 border border-slate-200 rounded">
-              <div class="flex items-center justify-between mb-2">
-                <span class="font-medium truncate">{{ a.name }}</span>
+            <div class="account-card">
+              <div class="account-card-header">
+                <span class="account-card-name">{{ a.name }}</span>
                 <a-tag :color="a.lastError ? 'red' : a.refreshExpired ? 'orange' : a.enabled ? 'green' : 'default'">
                   {{ a.lastError ? '异常' : a.refreshExpired ? '待重登' : a.enabled ? '在线' : '停用' }}
                 </a-tag>
               </div>
-              <div v-if="a.phone" class="text-xs text-slate-400 font-mono mb-2">
+              <div v-if="a.phone" class="account-card-meta">
                 {{ a.phone }}
                 <span v-if="a.phoneSource === 'inferred-nickname'" class="text-slate-500 ml-1">（从昵称推断）</span>
               </div>
-              <div class="h-1.5 bg-slate-100 rounded overflow-hidden mb-2">
+              <div class="health-bar">
                 <div
-                  class="h-full rounded transition-all"
+                  class="health-bar-fill"
                   :class="healthColorTw(a)"
                   :style="{ width: healthWidthTw(a) }"
                 />
               </div>
-              <div class="flex items-center justify-between text-xs">
+              <div class="account-card-footer">
                 <span class="text-slate-500">
                   <template v-if="twCreditCap && a.credits != null">
                     剩余 {{ fmt(a.credits) }} / {{ fmt(twCreditCap) }}
@@ -217,7 +217,7 @@
                   {{ a.checkedInToday ? '今日已签' : '今日未签' }}
                 </span>
               </div>
-              <div v-if="a.lastError" class="text-xs text-red-600 mt-1">{{ a.lastError }}</div>
+              <div v-if="a.lastError" class="account-card-error">{{ a.lastError }}</div>
             </div>
           </a-col>
         </a-row>
@@ -498,9 +498,9 @@
         <a-empty v-if="!qdDashAccounts.length" description="还没有添加 Qoder 账号，到「账号管理」加一个" />
         <a-row v-else :gutter="[16, 16]">
           <a-col v-for="a in qdDashAccounts" :key="a.id" :span="8">
-            <div class="p-3 border border-slate-200 rounded">
-              <div class="flex items-center justify-between mb-2">
-                <span class="font-medium truncate">
+            <div class="account-card">
+              <div class="account-card-header">
+                <span class="account-card-name">
                   {{ a.name }}
                   <a-tag v-if="a.region === 'cn'" color="blue" class="ml-1" size="small">国内</a-tag>
                   <a-tag v-else color="purple" class="ml-1" size="small">国际</a-tag>
@@ -509,7 +509,7 @@
                   {{ errFresh(a) ? '异常' : a.refreshExpired ? '待重登' : a.enabled ? '在线' : '停用' }}
                 </a-tag>
               </div>
-              <div class="flex items-center justify-between text-xs">
+              <div class="flex items-center justify-between text-xs" style="margin-bottom:8px">
                 <span class="text-slate-500">{{ a.planName || '—' }}</span>
                 <span class="text-slate-500">
                   {{ a.daysAlive !== null ? a.daysAlive + ' 天' : '天数未知' }}
@@ -522,14 +522,14 @@
               <template v-if="qdCreditOf(a.id)">
                 <!-- 健康条：按签到积分占其总量的比例。与 TRAE 同理——
                      这里是会被消耗的余额，「还剩多少」才是这个号的寿命指标。 -->
-                <div class="h-1.5 bg-slate-100 rounded overflow-hidden my-2">
+                <div class="health-bar">
                   <div
-                    class="h-full rounded transition-all"
+                    class="health-bar-fill"
                     :class="qdHealthColor(a.id)"
                     :style="{ width: qdHealthWidth(a.id) }"
                   />
                 </div>
-                <div class="flex items-center justify-between text-xs">
+                <div class="account-card-footer">
                   <span class="text-slate-500">
                     签到积分
                     <span class="text-cyan-700 num ml-1">{{ fmtQd(qdCreditOf(a.id)!.addOnQuota?.remaining) }}</span>
@@ -554,7 +554,7 @@
               </template>
               <div v-else class="text-xs mt-2 text-slate-500">额度未查询</div>
 
-              <div v-if="a.lastError" class="text-xs mt-1" :class="errFresh(a) ? 'text-red-600' : 'text-slate-500'">
+              <div v-if="a.lastError" class="account-card-error" :class="errFresh(a) ? '' : 'opacity-70'">
                 <span class="text-slate-500">{{ errorWhen(a.lastErrorAt) }}</span>{{ a.lastError }}
               </div>
             </div>
@@ -835,9 +835,9 @@
         <a-empty v-if="!qwAccounts.length" description="还没有添加千问账号，到「账号管理」加一个" />
         <a-row v-else :gutter="[16, 16]">
           <a-col v-for="a in qwAccounts" :key="a.id" :span="8">
-            <div class="p-3 border border-slate-200 rounded">
-              <div class="flex items-center justify-between mb-2">
-                <span class="font-medium truncate">
+            <div class="account-card">
+              <div class="account-card-header">
+                <span class="account-card-name">
                   {{ a.name || a.username || '未命名' }}
                   <a-tag v-if="a.active" color="blue" class="ml-1">主账号</a-tag>
                 </span>
@@ -845,15 +845,15 @@
                   {{ errFresh(a) ? '异常' : a.refreshExpired ? '待重登' : a.enabled && a.usable ? '在线' : '停用' }}
                 </a-tag>
               </div>
-              <div v-if="a.phone" class="text-xs text-slate-400 font-mono mb-2">
+              <div v-if="a.phone" class="account-card-meta">
                 {{ a.phone }}
               </div>
               <!-- 健康条：长度按账号存活天数，365 天为满。
                    与搭子的「会员剩余天数」不同——这是账号用了多久的客观度量，
                    满了不代表「过期」，只是看不到更老的。 -->
-              <div class="h-1.5 bg-slate-100 rounded overflow-hidden mb-2">
+              <div class="health-bar">
                 <div
-                  class="h-full rounded transition-all"
+                  class="health-bar-fill"
                   :class="healthColorQw(a)"
                   :style="{ width: healthWidthQw(a) }"
                 />
@@ -862,14 +862,14 @@
                    只显示三池合计是不够的——合计含长期/月度，且账号欠费时会是负数，
                    看不出免费额度还剩多少。**分母是单账号上限**（不是合计），
                    与上面池子卡的合计分母不同——这里问的是「这一个号」。 -->
-              <div class="flex items-center justify-between text-xs mb-1">
+              <div class="flex items-center justify-between text-xs" style="margin-bottom:4px">
                 <span class="text-slate-500">每日免费</span>
                 <span :class="dailyClassQw(a)">
                   {{ a.wallets ? fmtQw(a.wallets.daily) : '—' }}
                   <span class="text-slate-500">/ {{ qwDailyCapPerAccount }}</span>
                 </span>
               </div>
-              <div class="flex items-center justify-between text-xs">
+              <div class="account-card-footer">
                 <span class="text-slate-500">
                   {{ a.daysAlive !== null ? a.daysAlive + ' 天' : '天数未知' }}
                 </span>
@@ -877,7 +877,7 @@
                   {{ a.wallets ? '合计 ' + fmtQw(a.wallets.total) : '积分未知' }}
                 </span>
               </div>
-              <div v-if="a.lastError" class="text-xs mt-1" :class="errFresh(a) ? 'text-red-600' : 'text-slate-500'">
+              <div v-if="a.lastError" class="account-card-error" :class="errFresh(a) ? '' : 'opacity-70'">
                 <span class="text-slate-500">{{ errTimeText(a.lastErrorAt) }}</span>{{ a.lastError }}
               </div>
             </div>
@@ -1152,22 +1152,22 @@
       <a-empty v-if="!dash?.accounts.length" description="还没有添加账号" />
       <a-row v-else :gutter="[16, 16]">
         <a-col v-for="a in dash.accounts" :key="a.id" :span="8">
-          <div class="p-3 border border-slate-200 rounded">
-            <div class="flex items-center justify-between mb-2">
-              <span class="font-medium">{{ a.name }}</span>
+          <div class="account-card">
+            <div class="account-card-header">
+              <span class="account-card-name">{{ a.name }}</span>
               <a-tag :color="a.last_error ? 'red' : a.enabled ? 'green' : 'default'">
                 {{ a.last_error ? '异常' : a.enabled ? '在线' : '停用' }}
               </a-tag>
             </div>
             <!-- 健康条：长度按会员剩余天数，30 天为满 -->
-            <div class="h-1.5 bg-slate-100 rounded overflow-hidden mb-2">
+            <div class="health-bar">
               <div
-                class="h-full rounded transition-all"
+                class="health-bar-fill"
                 :class="healthColor(a)"
                 :style="{ width: healthWidth(a) }"
               />
             </div>
-            <div class="flex items-center justify-between text-xs">
+            <div class="account-card-footer">
               <span class="text-slate-500">
                 {{ a.days_left !== null ? a.days_left + ' 天' : '到期未知' }}
                 <span v-if="a.days_alive !== null" class="text-slate-400 ml-1">
@@ -1178,7 +1178,7 @@
                 {{ a.points !== null ? fmt(a.points) + ' 积分' : '积分未知' }}
               </span>
             </div>
-            <div v-if="a.last_error" class="text-xs text-red-600 mt-1">{{ a.last_error }}</div>
+            <div v-if="a.last_error" class="account-card-error">{{ a.last_error }}</div>
           </div>
         </a-col>
       </a-row>
@@ -2088,20 +2088,6 @@ onBeforeUnmount(() => {
 }
 .qw-chart {
   height: 260px;
-  width: 100%;
-}
-/* 两张小倍数图：上下贴紧、共享一条时间轴，读起来仍是一条趋势带 */
-.trend-block + .trend-block {
-  margin-top: 2px;
-}
-.trend-label {
-  font-size: 11px;
-  color: var(--lab-text-mute);
-  padding-left: 2px;
-}
-/* 高度含 X 轴标签带，避免容器把轴标签裁掉后卡片里出现内嵌滚动条 */
-.trend-chart {
-  height: 112px;
   width: 100%;
 }
 </style>

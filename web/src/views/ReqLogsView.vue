@@ -511,7 +511,12 @@ function statusColor(s: number) {
 }
 
 function customRow(record: ReqLogRow) {
-  return { onClick: () => openDetail(record) }
+  // cursor: pointer 是「这一行可以点开详情」的唯一视觉线索——
+  // 表格行默认没有可点击的暗示，不加用户不知道能点。
+  return {
+    onClick: () => openDetail(record),
+    style: { cursor: 'pointer' },
+  }
 }
 
 function openDetail(record: ReqLogRow) {
@@ -601,19 +606,39 @@ onMounted(() => load())
 </script>
 
 <style scoped>
+/* 详情抽屉里的「标签 / 值」网格。
+   标签列固定 130px 让所有值左对齐成一列——比例字体的值长短不一，
+   不对齐会让整列看起来在抖。 */
 .detail-grid {
   display: grid;
   grid-template-columns: 130px 1fr;
-  row-gap: 14px;
+  row-gap: 13px;
   column-gap: 16px;
   font-size: 13px;
 }
 .detail-label {
   color: var(--lab-text-mute);
+  font-size: 11.5px;
+  font-weight: 500;
+  letter-spacing: 0.4px;
+  /* 与右侧值基线对齐（值是 13px，标签 11.5px，不补会视觉上偏低） */
+  padding-top: 1px;
 }
 .detail-value {
   color: var(--lab-text);
   font-family: var(--lab-mono);
   font-variant-numeric: tabular-nums;
+  word-break: break-all;
+}
+/* 详情里的长文本（如 request body）单独放宽，等宽字体下会很长 */
+.detail-value.pre {
+  white-space: pre-wrap;
+  line-height: 1.7;
+  max-height: 320px;
+  overflow-y: auto;
+  background: var(--lab-surface-2);
+  border: 1px solid var(--lab-border);
+  border-radius: 8px;
+  padding: 10px 12px;
 }
 </style>

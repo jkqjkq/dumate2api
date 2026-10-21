@@ -140,30 +140,36 @@
         </a-descriptions>
 
         <div v-if="data.cards.today.models.length" class="mt-3">
-          <div class="text-xs text-slate-500 mb-1">今日用量按模型</div>
-          <div class="flex flex-wrap gap-2">
-            <a-tag v-for="m in data.cards.today.models" :key="m.model" color="blue">
-              {{ m.model }} · {{ compact(m.tokens) }}
-            </a-tag>
+          <div class="block-label">今日用量按模型</div>
+          <div class="chip-list">
+            <span v-for="m in data.cards.today.models" :key="m.model" class="usage-chip">
+              <span class="usage-chip-name">{{ m.model }}</span>
+              <span class="usage-chip-sep" />
+              <span class="usage-chip-val num">{{ compact(m.tokens) }}</span>
+            </span>
           </div>
         </div>
 
         <!-- 按通道：千问首帧实测 6.7s，与搭子混在同一均值里会让
              「平均首字延迟」既偏高又无法归因，所以分开列 -->
         <div v-if="data.by_channel?.length" class="mt-3">
-          <div class="text-xs text-slate-500 mb-1">按通道</div>
-          <div class="flex flex-wrap gap-2">
-            <a-tag
+          <div class="block-label">按通道</div>
+          <div class="chip-list">
+            <span
               v-for="c in data.by_channel"
               :key="c.id"
-              :color="c.id === 'qwenwork' ? 'cyan' : (c.id === 'dumate' ? 'blue' : 'default')"
+              class="usage-chip"
+              :class="c.id === 'qwenwork' ? 'chip-cyan' : c.id === 'dumate' ? 'chip-blue' : ''"
             >
-              {{ c.label }} · {{ compact(c.total_tokens) }} · {{ c.requests }} 次
-              <span v-if="c.avg_first_token_ms != null" class="opacity-70">
-                · 首字 {{ fmtMs(c.avg_first_token_ms) }}
+              <span class="usage-chip-name">{{ c.label }}</span>
+              <span class="usage-chip-sep" />
+              <span class="usage-chip-val num">{{ compact(c.total_tokens) }}</span>
+              <span class="usage-chip-val num">{{ c.requests }} 次</span>
+              <span v-if="c.avg_first_token_ms != null" class="usage-chip-dim">
+                首字 {{ fmtMs(c.avg_first_token_ms) }}
               </span>
-              <span v-if="c.failed" class="text-red-600 ml-1">失败 {{ c.failed }}</span>
-            </a-tag>
+              <span v-if="c.failed" class="usage-chip-bad">失败 {{ c.failed }}</span>
+            </span>
           </div>
           <div v-if="hasUntagged" class="text-xs text-slate-400 mt-1">
             「未标注」是分通道埋点上线前的历史记录，不并入任一通道。
@@ -586,46 +592,79 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
-/* 千问积分池：并列小卡，密度与顶部卡片保持一致 */
-.qw-pool {
-  padding: 12px 14px;
-  border: 1px solid var(--lab-border);
-  border-radius: 10px;
-  background: var(--lab-surface-2);
-  height: 100%;
+/* 小节标题：卡片内的分组标签 */
+.block-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--lab-text-mute);
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  margin-bottom: 8px;
 }
-.qw-pool-head {
+
+/* ---------- 用量 chip 列表：替代 AntD tag 的 flex-wrap 堆叠。
+   名称与数值分区、等宽数字、悬停上浮——比一排色块更能读出「谁的用量大」 ---------- */
+.chip-list {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
+  flex-wrap: wrap;
   gap: 8px;
-  margin-bottom: 6px;
 }
-.qw-pool-label {
+.usage-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 12px;
+  border-radius: 9px;
+  background: var(--lab-surface-2);
+  border: 1px solid var(--lab-border);
+  font-size: 12px;
+  color: var(--lab-text-sub);
+  transition: all 0.18s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.usage-chip:hover {
+  background: var(--lab-surface);
+  border-color: var(--lab-border-strong);
+  box-shadow: var(--lab-shadow-card);
+  transform: translateY(-1px);
+}
+.usage-chip-name {
+  font-weight: 500;
+  color: var(--lab-text);
+}
+.usage-chip-sep {
+  width: 1px;
+  height: 12px;
+  background: var(--lab-border-strong);
+}
+.usage-chip-val {
   font-size: 12px;
   color: var(--lab-text-sub);
 }
-.qw-pool-value {
-  font-size: 20px;
-  font-weight: 600;
-  color: var(--lab-text);
-  line-height: 1.3;
-}
-.qw-pool-cap {
-  font-size: 12px;
-  font-weight: 400;
-  color: var(--lab-text-mute);
-}
-.qw-pool-sub {
-  margin-top: 4px;
+.usage-chip-dim {
   font-size: 11px;
   color: var(--lab-text-mute);
-  line-height: 1.6;
 }
-.qw-mini {
-  font-size: 10px;
-  line-height: 16px;
-  padding: 0 6px;
-  margin: 0;
+.usage-chip-bad {
+  font-size: 11px;
+  color: var(--lab-danger);
+  font-weight: 500;
 }
+/* 通道着色：淡底 + 同色边框，不再是实心色块 */
+.usage-chip.chip-cyan {
+  background: var(--lab-primary-dim);
+  border-color: var(--lab-primary-line);
+}
+.usage-chip.chip-cyan .usage-chip-name {
+  color: var(--lab-primary);
+}
+.usage-chip.chip-blue {
+  background: rgba(2, 132, 199, 0.07);
+  border-color: rgba(2, 132, 199, 0.28);
+}
+.usage-chip.chip-blue .usage-chip-name {
+  color: #0284c7;
+}
+
+/* 千问积分池 .qw-pool 系列已收敛到全局 style.css（三个页面共用），
+   此处不再重复定义 */
 </style>

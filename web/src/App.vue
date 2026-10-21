@@ -20,27 +20,27 @@ const themeConfig = {
     colorWarning: '#d97706',
     colorError: '#dc2626',
 
-    colorBgBase: '#f4f6f9',
+    colorBgBase: '#f2f4f8',
     colorBgContainer: '#ffffff',
     colorBgElevated: '#ffffff',
-    colorBgLayout: '#f4f6f9',
-    colorBorder: '#cdd5e0',
-    colorBorderSecondary: '#e3e8ef',
+    colorBgLayout: '#f2f4f8',
+    colorBorder: '#ccd4df',
+    colorBorderSecondary: '#e2e7ee',
 
-    colorText: '#1e293b',
-    colorTextSecondary: '#5c6b80',
-    colorTextTertiary: '#8b99ad',
-    colorTextQuaternary: '#c2cad6',
+    colorText: '#1a2332',
+    colorTextSecondary: '#4e5f75',
+    colorTextTertiary: '#8494a9',
+    colorTextQuaternary: '#bfc9d5',
 
     // 与 style.css 的 --lab-shadow 同值：AntD 的样式注入晚于全局 CSS，
     // .ant-card 的 box-shadow 若只写在 style.css 会被组件默认值盖掉——
     // 必须在 token 层覆盖 boxShadowTertiary（Card 默认阴影走的就是它）。
     boxShadowTertiary:
-      '0 1px 2px rgba(16, 24, 40, 0.05), 0 6px 18px rgba(16, 24, 40, 0.06)',
+      '0 1px 2px rgba(16, 24, 40, 0.04), 0 4px 14px rgba(16, 24, 40, 0.05)',
 
     borderRadius: 10,
     borderRadiusLG: 14,
-    borderRadiusSM: 7,
+    borderRadiusSM: 8,
     controlHeight: 34,
     fontSize: 13,
 
@@ -52,19 +52,19 @@ const themeConfig = {
   components: {
     Card: { colorBgContainer: '#ffffff' },
     Table: {
-      headerBg: '#f6f8fb',
-      headerColor: '#5c6b80',
-      rowHoverBg: '#f1f5f9',
-      borderColor: '#e3e8ef',
+      headerBg: '#f7f9fc',
+      headerColor: '#4e5f75',
+      rowHoverBg: '#eef2f7',
+      borderColor: '#e2e7ee',
     },
     Menu: {
       itemBg: 'transparent',
       subMenuItemBg: 'transparent',
-      itemSelectedBg: 'rgba(8, 145, 178, 0.10)',
+      itemSelectedBg: 'rgba(8, 145, 178, 0.08)',
       itemSelectedColor: '#0891b2',
-      itemColor: '#5c6b80',
+      itemColor: '#4e5f75',
       itemHoverBg: 'rgba(15, 23, 42, 0.04)',
-      itemHoverColor: '#1e293b',
+      itemHoverColor: '#1a2332',
     },
   },
 }

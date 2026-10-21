@@ -7,7 +7,9 @@
 
     <div class="login-card">
       <div class="brand">
-        <div class="brand-mark">DM</div>
+        <div class="brand-mark">
+          <AppLogo :size="28" />
+        </div>
         <div class="brand-titles">
           <h1>DuMate <span class="accent">控制台</span></h1>
           <p>模型网关 · 账号池 · 用量监控</p>
@@ -54,6 +56,7 @@
 import { reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { UserOutlined, LockOutlined } from '@ant-design/icons-vue'
+import AppLogo from '@/components/AppLogo.vue'
 import { auth } from '@/stores/auth'
 
 const router = useRouter()
@@ -94,110 +97,220 @@ async function onSubmit() {
   position: relative;
   overflow: hidden;
 }
+/* 背景图：抽象科技感线条，低透明度叠加在网格之上 */
+.login-wrap::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='800' height='600' viewBox='0 0 800 600'%3E%3Cdefs%3E%3ClinearGradient id='g1' x1='0%25' y1='0%25' x2='100%25' y2='100%25'%3E%3Cstop offset='0%25' style='stop-color:%230891b2;stop-opacity:0.06'/%3E%3Cstop offset='100%25' style='stop-color:%230891b2;stop-opacity:0.02'/%3E%3C/linearGradient%3E%3C/defs%3E%3Cpath d='M0,300 Q200,200 400,280 T800,250' stroke='%230891b2' stroke-width='1.5' fill='none' opacity='0.08'/%3E%3Cpath d='M0,350 Q200,280 400,320 T800,300' stroke='%230891b2' stroke-width='1' fill='none' opacity='0.05'/%3E%3Cpath d='M0,200 Q300,150 500,220 T800,180' stroke='%230284c7' stroke-width='1' fill='none' opacity='0.04'/%3E%3Ccircle cx='200' cy='150' r='80' fill='url(%23g1)'/%3E%3Ccircle cx='650' cy='450' r='100' fill='url(%23g1)'/%3E%3Ccircle cx='500' cy='100' r='60' fill='url(%23g1)'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: center;
+  background-size: cover;
+}
 .grid-layer {
   position: absolute;
   inset: 0;
   pointer-events: none;
   background-image:
-    linear-gradient(rgba(15, 23, 42, 0.028) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(15, 23, 42, 0.028) 1px, transparent 1px);
+    linear-gradient(rgba(15, 23, 42, 0.022) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(15, 23, 42, 0.022) 1px, transparent 1px);
   background-size: 46px 46px;
   mask-image: radial-gradient(circle at 50% 42%, #000 0%, transparent 72%);
 }
 .glow {
   position: absolute;
   border-radius: 50%;
-  filter: blur(90px);
-  opacity: 0.35;
+  filter: blur(100px);
+  opacity: 0.3;
   pointer-events: none;
+  animation: glow-drift 12s ease-in-out infinite alternate;
 }
 .glow-1 {
-  width: 460px;
-  height: 460px;
+  width: 520px;
+  height: 520px;
   background: #67e8f9;
-  top: -140px;
-  left: -100px;
+  top: -160px;
+  left: -120px;
 }
 .glow-2 {
-  width: 380px;
-  height: 380px;
+  width: 420px;
+  height: 420px;
   background: #a5f3fc;
-  bottom: -160px;
-  right: -80px;
+  bottom: -180px;
+  right: -100px;
+  animation-delay: -6s;
+}
+@keyframes glow-drift {
+  from { transform: translate(0, 0) scale(1); }
+  to { transform: translate(20px, -15px) scale(1.05); }
+}
+
+/* 额外的装饰性粒子 */
+.login-wrap::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background-image:
+    radial-gradient(2px 2px at 20% 30%, rgba(8, 145, 178, 0.15) 100%, transparent),
+    radial-gradient(2px 2px at 40% 70%, rgba(8, 145, 178, 0.10) 100%, transparent),
+    radial-gradient(1.5px 1.5px at 60% 20%, rgba(8, 145, 178, 0.12) 100%, transparent),
+    radial-gradient(2px 2px at 80% 50%, rgba(8, 145, 178, 0.08) 100%, transparent),
+    radial-gradient(1.5px 1.5px at 10% 80%, rgba(8, 145, 178, 0.10) 100%, transparent),
+    radial-gradient(2px 2px at 90% 15%, rgba(8, 145, 178, 0.12) 100%, transparent);
 }
 
 .login-card {
   position: relative;
   z-index: 1;
-  width: 404px;
-  padding: 34px 34px 26px;
-  background: rgba(255, 255, 255, 0.92);
-  backdrop-filter: blur(16px);
+  width: 420px;
+  padding: 40px 40px 32px;
+  background: rgba(255, 255, 255, 0.94);
+  backdrop-filter: blur(20px);
   border: 1px solid var(--lab-border-strong);
-  border-radius: 18px;
-  box-shadow: 0 24px 60px rgba(16, 24, 40, 0.14), 0 0 0 1px rgba(8, 145, 178, 0.06);
+  border-radius: 20px;
+  box-shadow:
+    0 24px 64px rgba(16, 24, 40, 0.12),
+    0 0 0 1px rgba(8, 145, 178, 0.05),
+    0 0 80px rgba(8, 145, 178, 0.04);
+  animation: card-enter 0.5s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+@keyframes card-enter {
+  from {
+    opacity: 0;
+    transform: translateY(16px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
 }
 
 .brand {
   display: flex;
   align-items: center;
-  gap: 14px;
+  gap: 16px;
 }
 .brand-mark {
-  width: 46px;
-  height: 46px;
+  width: 52px;
+  height: 52px;
   flex: none;
-  border-radius: 13px;
+  border-radius: 15px;
   background: linear-gradient(135deg, #0891b2, #0e7490);
   color: #ffffff;
-  font-family: var(--lab-mono);
-  font-weight: 700;
-  font-size: 16px;
-  letter-spacing: 0.5px;
   display: flex;
   align-items: center;
   justify-content: center;
-  box-shadow: 0 3px 12px rgba(8, 145, 178, 0.32);
+  box-shadow:
+    0 4px 14px rgba(8, 145, 178, 0.35),
+    0 0 0 1px rgba(255, 255, 255, 0.1) inset;
+  position: relative;
+  overflow: hidden;
+}
+.brand-mark::after {
+  content: '';
+  position: absolute;
+  top: -50%;
+  left: -50%;
+  width: 200%;
+  height: 200%;
+  background: linear-gradient(
+    135deg,
+    transparent 40%,
+    rgba(255, 255, 255, 0.15) 50%,
+    transparent 60%
+  );
+  animation: shine 3s ease-in-out infinite;
+}
+@keyframes shine {
+  0%, 100% { transform: translateX(-100%); }
+  50% { transform: translateX(100%); }
 }
 .brand-titles h1 {
   margin: 0;
   font-family: var(--lab-display);
-  font-size: 19px;
-  font-weight: 600;
+  font-size: 21px;
+  font-weight: 700;
   color: var(--lab-text);
   letter-spacing: 0.5px;
+  line-height: 1.2;
 }
 .brand-titles .accent {
   color: var(--lab-primary);
 }
 .brand-titles p {
-  margin: 5px 0 0;
-  font-size: 12px;
+  margin: 6px 0 0;
+  font-size: 12.5px;
   color: var(--lab-text-mute);
-  letter-spacing: 0.3px;
+  letter-spacing: 0.4px;
 }
 .divider {
   height: 1px;
-  margin: 22px 0 20px;
+  margin: 26px 0 24px;
   background: linear-gradient(90deg, transparent, var(--lab-border-strong) 22%, var(--lab-border-strong) 78%, transparent);
+}
+
+/* 表单标签 */
+:deep(.ant-form-item-label > label) {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--lab-text-sub);
+  letter-spacing: 0.3px;
+}
+
+/* 输入框 */
+:deep(.ant-input-affix-wrapper) {
+  border-radius: 12px !important;
+  border-color: var(--lab-border) !important;
+  transition: all 0.25s ease;
+}
+:deep(.ant-input-affix-wrapper:hover) {
+  border-color: var(--lab-border-strong) !important;
+}
+:deep(.ant-input-affix-wrapper:focus-within) {
+  border-color: var(--lab-primary) !important;
+  box-shadow: 0 0 0 3px var(--lab-primary-dim) !important;
+}
+:deep(.ant-input) {
+  font-size: 14px;
+}
+:deep(.ant-input::placeholder) {
+  color: var(--lab-text-mute);
+  font-size: 13px;
 }
 
 .input-icon {
   color: var(--lab-text-mute);
+  font-size: 14px;
 }
+
+/* 登录按钮 */
 .login-btn {
-  height: 44px;
-  border-radius: 11px;
+  height: 46px;
+  border-radius: 12px;
   font-size: 14px;
   font-weight: 600;
-  letter-spacing: 2px;
-  margin-top: 4px;
+  letter-spacing: 3px;
+  margin-top: 6px;
+  position: relative;
+  overflow: hidden;
+  transition: all 0.25s cubic-bezier(0.22, 1, 0.36, 1);
 }
+.login-btn:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 6px 20px rgba(8, 145, 178, 0.35);
+}
+.login-btn:active {
+  transform: translateY(0);
+}
+
 .foot {
-  margin: 20px 0 0;
+  margin: 24px 0 0;
   text-align: center;
   font-size: 11px;
   color: var(--lab-text-mute);
-  letter-spacing: 0.3px;
+  letter-spacing: 0.4px;
+  opacity: 0.8;
 }
 </style>
