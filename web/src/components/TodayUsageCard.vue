@@ -4,32 +4,41 @@
        所以三个通道的口径天然一致。
        抽成组件是因为这段标记在三个分支里一模一样，各写一份必然漂移
        （改了一处忘另一处，同一指标在不同通道显示不同）。 -->
-  <a-descriptions :column="4" size="small" bordered>
+  <a-descriptions :column="{ xs: 1, sm: 2, lg: 4 }" size="small" bordered>
     <a-descriptions-item label="请求数">
-      {{ today?.requests ?? '—' }}
+      <span v-if="today" class="num">{{ today.requests }}</span>
+      <span v-else class="text-slate-400">—</span>
       <a-tag v-if="today?.failed" color="red" class="ml-1">失败 {{ today.failed }}</a-tag>
     </a-descriptions-item>
     <a-descriptions-item label="Token">
-      {{ today ? fmt(today.tokens) : '—' }}
+      <span v-if="today" class="num">{{ fmt(today.tokens) }}</span>
+      <span v-else class="text-slate-400">—</span>
     </a-descriptions-item>
-    <a-descriptions-item label="输入">{{ today ? fmt(today.input_tokens) : '—' }}</a-descriptions-item>
-    <a-descriptions-item label="输出">{{ today ? fmt(today.output_tokens) : '—' }}</a-descriptions-item>
+    <a-descriptions-item label="输入">
+      <span v-if="today" class="num">{{ fmt(today.input_tokens) }}</span>
+      <span v-else class="text-slate-400">—</span>
+    </a-descriptions-item>
+    <a-descriptions-item label="输出">
+      <span v-if="today" class="num">{{ fmt(today.output_tokens) }}</span>
+      <span v-else class="text-slate-400">—</span>
+    </a-descriptions-item>
     <a-descriptions-item label="成功率">
-      <template v-if="today?.success_rate != null">{{ today.success_rate }}%</template>
+      <span v-if="today?.success_rate != null" class="num">{{ today.success_rate }}%</span>
       <span v-else class="text-slate-400">—</span>
     </a-descriptions-item>
     <a-descriptions-item label="平均耗时">
-      <template v-if="today?.avg_ms != null">{{ today.avg_ms }} ms</template>
+      <span v-if="today?.avg_ms != null" class="num">{{ today.avg_ms }} ms</span>
       <span v-else class="text-slate-400">—</span>
     </a-descriptions-item>
     <a-descriptions-item label="首字延迟">
       <!-- 老日志没有这个字段，样本数不足时如实显示 —，不拿 0 充数
            （那会把均值拉低并给出错误结论） -->
-      <template v-if="today?.avg_first_token_ms != null">{{ today.avg_first_token_ms }} ms</template>
+      <span v-if="today?.avg_first_token_ms != null" class="num">{{ today.avg_first_token_ms }} ms</span>
       <span v-else class="text-slate-400">—</span>
     </a-descriptions-item>
     <a-descriptions-item label="流式">
-      {{ today ? `${today.stream_count} / ${today.requests}` : '—' }}
+      <span v-if="today" class="num">{{ today.stream_count }} / {{ today.requests }}</span>
+      <span v-else class="text-slate-400">—</span>
     </a-descriptions-item>
   </a-descriptions>
 </template>

@@ -75,29 +75,29 @@
           </template>
           <template v-else-if="column.key === 'limits'">
             <div v-if="record.ip_allowlist.length" class="text-xs">
-              IP: <span class="font-mono">{{ record.ip_allowlist.join(', ') }}</span>
+              IP: <span class="font-mono break-words min-w-0">{{ record.ip_allowlist.join(', ') }}</span>
             </div>
             <div v-else class="text-xs text-slate-400">IP: 不限</div>
             <div v-if="record.model_allowlist.length" class="text-xs mt-1">
-              模型: <span class="font-mono">{{ record.model_allowlist.join(', ') }}</span>
+              模型: <span class="font-mono break-words min-w-0">{{ record.model_allowlist.join(', ') }}</span>
             </div>
           </template>
           <template v-else-if="column.key === 'usage'">
-            <div>{{ record.usage.requests }} 次</div>
-            <div class="text-xs text-slate-400">{{ compact(record.usage.total_tokens) }} tokens</div>
+            <div class="num">{{ record.usage.requests }} 次</div>
+            <div class="num text-xs text-slate-400">{{ compact(record.usage.total_tokens) }} tokens</div>
             <!-- 按通道拆开：同一把 key 可能两条通道都在用，合并就看不出分别跑了多少 -->
             <div v-if="record.usage.channels && Object.keys(record.usage.channels).length > 1" class="text-xs mt-1">
               <a-tag
                 v-for="(v, ch) in record.usage.channels"
                 :key="String(ch)"
-                :color="String(ch) === 'qwenwork' ? 'cyan' : 'blue'"
+                :color="tagFor(ch)[1]"
                 class="mr-1"
               >
-                {{ String(ch) === 'qwenwork' ? '千问' : '搭子' }} {{ v.requests }}
+                {{ tagFor(ch)[0] }} <span class="num">{{ v.requests }}</span>
               </a-tag>
             </div>
             <a-tag v-if="record.usage.failed" color="red" class="mt-1">
-              失败 {{ record.usage.failed }}
+              失败 <span class="num">{{ record.usage.failed }}</span>
             </a-tag>
           </template>
           <template v-else-if="column.key === 'expires'">
@@ -192,10 +192,10 @@
         description="离开此窗口后无法再次查看，只能重新创建。请立即复制保存。"
         class="mb-3"
       />
-      <a-input-group compact>
-        <a-input :value="newToken" readonly style="width: calc(100% - 80px)" />
-        <a-button type="primary" style="width: 80px" @click="copyToken">复制</a-button>
-      </a-input-group>
+      <a-space-compact style="width: 100%">
+        <a-input :value="newToken" readonly />
+        <a-button type="primary" @click="copyToken">复制</a-button>
+      </a-space-compact>
       <div class="text-right mt-4">
         <a-button @click="tokenOpen = false">我已保存</a-button>
       </div>
@@ -209,13 +209,15 @@
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import PageHeader from '@/components/PageHeader.vue'
 import CcSwitchDialog from '@/components/CcSwitchDialog.vue'
-import { message } from 'ant-design-vue'
+import { App as AntApp } from 'ant-design-vue'
 import dayjs, { type Dayjs } from 'dayjs'
 import client from '@/api/client'
 import { channelStore, isTraework, isQwenwork, isQoder, channelLabel } from '@/stores/channel'
 import type { ApiKey, KeysData } from '@/api/keys'
 
 const data = ref<KeysData | null>(null)
+// message 走 App.useApp() 的上下文（App.vue 已包 <a-app>），静态方法拿不到主题上下文
+const { message } = AntApp.useApp()
 const modelOptions = ref<Array<{ label: string; value: string }>>([])
 const modalOpen = ref(false)
 const ccDlg = ref<InstanceType<typeof CcSwitchDialog> | null>(null)
@@ -234,6 +236,16 @@ const channelOptions = [
   { label: '仅 TRAE Work', value: 'traework' },
   { label: '仅 Qoder', value: 'qoder' },
 ]
+
+// 通道用量标签：channel id → [显示名, AntD 语义色]。
+// 未知通道如实显示原始 id，不猜成搭子
+const usageTag: Record<string, [string, string]> = {
+  dumate: ['搭子', 'blue'],
+  qwenwork: ['千问', 'cyan'],
+  traework: ['TRAE', 'purple'],
+  qoder: ['Qoder', 'geekblue'],
+}
+const tagFor = (ch: string | number): string[] => usageTag[String(ch)] ?? [String(ch), 'default']
 
 // 千问与 TRAE 分开判定：两者都是直连，但前缀与额度体系不同，
 // 页面上的说明文案与默认绑定值都要各自对应

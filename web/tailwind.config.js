@@ -9,10 +9,8 @@ export default {
       // 新增页面继续用 slate-*，不要改成语义色名——那等于把这层约定废掉。
       fontFamily: {
         // 数值 / ID / 日志：等宽承载，列对齐后表格读感稳定
-        mono: [
-          "'JetBrains Mono'", "'Cascadia Mono'", "'SF Mono'", 'Consolas',
-          "'Liberation Mono'", 'monospace',
-        ],
+        // 仅系统字体，无网络字体（零外部依赖）
+        mono: ['Consolas', "'Liberation Mono'", 'monospace'],
         // 标题：Bahnschrift 是 Windows 自带的技术向字体，无外部依赖
         display: ["'Bahnschrift'", "'DIN Alternate'", "'Segoe UI Variable Display'", 'sans-serif'],
       },

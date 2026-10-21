@@ -45,7 +45,7 @@
               <a-statistic title="剩余额度合计" :value="twTotals.remain ?? '—'" />
               <div class="text-xs text-slate-500 mt-2">
                 <template v-if="twTotals.limit">
-                  上限合计 {{ twTotals.limit.toLocaleString('zh-CN') }}
+                  上限合计 <span class="num">{{ twTotals.limit.toLocaleString('zh-CN') }}</span>
                 </template>
                 <span v-else>上游未给出额度上限</span>
               </div>
@@ -208,14 +208,14 @@
               <a-statistic
                 :title="w.label"
                 :value="fmtQw(w.balance)"
-                :value-style="w.kind === 'free' ? 'color:#0891b2' : 'color:#60a5fa'"
+                :value-style="w.kind === 'free' ? 'color:var(--lab-primary)' : 'color:var(--lab-info)'"
               />
               <div class="text-xs text-slate-500 mt-2">
                 <a-tag :color="w.kind === 'free' ? 'cyan' : 'blue'">
                   {{ w.kind === 'free' ? '免费' : '付费' }}
                 </a-tag>
                 <template v-if="w.id === 'daily'">
-                  <template v-if="qwCredits.accountCount > 1">{{ qwCredits.accountCount }} 个账号合计 · </template>每日 00:00 重置 · 上限 {{ qwCredits.dailyCap }}
+                  <template v-if="qwCredits.accountCount > 1">{{ qwCredits.accountCount }} 个账号合计 · </template>每日 00:00 重置 · 上限 <span class="num">{{ fmt(qwCredits.dailyCap) }}</span>
                 </template>
                 <template v-else-if="w.id === 'monthly'">订阅套餐内</template>
                 <template v-else>充值 / 赠送</template>
@@ -227,7 +227,7 @@
               <a-statistic
                 title="今日消耗"
                 :value="fmtQw(qwCredits.today.total)"
-                value-style="color:#d97706"
+                value-style="color:var(--lab-warn)"
               />
               <div class="text-xs text-slate-500 mt-2">
                 免费 {{ fmtQw(qwCredits.today.free) }} · 付费 {{ fmtQw(qwCredits.today.paid) }} ·
@@ -338,7 +338,7 @@
               <a-statistic
                 title="已消耗（签到积分）"
                 :value="qdUsed.addOn ?? '—'"
-                value-style="color:#d97706"
+                value-style="color:var(--lab-warn)"
               />
               <div class="text-xs text-slate-500 mt-2">
                 上游累积真值 · 含客户端直连
@@ -350,7 +350,7 @@
               <a-statistic
                 title="已消耗（订阅额度）"
                 :value="qdUsed.user ?? '—'"
-                value-style="color:#d97706"
+                value-style="color:var(--lab-warn)"
               />
               <div class="text-xs text-slate-500 mt-2">
                 Free 套餐恒为 0
@@ -362,7 +362,7 @@
               <a-statistic
                 title="剩余可用合计"
                 :value="qdTotals.left ?? '—'"
-                value-style="color:#0891b2"
+                value-style="color:var(--lab-primary)"
               />
               <div class="text-xs text-slate-500 mt-2">
                 签到 {{ fmtQw(qdTotals.addOn) }} · 订阅 {{ fmtQw(qdTotals.user) }}
@@ -570,20 +570,28 @@
       <template v-if="allPoints && allPoints.accounts.length">
         <a-row :gutter="[16, 16]" class="mb-3">
           <a-col :span="8">
-            <a-statistic
-              title="账号总余额"
-              :value="allPoints.totals.left"
-              :precision="2"
-            />
-            <div class="text-xs text-slate-500 mt-2">
-              {{ allPoints.totals.ok_accounts }} / {{ allPoints.totals.accounts }} 个账号取到数据
-            </div>
+            <a-card :bordered="false" class="h-full">
+              <a-statistic
+                title="账号总余额"
+                :value="allPoints.totals.left"
+                :precision="2"
+              />
+              <div class="text-xs text-slate-500 mt-2">
+                {{ allPoints.totals.ok_accounts }} / {{ allPoints.totals.accounts }} 个账号取到数据
+              </div>
+            </a-card>
           </a-col>
           <a-col :span="8">
-            <a-statistic title="账号总量" :value="allPoints.totals.total" :precision="2" />
+            <a-card :bordered="false" class="h-full">
+              <a-statistic title="账号总量" :value="allPoints.totals.total" :precision="2" />
+              <div class="text-xs text-slate-500 mt-2">由上游额度包累计</div>
+            </a-card>
           </a-col>
           <a-col :span="8">
-            <a-statistic title="账号已用" :value="allPoints.totals.used" :precision="2" />
+            <a-card :bordered="false" class="h-full">
+              <a-statistic title="账号已用" :value="allPoints.totals.used" :precision="2" />
+              <div class="text-xs text-slate-500 mt-2">由上游额度包累计</div>
+            </a-card>
           </a-col>
         </a-row>
 
@@ -602,14 +610,16 @@
               <div v-if="!record.ok" class="text-xs text-red-600">{{ record.error }}</div>
             </template>
             <template v-else-if="column.key === 'left'">
-              <span v-if="record.ok" class="font-medium">{{ fmt(record.left) }}</span>
+              <span v-if="record.ok" class="font-medium num">{{ fmt(record.left) }}</span>
               <span v-else class="text-slate-400">—</span>
             </template>
             <template v-else-if="column.key === 'total'">
-              {{ record.ok ? fmt(record.total) : '—' }}
+              <span v-if="record.ok" class="num">{{ fmt(record.total) }}</span>
+              <span v-else class="text-slate-400">—</span>
             </template>
             <template v-else-if="column.key === 'used'">
-              {{ record.ok ? fmt(record.used) : '—' }}
+              <span v-if="record.ok" class="num">{{ fmt(record.used) }}</span>
+              <span v-else class="text-slate-400">—</span>
             </template>
             <template v-else-if="column.key === 'state'">
               <a-tag v-if="!record.ok" color="red">失效</a-tag>
@@ -637,14 +647,14 @@
         v-model:value="selectedId"
         button-style="solid"
         size="large"
-        class="w-full flex"
+        class="flex flex-wrap gap-2"
       >
         <a-radio-button
           v-for="o in accountOptions"
           :key="o.key"
           :value="o.key"
           :disabled="!o.ok"
-          class="acct-btn flex-1 text-center"
+          class="acct-btn text-center"
         >
           {{ o.label }}
           <span v-if="!o.ok" class="text-xs opacity-70">（不可用）</span>
@@ -668,8 +678,8 @@
         <a-tag v-else color="purple">网页凭证</a-tag>
       </div>
       <div class="text-sm text-slate-600">
-        余额 <b class="text-base">{{ fmt(current.left) }}</b>
-        <span class="text-slate-400 ml-2">共 {{ fmt(current.total) }} · 已用 {{ fmt(current.used) }}</span>
+        余额 <b class="text-base num">{{ fmt(current.left) }}</b>
+        <span class="text-slate-400 ml-2 num">共 {{ fmt(current.total) }} · 已用 {{ fmt(current.used) }}</span>
       </div>
     </div>
 
@@ -685,44 +695,50 @@
     <a-row :gutter="[16, 16]">
       <a-col :span="6">
         <a-card :bordered="false">
-          <a-statistic title="可用余额" :value="current?.left ?? '—'" :precision="2" />
-          <div class="text-xs text-slate-500 mt-2">
-            <template v-if="current">共 {{ fmt(current.total) }} · 已用 {{ fmt(current.used) }}</template>
-          </div>
+          <a-spin v-if="loading && !current" size="small" />
+          <template v-else>
+            <a-statistic title="可用余额" :value="current?.left ?? '—'" :precision="2" />
+            <div class="text-xs text-slate-500 mt-2">
+              共 {{ current ? fmt(current.total) : '—' }} · 已用 {{ current ? fmt(current.used) : '—' }}
+            </div>
+          </template>
         </a-card>
       </a-col>
       <a-col :span="6">
         <a-card :bordered="false">
-          <a-statistic title="额度包数量" :value="current?.packages?.length ?? '—'" />
-          <div class="text-xs text-slate-500 mt-2">订阅 + 增量包</div>
+          <a-spin v-if="loading && !current" size="small" />
+          <template v-else>
+            <a-statistic title="额度包数量" :value="current ? (current.packages?.length ?? 0) : '—'" />
+            <div class="text-xs text-slate-500 mt-2">订阅 + 增量包</div>
+          </template>
         </a-card>
       </a-col>
       <a-col :span="6">
         <a-card :bordered="false">
-          <a-statistic
-            title="即将过期"
-            :value="current ? (current.expiring?.length ?? 0) : '—'"
-          />
-          <div class="text-xs text-slate-500 mt-2">
-            <template v-if="current?.expiring?.length">
-              最近 {{ dateText(current.expiring[0].expire_at) }}
-            </template>
-            <span v-else>没有未用完且临期的额度</span>
-          </div>
+          <a-spin v-if="loading && !current" size="small" />
+          <template v-else>
+            <a-statistic title="即将过期" :value="current ? (current.expiring?.length ?? 0) : '—'" />
+            <div class="text-xs text-slate-500 mt-2">
+              <template v-if="current?.expiring?.length">
+                最近 {{ dateText(current?.expiring?.[0]?.expire_at ?? null) }}
+              </template>
+              <span v-else>没有未用完且临期的额度</span>
+            </div>
+          </template>
         </a-card>
       </a-col>
       <a-col :span="6">
         <a-card :bordered="false">
-          <a-statistic
-            title="已过期未用完"
-            :value="current ? (current.expired_unused?.length ?? 0) : '—'"
-          />
-          <div class="text-xs text-slate-500 mt-2">
-            <template v-if="current?.expired_unused?.length">
-              这部分额度已经用不上了
-            </template>
-            <span v-else>没有浪费的额度</span>
-          </div>
+          <a-spin v-if="loading && !current" size="small" />
+          <template v-else>
+            <a-statistic title="已过期未用完" :value="current ? (current.expired_unused?.length ?? 0) : '—'" />
+            <div class="text-xs text-slate-500 mt-2">
+              <template v-if="current?.expired_unused?.length">
+                这部分额度已经用不上了
+              </template>
+              <span v-else>没有浪费的额度</span>
+            </div>
+          </template>
         </a-card>
       </a-col>
     </a-row>
@@ -735,7 +751,9 @@
         message="积分由服务端按天自动发放，没有签到或任务领取接口"
         description="登录奖励（login_bonus）为每日自动发放 500，成长计划奖励（growth_plan_*）由服务端按账号状态发放。客户端只提供查询接口，无手动领取能力。"
       />
+      <a-spin v-if="loading && !current" size="small" />
       <a-table
+        v-else
         size="small"
         :pagination="false"
         :data-source="current?.sources ?? []"
@@ -747,13 +765,13 @@
             <span class="font-mono text-xs">{{ record.source }}</span>
           </template>
           <template v-else-if="column.key === 'num'">
-            {{ fmt(record.total) }}
+            <span class="num">{{ fmt(record.total) }}</span>
           </template>
           <template v-else-if="column.key === 'used'">
-            {{ fmt(record.used) }}
+            <span class="num">{{ fmt(record.used) }}</span>
           </template>
           <template v-else-if="column.key === 'left'">
-            <span class="font-medium">{{ fmt(record.left) }}</span>
+            <span class="font-medium num">{{ fmt(record.left) }}</span>
           </template>
           <template v-else-if="column.key === 'last'">
             <template v-if="record.last_at">
@@ -769,7 +787,8 @@
     </a-card>
 
     <a-card title="每日发放与消耗" :bordered="false" class="mt-4">
-      <a-empty v-if="!current?.daily_grant?.length" description="没有发放记录" />
+      <a-spin v-if="loading && !current" size="small" />
+      <a-empty v-else-if="!current || !current.daily_grant?.length" description="没有发放记录" />
       <!-- 发放与消耗同为「积分」量纲，所以能共图共用一张 Y 轴；
            先前手写的柱状图只画了发放，消耗藏在 title 里要悬停才看得到，
            而「发了多少、用了多少」恰恰是这张图要回答的。 -->
@@ -777,7 +796,9 @@
     </a-card>
 
     <a-card title="逐笔发放记录" :bordered="false" class="mt-4">
+      <a-spin v-if="loading && !current" size="small" />
       <a-table
+        v-else
         size="small"
         :data-source="pkgRows"
         :columns="pkgColumns"
@@ -795,13 +816,13 @@
             {{ dateTimeText(record.expire_at) }}
           </template>
           <template v-else-if="column.key === 'total'">
-            {{ fmt(record.total) }}
+            <span class="num">{{ fmt(record.total) }}</span>
           </template>
           <template v-else-if="column.key === 'used'">
-            {{ fmt(record.used) }}
+            <span class="num">{{ fmt(record.used) }}</span>
           </template>
           <template v-else-if="column.key === 'left'">
-            <a-tag :color="record.left > 0 ? 'green' : 'default'">{{ fmt(record.left) }}</a-tag>
+            <a-tag :color="record.left > 0 ? 'green' : 'default'"><span class="num">{{ fmt(record.left) }}</span></a-tag>
           </template>
           <template v-else-if="column.key === 'status'">
             <a-tag :color="pkgStateColor(record)">{{ pkgStateText(record) }}</a-tag>
@@ -865,7 +886,8 @@
       <!-- 按天聚合：一眼看出哪天做了什么。只标类型不显示次数——
            「哪天做过什么」是这张表要回答的，次数在下面明细里能数。 -->
       <a-alert v-if="opError" type="error" show-icon :message="opError" class="mb-2" />
-      <a-empty v-else-if="!ops?.daily?.length" description="还没有操作记录" />
+      <a-spin v-else-if="!ops" size="small" />
+      <a-empty v-else-if="!ops.daily?.length" description="还没有操作记录" />
       <a-table
         v-else
         size="small"
@@ -935,16 +957,16 @@
               <template v-else>抽了 {{ record.count || 1 }} 次</template>
             </template>
             <template v-else-if="record.type === 'grant'">
-              登录奖励 <span class="font-medium">+{{ record.points_delta }}</span>
+              登录奖励 <span class="font-medium num">+{{ record.points_delta }}</span>
               <a-tag color="blue" class="ml-1">自动</a-tag>
               <span class="text-xs text-slate-400 ml-1">{{ record.note }}</span>
             </template>
           </template>
           <template v-else-if="column.key === 'points'">
             <template v-if="record.points_delta !== null && record.points_delta !== undefined">
-              <span :class="record.points_delta > 0 ? 'text-green-700' : 'text-slate-400'">
+              <span class="num" :class="record.points_delta > 0 ? 'text-green-700' : 'text-slate-400'">
                 余额 {{ record.points_delta > 0 ? '+' + record.points_delta : record.points_delta }}
-                <span v-if="record.points_before !== null && record.points_after !== null" class="text-xs text-slate-400">
+                <span v-if="record.points_before !== null && record.points_after !== null" class="text-xs text-slate-400 num">
                   ({{ fmt(record.points_before) }} → {{ fmt(record.points_after) }})
                 </span>
               </span>
@@ -1617,12 +1639,17 @@ onBeforeUnmount(() => {
 .used-bar.used-mid { background: var(--lab-warn); }
 .used-bar.used-low { background: var(--lab-ok); }
 
-/* 切换按钮加大：默认 solid 按钮太小，点完看不出选中态变化 */
+/* 切换按钮加大：默认 solid 按钮太小，点完看不出选中态变化。
+   账号多时按钮换行，所以行高用倍数而不是固定像素，否则两行的按钮会撑歪 */
 :deep(.acct-btn) {
   min-height: 40px;
-  line-height: 38px;
-  padding: 0 16px;
+  min-width: 96px;
+  line-height: 1.2;
+  padding: 6px 16px;
   font-size: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 
 /* 当前账号大标题：青色信号条 + 极淡渐变，与侧栏选中态同一套语言 */

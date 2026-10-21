@@ -46,7 +46,7 @@
           <a-statistic
             title="通道状态"
             :value="status?.ready ? '就绪' : '不可用'"
-            :value-style="status?.ready ? 'color:#059669' : 'color:#dc2626'"
+            :value-style="status?.ready ? 'color:var(--lab-ok)' : 'color:var(--lab-danger)'"
           />
           <div class="text-xs text-slate-500 mt-2">
             {{ status?.ready ? '至少有一个启用且凭证完整的账号' : (status?.error || '—') }}
@@ -58,7 +58,7 @@
           <a-statistic
             title="最近到期"
             :value="soonestText"
-            :value-style="soonestSoon ? 'color:#d97706' : undefined"
+            :value-style="soonestSoon ? 'color:var(--lab-warn)' : undefined"
           />
           <div class="text-xs text-slate-500 mt-2">
             <template v-if="soonestAt">access token 最早到期的账号</template>
@@ -103,7 +103,7 @@
             <a-tag :color="expired(record.expiresAt) ? 'red' : 'green'">
               {{ expired(record.expiresAt) ? '已过期' : '有效' }}
             </a-tag>
-            <div class="text-xs text-slate-400 mt-1">
+            <div class="text-xs text-slate-400 mt-1 num">
               {{ record.expiresAt ? dateText(record.expiresAt) : '—' }}
             </div>
           </template>
@@ -111,7 +111,7 @@
             <a-tag :color="expired(record.refreshExpiresAt) ? 'red' : 'green'">
               {{ expired(record.refreshExpiresAt) ? '已过期' : '有效' }}
             </a-tag>
-            <div class="text-xs text-slate-400 mt-1">
+            <div class="text-xs text-slate-400 mt-1 num">
               {{ record.refreshExpiresAt ? dateText(record.refreshExpiresAt) : '—' }}
             </div>
           </template>
@@ -124,7 +124,9 @@
             <span class="font-mono text-xs">…{{ record.refreshTail || '—' }}</span>
           </template>
           <template v-else-if="column.key === 'err'">
-            <span v-if="record.lastError" class="text-xs text-red-600">{{ record.lastError }}</span>
+            <span v-if="record.lastError" :class="errFresh(record) ? 'text-xs text-red-600' : 'text-xs text-slate-500'">
+              <span class="text-slate-500">{{ errTime(record.lastErrorAt) }}</span>{{ record.lastError }}
+            </span>
             <span v-else class="text-slate-400">—</span>
           </template>
         </template>
@@ -143,7 +145,8 @@ import { useRouter } from 'vue-router'
 import PageHeader from '@/components/PageHeader.vue'
 import { channelStore, isTraework } from '@/stores/channel'
 import { traeworkApi } from '@/api/traework'
-import type { TraeworkStatus } from '@/api/traework'
+import type { TraeworkAccount, TraeworkStatus } from '@/api/traework'
+import { lastErrorFresh, errorWhen } from '@/utils/lastError'
 const router = useRouter()
 const status = ref<TraeworkStatus | null>(null)
 const loading = ref(false)
@@ -159,6 +162,10 @@ function expired(ts: number | null) {
 }
 
 const dateText = (ts: number) => new Date(ts).toLocaleString('zh-CN', { hour12: false })
+
+// lastError 的新鲜度判定收敛在 utils/lastError（无时间戳=陈旧）。
+const errFresh = (a: TraeworkAccount) => lastErrorFresh(a)
+const errTime = (ts: number | null | undefined) => errorWhen(ts ?? null)
 
 // 最早到期的 access token：这是「通道还能撑多久」的指标，
 // 只看单个账号会漏掉其它账号其实更快到期

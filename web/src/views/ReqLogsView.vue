@@ -46,12 +46,13 @@
       <a-tab-pane v-if="!isDirect" key="points" tab="积分消费明细" />
     </a-tabs>
 
-    <a-card v-if="tab === 'gateway'" :bordered="false" class="mb-4">
+    <a-card v-if="tab === 'gateway'" :bordered="false">
       <a-table
         size="small"
         :data-source="data?.rows ?? []"
         :columns="columns"
         row-key="ts"
+        :scroll="{ x: 1180 }"
         :pagination="pagination"
         :loading="loading"
         :custom-row="customRow"
@@ -79,7 +80,7 @@
           </template>
           <template v-else-if="column.key === 'model'">
             <div class="text-xs">{{ record.model || '—' }}</div>
-            <div v-if="record.mapped_model && record.mapped_model !== record.model" class="text-xs text-slate-400">
+            <div v-if="record.mapped_model && record.mapped_model !== record.model" class="text-xs text-slate-500">
               → {{ record.mapped_model }}
             </div>
           </template>
@@ -94,19 +95,19 @@
             <a-tag :color="statusColor(record.status)">{{ record.status || '中断' }}</a-tag>
           </template>
           <template v-else-if="column.key === 'ms'">
-            <span class="text-xs">{{ fmtMs(record.ms) }}</span>
-            <div v-if="record.first_token_ms" class="text-xs text-slate-400">首字 {{ fmtMs(record.first_token_ms) }}</div>
+            <span class="num text-xs">{{ fmtMs(record.ms) }}</span>
+            <div v-if="record.first_token_ms" class="num text-xs text-slate-500">首字 {{ fmtMs(record.first_token_ms) }}</div>
           </template>
           <template v-else-if="column.key === 'tokens'">
-            <span class="text-xs">{{ compact(record.total_tokens) }}</span>
-            <div class="text-xs text-slate-400">{{ compact(record.input_tokens) }} / {{ compact(record.output_tokens) }}</div>
+            <span class="num text-xs">{{ compact(record.total_tokens) }}</span>
+            <div class="num text-xs text-slate-500">{{ compact(record.input_tokens) }} / {{ compact(record.output_tokens) }}</div>
           </template>
           <template v-else-if="column.key === 'client'">
             <span class="text-xs">{{ record.key || (record.key_id ? `key-${record.key_id}` : '未用密钥') }}</span>
             <!-- 链路来源：搭子上游有两条不同的路——桌面 auth.json 与网页凭证池。
                  模型名与计费相同（都是搭子），但凭证来源与轮询行为不同，
                  排查「为什么这次用了另一个账号」时要看这个 -->
-            <div class="text-xs text-slate-400">
+            <div class="text-xs text-slate-500">
               <a-tag v-if="record.upstream === 'web'" color="geekblue">网页凭证</a-tag>
               {{ uaShort(record.ua) }}
             </div>
@@ -115,42 +116,42 @@
             <!-- 千问通道：扣的是千问自己的积分池，与搭子的余额游标是两套账。
                  按 req_id 精确配对，归因要等结算，刚发出的请求可能还没值 -->
             <template v-if="record.channel === 'qwenwork'">
-              <span v-if="record.qw_total !== undefined" class="text-xs">
-                <span :class="record.qw_pool === 'daily' ? 'text-cyan-700' : 'text-blue-600'">
+              <div v-if="record.qw_total !== undefined" class="text-xs">
+                <span class="num" :class="record.qw_pool === 'daily' ? 'text-cyan-700' : 'text-blue-600'">
                   {{ fmtQw(record.qw_total) }}
                 </span>
-                <div class="text-xs text-slate-400">
+                <div class="text-xs text-slate-500">
                   {{ poolLabel(record.qw_pool) }}
                   <a-tooltip v-if="record.qw_concurrent" title="与相邻请求并发，差值可能含其它请求的消耗">
                     <span class="text-orange-700">· 并发</span>
                   </a-tooltip>
                 </div>
-              </span>
+              </div>
               <span v-else class="text-xs text-slate-400">—</span>
             </template>
             <!-- TRAE Work：消耗来自按 req_id 配对的归因记录（账号另有独立列） -->
             <template v-else-if="record.channel === 'traework'">
               <span v-if="record.tw_cost !== undefined" class="text-xs">
-                <span class="text-purple-500">{{ fmtQw(record.tw_cost) }}</span>
+                <span class="num text-purple-500">{{ fmtQw(record.tw_cost) }}</span>
                 <a-tooltip v-if="record.tw_exact === false" title="与同账号相邻请求并发，差值可能含对方的消耗">
-                  <div class="text-xs text-orange-700">并发</div>
+                  <span class="text-xs text-orange-700">并发</span>
                 </a-tooltip>
               </span>
-              <span v-else-if="record.tw_account" class="text-xs text-slate-400">
+              <div v-else-if="record.tw_account" class="text-xs text-slate-400">
                 —
-                <div class="text-xs text-slate-400">待下一条</div>
-              </span>
+                <div class="text-xs text-slate-500">待下一条</div>
+              </div>
               <span v-else class="text-xs text-slate-400">—</span>
             </template>
             <!-- Qoder：上游 usage 直给本条 credits，三条直连通道里唯一精确归因的 -->
             <template v-else-if="record.channel === 'qoder'">
-              <span v-if="record.qoder_cost !== undefined" class="text-xs text-orange-700">
+              <span v-if="record.qoder_cost !== undefined" class="num text-xs text-orange-700">
                 {{ fmtQw(record.qoder_cost) }}
               </span>
               <span v-else class="text-xs text-slate-400">—</span>
             </template>
             <!-- 搭子通道：余额游标差 -->
-            <span v-else-if="record.points_delta !== undefined" class="text-xs" :class="record.points_delta > 0 ? 'text-green-700' : 'text-slate-600'">
+            <span v-else-if="record.points_delta !== undefined" class="num text-xs" :class="record.points_delta > 0 ? 'text-green-700' : 'text-slate-600'">
               {{ record.points_delta > 0 ? '+' : '' }}{{ record.points_delta }}
             </span>
             <span v-else class="text-xs text-slate-400">—</span>
@@ -163,7 +164,7 @@
     </a-card>
 
     <!-- 上游积分消费明细：网页端同一份数据，一次转发可能拆成多笔扣费 -->
-    <a-card v-if="tab === 'points'" :bordered="false" class="mb-4">
+    <a-card v-if="tab === 'points'" :bordered="false">
       <a-alert
         type="info"
         show-icon
@@ -187,6 +188,7 @@
         :data-source="points?.rows ?? []"
         :columns="pointsColumns"
         row-key="rowKey"
+        :scroll="{ x: 640 }"
         :pagination="pointsPagination"
         :loading="pointsLoading"
         @change="onPointsTableChange"
@@ -199,7 +201,10 @@
             <span class="text-xs">{{ record.account }}</span>
           </template>
           <template v-else-if="column.key === 'points'">
-            <span class="text-xs text-red-600">{{ record.points }}</span>
+            <span class="num text-xs text-red-600">{{ record.points }}</span>
+          </template>
+          <template v-else-if="column.key === 'package_id'">
+            <span class="font-mono text-xs">{{ record.package_id || '—' }}</span>
           </template>
         </template>
       </a-table>
@@ -209,7 +214,7 @@
     <a-drawer v-model:open="detailOpen" title="请求详情" :width="480" placement="right">
       <template v-if="detail">
         <div class="mb-4">
-          <div class="text-base font-medium">请求详情 #{{ detail.ts }}</div>
+          <div class="text-base font-medium">请求详情</div>
           <div class="text-xs text-slate-500 mt-1">{{ fmtTime(detail.ts) }}</div>
         </div>
 
@@ -286,11 +291,11 @@
                   <span class="text-blue-600">付费 {{ fmtQw(detail.qw_paid) }}</span>
                 </div>
                 <!-- 千问是单账号直连，但显示出来便于核对「这条是不是我的号」 -->
-                <div v-if="detail.qw_account" class="text-xs text-slate-400 mt-1">
+                <div v-if="detail.qw_account" class="text-xs text-slate-500 mt-1">
                   账号：{{ detail.qw_account.name || '—' }}
                   <span v-if="detail.qw_account.tier">（{{ detail.qw_account.tier }}）</span>
                 </div>
-                <div v-if="detail.qw_balance" class="text-xs text-slate-400">
+                <div v-if="detail.qw_balance" class="text-xs text-slate-500">
                   请求后余额：每日 {{ fmtQw(detail.qw_balance.daily) }} ·
                   月度 {{ fmtQw(detail.qw_balance.monthly) }} ·
                   长期 {{ fmtQw(detail.qw_balance.longterm) }}
@@ -310,13 +315,13 @@
             <template v-else-if="detail.channel === 'traework'">
               <template v-if="detail.tw_cost !== undefined">
                 {{ fmtQw(detail.tw_cost) }} 额度
-                <div v-if="detail.tw_consumed != null" class="text-xs text-slate-400 mt-1">
+                <div v-if="detail.tw_consumed != null" class="text-xs text-slate-500 mt-1">
                   请求后累计已消耗 {{ fmtQw(detail.tw_consumed) }}
                   <template v-if="detail.tw_limit != null">
                     / 上限 {{ fmtQw(detail.tw_limit) }}
                   </template>
                 </div>
-                <div v-if="detail.tw_remain != null" class="text-xs text-slate-400">
+                <div v-if="detail.tw_remain != null" class="text-xs text-slate-500">
                   剩余 {{ fmtQw(detail.tw_remain) }}
                 </div>
                 <div v-if="detail.tw_exact === false" class="text-xs text-orange-700">
@@ -338,7 +343,7 @@
             <template v-else-if="detail.channel === 'qoder'">
               <template v-if="detail.qoder_cost !== undefined">
                 {{ fmtQw(detail.qoder_cost) }} 积分
-                <div v-if="detail.qoder_account" class="text-xs text-slate-400 mt-1">
+                <div v-if="detail.qoder_account" class="text-xs text-slate-500 mt-1">
                   账号：{{ detail.qoder_account }}
                 </div>
                 <div class="text-xs text-slate-400">上游按本条请求的倍率 × tokens 直给，无需差值</div>

@@ -41,19 +41,21 @@
     <a-card :bordered="false" class="mt-4">
       <div class="flex items-center justify-between mb-3">
         <div>
-          <span class="font-medium">账号列表</span>
-          <span class="text-slate-500 text-sm ml-2">
+          <span class="section-title">账号列表</span>
+          <span class="hint-text ml-2">
             共 {{ rows.length }} 个 · 启用 {{ enabledCount }} 个
           </span>
         </div>
       </div>
 
-      <a-empty v-if="!rows.length" description="还没有千问办公账号">
+      <a-empty v-if="!rows.length && !loading" description="还没有千问办公账号">
         <a-button type="primary" @click="openLogin">添加第一个账号</a-button>
       </a-empty>
 
+      <a-skeleton v-if="loading && !rows.length" active :paragraph="{ rows: 4 }" />
+
       <a-row v-else :gutter="[16, 16]">
-        <a-col v-for="a in rows" :key="a.id" :span="12">
+        <a-col v-for="a in rows" :key="a.id" :span="12" :xs="24" :sm="12">
           <a-card size="small" :bordered="true" class="h-full">
             <div class="flex items-start justify-between">
               <div class="min-w-0">
@@ -88,7 +90,7 @@
 
             <!-- 三个积分池。千问按「每日免费 / 月度 / 长期」分开计量，
                  与 TRAE 的单一 credits 不同，不要合并显示。 -->
-            <div v-if="a.wallets" class="mt-3 grid grid-cols-3 gap-2">
+            <div v-if="a.wallets" class="mt-3 grid grid-cols-2 sm:grid-cols-3 gap-2">
               <div class="qw-pool">
                 <div class="qw-pool-label">每日免费</div>
                 <div class="qw-pool-value num text-cyan-700">{{ fmt(a.wallets.daily) }}</div>
@@ -226,12 +228,15 @@
 
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch, onUnmounted } from 'vue'
-import { message } from 'ant-design-vue'
+import { App } from 'ant-design-vue'
 import PageHeader from '@/components/PageHeader.vue'
 import { channelStore, isQwenwork } from '@/stores/channel'
 import { qwenworkApi } from '@/api/qwenwork'
 import type { QwAccount, QwLoginPoll } from '@/api/qwenwork'
 import { lastErrorFresh, errorWhen } from '@/utils/lastError'
+
+// message 走 App.useApp() 的实例（App.vue 已包 <a-app>），静态 import 拿不到上下文
+const { message } = App.useApp()
 
 const rows = ref<QwAccount[]>([])
 const err = ref('')

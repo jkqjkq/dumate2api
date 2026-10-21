@@ -38,6 +38,8 @@
 
     <a-table
       size="small"
+      :loading="loading"
+      :scroll="{ x: 860 }"
       :pagination="rows.length > 20 ? { pageSize: 20, size: 'small', showSizeChanger: false } : false"
       :data-source="displayRows"
       :columns="columns"
@@ -59,7 +61,7 @@
             <a-tag v-if="record.isBeta" color="orange" class="ml-1">Beta</a-tag>
             <a-tag v-if="record.visible === false" color="default" class="ml-1">隐藏</a-tag>
           </div>
-          <div class="text-xs text-slate-400 font-mono">{{ record.id }}</div>
+          <div class="text-xs text-slate-500 font-mono">{{ record.id }}</div>
           <div v-if="!record.native" class="text-xs text-slate-500">
             别名 → {{ record.target }}
           </div>
@@ -76,7 +78,7 @@
           </div>
           <!-- Qoder 的错峰/免费模型 rate 就是 0，只显示 0 会被读成「完全不扣费」
                而它的原价（original_price_factor）其实是 0.1——两个一起给 -->
-          <div v-if="record.rateOriginal != null && record.rateOriginal !== record.rate" class="text-xs text-slate-400">
+          <div v-if="record.rateOriginal != null && record.rateOriginal !== record.rate" class="text-xs text-slate-500">
             原价 {{ record.rateOriginal.toFixed(2) }}×
           </div>
           <!-- 拿不到就显示「—」并说明原因，**不估算**：
@@ -91,7 +93,7 @@
             <a-tag :color="record.discountMatched ? 'green' : 'default'">
               {{ record.memberDiscount }}% off
             </a-tag>
-            <div class="text-xs text-slate-400 num">
+            <div class="text-xs text-slate-500 num">
               {{ record.rateOriginal }} → {{ record.rateDiscounted }}
             </div>
             <div class="text-xs" :class="record.discountMatched ? 'text-green-700' : 'text-slate-500'">
@@ -114,7 +116,7 @@
                实测 1M 输入照样 200。把声明值当上限展示会让人以为只能用 200K。 -->
           <template v-if="record.contextWindowHard">
             <div class="num">{{ compactNum(record.contextWindowHard) }}</div>
-            <div class="text-xs text-slate-400">
+            <div class="text-xs text-slate-500">
               <span class="src-tag">实测</span>
             </div>
             <div v-if="record.contextWindow" class="text-xs text-slate-500">
@@ -133,7 +135,7 @@
               </template>
               <template v-else>{{ compactNum(record.contextWindow) }}</template>
             </div>
-            <div class="text-xs text-slate-400">
+            <div class="text-xs text-slate-500">
               <span class="src-tag">{{ srcText(record.contextSource) }}</span>
               <!-- TRAE 的这个值只是压缩阈值。没测过的模型必须标出来，
                    否则会被读成「上限就是这样」 -->
@@ -149,7 +151,7 @@
         <template v-else-if="column.key === 'maxtok'">
           <template v-if="record.maxTokens">
             <span class="num">{{ compactNum(record.maxTokens) }}</span>
-            <div class="text-xs text-slate-400">
+            <div class="text-xs text-slate-500">
               <span class="src-tag">{{ srcText(record.maxTokensSource) }}</span>
             </div>
           </template>
@@ -173,7 +175,7 @@
       <span class="src-tag">上游</span> 接口下发 ·
       <span class="src-tag">实测</span> 本项目实测 ·
       <span class="src-tag">配置</span> 本地配置。
-      拿不到的字段显示「—」——**不估算**，因为一个编出来的上下文上限会让人
+      拿不到的字段显示「—」——<b>不估算</b>，因为一个编出来的上下文上限会让人
       以为真能用满，直到请求失败才发现。
     </div>
   </div>

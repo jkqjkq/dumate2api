@@ -4,7 +4,10 @@
        Select 下拉、Modal、DatePicker、Message 这些浮层不在卡片内，
        scoped 样式够不到，只有 token 能一次改干净。 -->
   <a-config-provider :theme="themeConfig" :locale="zhCN">
-    <router-view />
+    <!-- a-app：为后续 useApp()（message/modal/notification 上下文）迁移提供挂载点 -->
+    <a-app>
+      <router-view />
+    </a-app>
   </a-config-provider>
 </template>
 
@@ -15,7 +18,7 @@ import zhCN from 'ant-design-vue/es/locale/zh_CN'
 const themeConfig = {
   token: {
     colorPrimary: '#0891b2',
-    colorInfo: '#0284c7',
+    colorInfo: '#0891b2',
     colorSuccess: '#059669',
     colorWarning: '#d97706',
     colorError: '#dc2626',
@@ -46,21 +49,21 @@ const themeConfig = {
 
     // 数据用等宽，正文用无衬线：数字列对齐后整张表稳定得多。
     fontFamily:
-      "'Inter Tight', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif",
+      "-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif",
     wireframe: false,
   },
   components: {
     Card: { colorBgContainer: '#ffffff' },
     Table: {
-      headerBg: '#f7f9fc',
+      headerBg: 'var(--lab-surface-2)',
       headerColor: '#4e5f75',
-      rowHoverBg: '#eef2f7',
+      rowHoverBg: 'var(--lab-surface-hover)',
       borderColor: '#e2e7ee',
     },
     Menu: {
       itemBg: 'transparent',
       subMenuItemBg: 'transparent',
-      itemSelectedBg: 'rgba(8, 145, 178, 0.08)',
+      itemSelectedBg: 'var(--lab-primary-dim)',
       itemSelectedColor: '#0891b2',
       itemColor: '#4e5f75',
       itemHoverBg: 'rgba(15, 23, 42, 0.04)',

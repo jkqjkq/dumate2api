@@ -16,75 +16,82 @@
 
     <!-- 顶部卡片 -->
     <a-row :gutter="[16, 16]">
-      <a-col :span="6">
+      <a-col :xs="24" :sm="12" :xl="6">
         <a-card :bordered="false" class="h-full">
-          <a-statistic title="今日请求" :value="data?.cards.today.requests ?? '—'" value-style="color:#0891b2" />
-          <div class="text-xs text-slate-500 mt-2">
-            <template v-if="data">{{ compact(data.cards.today.tokens) }} Token</template>
-            <span v-else>—</span>
-          </div>
+          <a-spin v-if="loading && !data" size="small" />
+          <template v-else>
+            <a-statistic title="今日请求" :value="data?.cards.today.requests ?? '—'" value-style="color:var(--lab-primary)" />
+            <div class="text-xs text-slate-500 mt-2">
+              {{ data ? compact(data.cards.today.tokens) : '—' }} Token
+            </div>
+          </template>
         </a-card>
       </a-col>
 
-      <a-col :span="6">
+      <a-col :xs="24" :sm="12" :xl="6">
         <a-card :bordered="false" class="h-full">
-          <a-statistic title="本周请求" :value="data?.cards.week.requests ?? '—'" value-style="color:#d97706" />
-          <div class="text-xs text-slate-500 mt-2">
-            <template v-if="data">{{ compact(data.cards.week.tokens) }} Token</template>
-            <span v-else>—</span>
-          </div>
+          <a-spin v-if="loading && !data" size="small" />
+          <template v-else>
+            <a-statistic title="本周请求" :value="data?.cards.week.requests ?? '—'" value-style="color:var(--lab-warn)" />
+            <div class="text-xs text-slate-500 mt-2">
+              {{ data ? compact(data.cards.week.tokens) : '—' }} Token
+            </div>
+          </template>
         </a-card>
       </a-col>
 
-      <a-col :span="6">
+      <a-col :xs="24" :sm="12" :xl="6">
         <a-card :bordered="false" class="h-full">
           <!-- 三条通道三种账：搭子是上游账单（今日实付）、千问是免费额度余额、
                TRAE 是按账号独立的剩余额度。同一张卡按通道换语义，
                但都要标出数字来源，否则额度政策一变没人知道数字错在哪 -->
-          <a-statistic
-            :title="isTw ? '剩余额度' : isQw ? '免费额度余额' : '今日实付'"
-            :value="isTw
-              ? (twTotals.remain ?? '—')
-              : isQw
-                ? (qw?.ok ? fmtQw(qw.free) : '—')
-                : (data?.cards.today.consumed_points ?? '—')"
-            :precision="isQw || isTw || data?.cards.today.consumed_points == null ? undefined : 2"
-            :suffix="isQw && qw?.ok ? `/ ${qw.dailyCap}` : ''"
-            :value-style="isQw || isTw ? 'color:#0891b2' : undefined"
-          />
-          <div class="text-xs text-slate-500 mt-2">
-            <template v-if="isTw">
-              <template v-if="twTotals.remain != null">
-                按账号独立计算<template v-if="twTotals.limit">
-                  · 上限合计 {{ twTotals.limit.toLocaleString('zh-CN') }}
+          <a-spin v-if="(isQw && loading && !qw) || (isTw && loading && !twLoaded) || (!isQw && !isTw && loading && !data)" size="small" />
+          <template v-else>
+            <a-statistic
+              :title="isTw ? '剩余额度' : isQw ? '免费额度余额' : '今日实付'"
+              :value="isTw
+                ? (twTotals.remain ?? '—')
+                : isQw
+                  ? (qw?.ok ? fmtQw(qw.free) : '—')
+                  : (data?.cards.today.consumed_points ?? '—')"
+              :precision="isQw || isTw || data?.cards.today.consumed_points == null ? undefined : 2"
+              :suffix="isQw && qw?.ok ? `/ ${qw.dailyCap}` : ''"
+              :value-style="isQw || isTw ? 'color:var(--lab-primary)' : undefined"
+            />
+            <div class="text-xs text-slate-500 mt-2">
+              <template v-if="isTw">
+                <template v-if="twTotals.remain != null">
+                  按账号独立计算<template v-if="twTotals.limit">
+                    · 上限合计 <span class="num">{{ twTotals.limit.toLocaleString('zh-CN') }}</span>
+                  </template>
                 </template>
+                <span v-else>取不到 TRAE 额度</span>
               </template>
-              <span v-else>取不到 TRAE 额度</span>
-            </template>
-            <template v-else-if="isQw">
-              <template v-if="qw?.ok">
-                <a-tag :color="qw.calibrated ? 'cyan' : 'default'" class="qw-mini">
-                  {{ qw.calibrated ? '实测' : '配置兜底' }}
-                </a-tag>
-                每日 00:00 重置 · 上限 {{ qw.limitSource === 'observed' ? '按观测峰值' : '取自配置' }}
+              <template v-else-if="isQw">
+                <template v-if="qw?.ok">
+                  <a-tag :color="qw.calibrated ? 'cyan' : 'default'" class="qw-mini">
+                    {{ qw.calibrated ? '实测' : '配置兜底' }}
+                  </a-tag>
+                  每日 00:00 重置 · 上限 {{ qw.limitSource === 'observed' ? '按观测峰值' : '取自配置' }}
+                </template>
+                <span v-else>{{ qw?.error || '取不到千问积分' }}</span>
               </template>
-              <span v-else>{{ qw?.error || '取不到千问积分' }}</span>
-            </template>
-            <template v-else-if="data">{{ data.cards.today.point_records }} 条计费记录</template>
-            <span v-else>—</span>
-          </div>
+              <template v-else-if="data">{{ data.cards.today.point_records }} 条计费记录</template>
+              <span v-else>—</span>
+            </div>
+          </template>
         </a-card>
       </a-col>
 
-      <a-col :span="6">
+      <a-col :xs="24" :sm="12" :xl="6">
         <a-card :bordered="false" class="h-full">
-          <a-statistic title="活跃密钥" :value="data?.cards.active_keys ?? '—'" value-style="color:#059669" />
-          <div class="text-xs text-slate-500 mt-2">
-            <template v-if="data">
-              主力模型 {{ data.cards.top_model || '—' }}
-            </template>
-            <span v-else>—</span>
-          </div>
+          <a-spin v-if="loading && !data" size="small" />
+          <template v-else>
+            <a-statistic title="活跃密钥" :value="data?.cards.active_keys ?? '—'" value-style="color:var(--lab-ok)" />
+            <div class="text-xs text-slate-500 mt-2">
+              主力模型 {{ data?.cards.top_model || '—' }}
+            </div>
+          </template>
         </a-card>
       </a-col>
     </a-row>
@@ -92,26 +99,27 @@
     <!-- 今日概览：只有请求数与 token 说不清「今天跑得怎么样」，
          补上成功率、快慢与今日在用的模型 -->
     <a-card title="今日概览" :bordered="false" class="mt-4">
-      <a-empty v-if="!data?.cards.today.requests" description="今天还没有请求" />
+      <a-spin v-if="loading && !data" size="small" />
+      <a-empty v-else-if="!data || !data.cards.today.requests" description="今天还没有请求" />
       <template v-else>
-        <a-descriptions :column="4" size="small" bordered>
+        <a-descriptions :column="{ xs: 1, sm: 2, xl: 4 }" size="small" bordered>
           <a-descriptions-item label="请求数">
-            {{ fmt(data.cards.today.requests) }}
+            <span class="num">{{ fmt(data.cards.today.requests) }}</span>
             <a-tag v-if="data.cards.today.failed" color="red" class="ml-1">
-              失败 {{ data.cards.today.failed }}
+              失败 <span class="num">{{ data.cards.today.failed }}</span>
             </a-tag>
           </a-descriptions-item>
           <a-descriptions-item label="成功率">
-            <span :class="successRateColor">{{ successRateText }}</span>
+            <span class="num" :class="successRateColor">{{ successRateText }}</span>
           </a-descriptions-item>
           <a-descriptions-item label="Token">
-            {{ compact(data.cards.today.tokens) }}
+            <span class="num">{{ compact(data.cards.today.tokens) }}</span>
           </a-descriptions-item>
           <a-descriptions-item label="实付积分">
             <template v-if="data.cards.today.consumed_points !== null">
-              {{ fmt(data.cards.today.consumed_points) }}
+              <span class="num">{{ fmt(data.cards.today.consumed_points) }}</span>
               <span class="text-xs text-slate-400 ml-1">
-                （{{ data.cards.today.point_records }} 条）
+                （<span class="num">{{ data.cards.today.point_records }}</span> 条）
               </span>
             </template>
             <!-- 千问的积分不进搭子上游账单：如实显示 —，不补 0
@@ -119,23 +127,23 @@
             <span v-else class="text-slate-400">—</span>
           </a-descriptions-item>
           <a-descriptions-item label="平均耗时">
-            {{ data.cards.today.avg_ms !== null ? fmt(data.cards.today.avg_ms) + ' ms' : '—' }}
+            <span class="num">{{ data.cards.today.avg_ms !== null ? fmt(data.cards.today.avg_ms) + ' ms' : '—' }}</span>
           </a-descriptions-item>
           <a-descriptions-item label="平均首字">
             <template v-if="data.cards.today.avg_first_token_ms !== null">
-              {{ fmt(data.cards.today.avg_first_token_ms) }} ms
+              <span class="num">{{ fmt(data.cards.today.avg_first_token_ms) }} ms</span>
               <span class="text-xs text-slate-400 ml-1">
-                （{{ data.cards.today.first_token_samples }} 条样本）
+                （<span class="num">{{ data.cards.today.first_token_samples }}</span> 条样本）
               </span>
             </template>
             <span v-else class="text-slate-400">—</span>
           </a-descriptions-item>
           <a-descriptions-item label="输入 / 输出">
-            {{ compact(data.cards.today.input_tokens) }} /
-            {{ compact(data.cards.today.output_tokens) }}
+            <span class="num">{{ compact(data.cards.today.input_tokens) }}</span> /
+            <span class="num">{{ compact(data.cards.today.output_tokens) }}</span>
           </a-descriptions-item>
           <a-descriptions-item label="流式请求">
-            {{ fmt(data.cards.today.stream_count) }}
+            <span class="num">{{ fmt(data.cards.today.stream_count) }}</span>
           </a-descriptions-item>
         </a-descriptions>
 
@@ -189,15 +197,17 @@
     <!-- Token 消耗趋势 -->
     <a-card title="Token 消耗趋势" :bordered="false" class="mt-4">
       <template #extra><span class="text-xs text-slate-400">按天聚合</span></template>
-      <a-empty v-if="!data?.daily.length" description="还没有请求记录" />
+      <a-spin v-if="loading && !data" size="small" />
+      <a-empty v-else-if="!data || !data.daily.length" description="还没有请求记录" />
       <div v-else ref="chartEl" style="height: 280px"></div>
     </a-card>
 
     <!-- 按模型 / 按密钥 -->
     <a-row :gutter="[16, 16]" class="mt-4">
-      <a-col :span="12">
+      <a-col :xs="24" :md="12">
         <a-card title="按模型" :bordered="false">
-          <a-empty v-if="!data?.by_model.length" description="暂无数据" />
+          <a-spin v-if="loading && !data" size="small" />
+          <a-empty v-else-if="!data || !data.by_model.length" description="暂无数据" />
           <a-table
             v-else
             size="small"
@@ -211,10 +221,10 @@
                 <span class="font-mono text-xs">{{ record.model }}</span>
               </template>
               <template v-else-if="column.key === 'tokens'">
-                {{ compact(record.total_tokens) }}
+                <span class="num">{{ compact(record.total_tokens) }}</span>
               </template>
               <template v-else-if="column.key === 'requests'">
-                {{ fmt(record.requests) }}
+                <span class="num">{{ fmt(record.requests) }}</span>
                 <a-tag v-if="record.failed" color="red" class="ml-1">{{ record.failed }}</a-tag>
               </template>
             </template>
@@ -222,9 +232,10 @@
         </a-card>
       </a-col>
 
-      <a-col :span="12">
+      <a-col :xs="24" :md="12">
         <a-card title="按密钥" :bordered="false">
-          <a-empty v-if="!data?.by_key.length" description="暂无数据" />
+          <a-spin v-if="loading && !data" size="small" />
+          <a-empty v-else-if="!data || !data.by_key.length" description="暂无数据" />
           <a-table
             v-else
             size="small"
@@ -238,10 +249,10 @@
                 {{ record.name }}
               </template>
               <template v-else-if="column.key === 'tokens'">
-                {{ compact(record.total_tokens) }}
+                <span class="num">{{ compact(record.total_tokens) }}</span>
               </template>
               <template v-else-if="column.key === 'requests'">
-                {{ fmt(record.requests) }}
+                <span class="num">{{ fmt(record.requests) }}</span>
                 <a-tag v-if="record.failed" color="red" class="ml-1">{{ record.failed }}</a-tag>
               </template>
             </template>
@@ -256,10 +267,11 @@
     <!-- 千问办公的积分池。与搭子的「按账号积分消耗」是两套账：
          千问是单账号直连，积分在 qwenwork.cn 的三个池子里 -->
     <a-card v-if="isQw" title="千问办公积分" :bordered="false" class="mt-4">
-      <a-empty v-if="!qw?.ok" :description="qw?.error || '取不到千问积分'" />
+      <a-spin v-if="loading && !qw" size="small" />
+      <a-empty v-else-if="!qw || !qw.ok" :description="qw?.error || '取不到千问积分'" />
       <template v-else>
         <a-row :gutter="[16, 16]">
-          <a-col v-for="w in qw.wallets" :key="w.id" :span="6">
+          <a-col v-for="w in qw.wallets" :key="w.id" :xs="24" :sm="8" :span="6">
             <div class="qw-pool">
               <div class="qw-pool-head">
                 <span class="qw-pool-label">{{ w.label }}</span>
@@ -280,7 +292,7 @@
               </div>
             </div>
           </a-col>
-          <a-col :span="6">
+          <a-col :xs="24" :sm="8" :span="6">
             <div class="qw-pool">
               <div class="qw-pool-head">
                 <span class="qw-pool-label">今日消耗</span>
@@ -320,7 +332,8 @@
     <!-- TRAE Work 的额度。与千问的三个池子、搭子的上游账单是三套账，
          不合并成一个「积分」区块——合并出来的数字没有任何一处对得上 -->
     <a-card v-if="isTw" title="TRAE Work 额度" :bordered="false" class="mt-4">
-      <a-empty v-if="!twRows.length" description="还没有 TRAE Work 账号" />
+      <a-spin v-if="loading && !twLoaded" size="small" />
+      <a-empty v-else-if="!twRows.length" description="还没有 TRAE Work 账号" />
       <template v-else>
         <a-table
           size="small"
@@ -365,7 +378,9 @@
       <div class="text-xs text-slate-500 mb-2">
         来自上游计费记录（近 {{ data?.days ?? days }} 天）——本地日志算不出扣费，单价在上游。
       </div>
+      <a-spin v-if="loading && !data" size="small" />
       <a-table
+        v-else
         size="small"
         :pagination="false"
         :data-source="data?.points_by_account ?? []"
@@ -378,11 +393,11 @@
             <div v-if="!record.ok" class="text-xs text-red-600">{{ record.error }}</div>
           </template>
           <template v-else-if="column.key === 'consumed'">
-            <span v-if="record.ok">{{ fmt(record.consumed_points) }}</span>
+            <span v-if="record.ok" class="num">{{ fmt(record.consumed_points) }}</span>
             <span v-else class="text-slate-400">—</span>
           </template>
           <template v-else-if="column.key === 'count'">
-            <span v-if="record.ok">{{ fmt(record.count) }}</span>
+            <span v-if="record.ok" class="num">{{ fmt(record.count) }}</span>
             <span v-else class="text-slate-400">—</span>
           </template>
         </template>
@@ -433,6 +448,8 @@ const qw = ref<QwCredits | null>(null)
 
 // TRAE 的额度：按账号独立。与千问的三个池子不同，这里只看「剩余多少」。
 const twRows = ref<TraeworkCreditRow[]>([])
+// 首次拉取完成前 twRows 为空不代表「没有账号」——空态要等 loaded 才能下结论
+const twLoaded = ref(false)
 const twTotals = computed(() => {
   let remain: number | null = null
   let limit: number | null = null
@@ -532,7 +549,7 @@ function renderChart() {
         return `<div style="color:${INK.muted};font-size:11px">${row.day}</div>`
           + `<div style="margin-top:2px">Token <b>${exactNum(row.total_tokens)}</b></div>`
           + `<div>请求 <b>${exactNum(row.requests)}</b></div>`
-          + (row.failed ? `<div style="color:#dc2626">失败 <b>${exactNum(row.failed)}</b></div>` : '')
+          + (row.failed ? `<div style="color:var(--lab-danger)">失败 <b>${exactNum(row.failed)}</b></div>` : '')
       },
     },
     xAxis: {
@@ -552,6 +569,8 @@ function renderChart() {
 
 async function load() {
   loading.value = true
+  // 每次加载都重置 TRAE 的「已取到」标志：切通道时旧值 true 会先闪一次空态
+  twLoaded.value = false
   try {
     // 服务端按通道过滤。TRAE 走 channelParam() 而不是硬编码——
     // 加第四条通道时不该再来改这里
@@ -563,11 +582,16 @@ async function load() {
         : isQw.value ? qwenworkApi.credits() : Promise.resolve(null),
     ])
     data.value = usage.data
-    if (isTw.value) twRows.value = (credits as any)?.data?.rows || []
-    else if (isQw.value) qw.value = (credits as any).data
+    if (isTw.value) {
+      twRows.value = (credits as any)?.data?.rows || []
+      twLoaded.value = true
+    } else if (isQw.value) qw.value = (credits as any).data
     lastRefresh.value = new Date().toLocaleTimeString('zh-CN')
     await nextTick()
     renderChart()
+  } catch {
+    // 失败保留上一份数据（或显示 —），不把错误态伪装成加载态。
+    // 千问卡的错误说明由 qw.error 自带；这里静默即可。
   } finally {
     loading.value = false
   }
@@ -658,11 +682,11 @@ onBeforeUnmount(() => {
   color: var(--lab-primary);
 }
 .usage-chip.chip-blue {
-  background: rgba(2, 132, 199, 0.07);
-  border-color: rgba(2, 132, 199, 0.28);
+  background: var(--lab-info-dim);
+  border-color: var(--lab-info-line);
 }
 .usage-chip.chip-blue .usage-chip-name {
-  color: #0284c7;
+  color: var(--lab-info);
 }
 
 /* 千问积分池 .qw-pool 系列已收敛到全局 style.css（三个页面共用），
