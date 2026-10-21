@@ -24,6 +24,36 @@ const authStore = require('./auth');
 const CACHE_MS = parseInt(process.env.DUMATE_TRAEWORK_MODELS_CACHE_MS || '300000', 10);
 let cache = { at: 0, data: null };
 
+/**
+ * **实测硬限**（2026-10-21，真实请求打出来的）。
+ *
+ * 上游的 `context_window_tokens.dev` 是**客户端压缩阈值**，不是服务端硬限：
+ * 网关以前把它当「最大上下文」展示，于是 1M 的模型也被写成 200K。
+ * 实测（同一段英文重复文本，让 usage.prompt_tokens 自报）：
+ *
+ *   deepseek-v4.1-flash   1,000,036 通过 · 1,050,036 拒（4026 上下文超限）
+ *   glm-5.3-flash         1,000,018 通过（未测更高）
+ *   Doubao-Seed-2.1-Turbo   260,051 通过 ·   330,000 拒（4026）
+ *
+ * 结论是**每个模型的硬限不同**，不能按平台统一值填。这里只收录**真正测过**
+ * 的模型，其余一律 null —— 与项目一贯口径一致：不估算、不拿同类模型的值顶上。
+ * 新增模型想补这一列，用 test/probe-traework-context.js 实测后再加。
+ */
+const MEASURED_HARD_CONTEXT = {
+  'deepseek-v4.1-flash': {
+    max: 1000000,
+    note: '实测 1,000,036 token 通过，1,050,036 被拒（4026）；上游声明 200K 只是客户端压缩阈值',
+  },
+  'glm-5.3-flash': {
+    max: 1000000,
+    note: '实测 1,000,018 token 通过（未测更高）；上游声明 200K 只是客户端压缩阈值',
+  },
+  'Doubao-Seed-2.1-Turbo': {
+    max: 260000,
+    note: '实测 260,051 token 通过、330,000 被拒（4026）；与上游声明的 256K 基本一致',
+  },
+};
+
 /** display_contact_config 是 JSON 字符串，解析失败当空对象 */
 function parseContact(raw) {
   try {
@@ -38,6 +68,7 @@ function num(v) {
 
 /** 上游条目 → 界面用的扁平结构 */
 function normalize(m) {
+  const hard = MEASURED_HARD_CONTEXT[m && m.config_name] || null;
   const dc = m.display_config || {};
   const cc = parseContact(m.display_contact_config);
   const cr = (cc.consumption_rate && cc.consumption_rate.data) || {};
@@ -57,6 +88,10 @@ function normalize(m) {
     memberDiscount: num(disc.member_discount),
     discountMatched: !!disc.is_discount_matched,
     contextWindow: num(m.context_window_tokens && m.context_window_tokens.dev),
+    // 服务端实测硬限（上面 MEASURED_HARD_CONTEXT）。为 null 表示**没测过**，
+    // 界面应显示「未实测」，而不是拿 contextWindow 充数
+    contextWindowHard: hard ? hard.max : null,
+    contextHardNote: hard ? hard.note : '',
     maxTokens: num(detail.max_tokens),
     promptMaxTokens: num(detail.prompt_max_tokens),
     capability: dc.model_capability || '',
@@ -147,12 +182,14 @@ function cachedModelEntries() {
       return list.map((m) => ({
         id: m.id,
         name: m.name || m.id,
-        contextWindow: m.contextWindow || null,
-        maxContextWindow: m.contextWindow || null,
+        // cc-switch 用这个值决定何时压缩历史：优先给**实测硬限**，
+        // 没测过才退回上游声明值（宁可保守，也不能虚报导致长会话 400）
+        contextWindow: m.contextWindowHard || m.contextWindow || null,
+        maxContextWindow: m.contextWindowHard || m.contextWindow || null,
       }));
     }
   }
   return [{ id: c.DEFAULT_MODEL, name: c.DEFAULT_MODEL, contextWindow: null, maxContextWindow: null }];
 }
 
-module.exports = { fetchModels, listModelIds, cachedModelIds, cachedModelEntries, usableIds, normalize, CACHE_MS };
+module.exports = { fetchModels, listModelIds, cachedModelIds, cachedModelEntries, usableIds, normalize, CACHE_MS, MEASURED_HARD_CONTEXT };
