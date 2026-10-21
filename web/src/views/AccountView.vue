@@ -111,8 +111,10 @@
                   <span class="font-mono text-xs break-all">{{ qw.machineId || '—' }}</span>
                 </a-descriptions-item>
                 <a-descriptions-item label="access token">
-                  <a-tag :color="qw.token.accessExpired ? 'red' : 'green'">
-                    {{ qw.token.accessExpired ? '已过期' : '有效' }}
+                  <!-- access 过期 ≠ 账号失效：refresh 还在就只是「待续期」，
+                       下次请求会自动换票。只有 refresh 也过期才需要重新登录 -->
+                  <a-tag :color="qw.token.refreshExpired ? 'red' : qw.token.accessExpired ? 'orange' : 'green'">
+                    {{ qw.token.refreshExpired ? '需重新登录' : qw.token.accessExpired ? '待续期' : '有效' }}
                   </a-tag>
                   <span class="text-xs text-slate-500 ml-1 num">
                     {{ qw.token.accessExpiresAt ? dateText(qw.token.accessExpiresAt) : '—' }}
