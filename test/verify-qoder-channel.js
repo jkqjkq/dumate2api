@@ -21,6 +21,21 @@ check('未知名字原样透传', () => assert.strictEqual(chat.resolveModelKey(
 check('别名 qwen-max → qmodel_latest', () => assert.strictEqual(chat.resolveModelKey('qwen-max'), 'qmodel_latest'));
 check('空值回落默认 auto', () => assert.strictEqual(chat.resolveModelKey(''), constants.DEFAULT_MODEL));
 
+// 真实模型名解析：上游 key 是内部代号，cc-switch 里填它分不清是哪个模型，
+// 所以 display_name / 归一化写法都要能解析回 key
+const MODELS = [
+  { key: 'gfmodel', name: 'GLM-5.3-Flash' },
+  { key: 'dmodel', name: 'DeepSeek-V4-Pro' },
+  { key: 'kmodel', name: 'Kimi-K2.8-Preview' },
+  { key: 'auto', name: 'Auto' },
+];
+check('真实名 → 内部 key', () => assert.strictEqual(chat.resolveModelKey('qoder/GLM-5.3-Flash', MODELS), 'gfmodel'));
+check('真实名大小写不敏感', () => assert.strictEqual(chat.resolveModelKey('glm-5.3-flash', MODELS), 'gfmodel'));
+check('去掉分隔符也能匹配', () => assert.strictEqual(chat.resolveModelKey('qoder/glm53flash', MODELS), 'gfmodel'));
+check('内部 key 仍可用（旧配置不破坏）', () => assert.strictEqual(chat.resolveModelKey('qoder/gfmodel', MODELS), 'gfmodel'));
+check('相近名字不串档（Pro ≠ Flash）', () => assert.strictEqual(chat.resolveModelKey('qoder/DeepSeek-V4-Pro', MODELS), 'dmodel'));
+check('未知名字仍原样透传', () => assert.strictEqual(chat.resolveModelKey('qoder/nope', MODELS), 'nope'));
+
 console.log('');
 console.log('== 聊天 body 构造 ==');
 const body = JSON.parse(chat.buildBody('gfmodel', {

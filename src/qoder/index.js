@@ -16,8 +16,18 @@ const session = require('./session');
 const constants = require('./constants');
 const { normalizeError } = require('../errtext');
 
-/** 预热：Qoder 无 wasm 依赖，只检查有没有可用账号 */
+/**
+ * 预热：Qoder 无 wasm 依赖，不需要客户端。
+ *
+ * 但**模型表要预热**：runOnce 从同步缓存里取「该模型的最大上下文档位」
+ * （1M），缓存为空时只能回落默认档 200K。这里异步拉一次、不阻塞启动——
+ * 与 TRAE 的 warmupModels 同一思路。
+ */
 function warmup() {
+  try {
+    const a = authStore.preferred();
+    if (a) session.fetchModels(a).catch(() => null);
+  } catch (e) { /* 预热失败不影响启动 */ }
   return status();
 }
 
@@ -78,9 +88,16 @@ async function runOnce(account, payload, onChunk, opts, meter) {
   const auth = await session.ensureAccount(authStore, account);
   const region = constants.normalizeRegion(auth.region);
   const ep = constants.endpointsOf(region);
-  const modelKey = chat.resolveModelKey(payload && payload.model);
-
-  const bodyJson = chat.buildBody(modelKey, payload);
+  // 上下文取该模型的**最大档**（模型表 context_config 的 1M/400K/200K）。
+  // 缓存没预热时回落到默认档（buildBody 的 200000）——这里在热路径上，
+  // 不能为了一个数字再等一次上游请求。DUMATE_QODER_CONTEXT=default 可整体退回默认档。
+  const cachedModels = session.cachedModels(auth) || [];
+  // 模型名解析要拿模型表：调用方写 `qoder/GLM-5.3-Flash`（真实名）或
+  // `qoder/gfmodel`（内部 key）都要认，前者是给人看的
+  const modelKey = chat.resolveModelKey(payload && payload.model, cachedModels);
+  const modelMeta = cachedModels.find((m) => m.key === modelKey);
+  const ctxMax = process.env.DUMATE_QODER_CONTEXT === 'default' ? null : (modelMeta && modelMeta.maxInputTokens);
+  const bodyJson = chat.buildBody(modelKey, payload, { maxInputTokens: ctxMax });
   const encBody = cosy.encode(Buffer.from(bodyJson));
 
   // COSY 会话与账号身份绑定：uid / device_token 都进签名。
@@ -153,7 +170,10 @@ async function runOnce(account, payload, onChunk, opts, meter) {
       if (raw === '[DONE]') continue;
       payloads.push(...chat.unwrap(raw));
     }
-    const out = chat.aggregate(payloads, modelKey);
+    // 响应里的 model 回填**真实名**（GLM-5.3-Flash），不是内部 key：
+    // 流式帧是原样转发上游的（上游恒为 "auto"），非流式这条却会把
+    // gfmodel 这种代号回给客户端，两边观感不一致
+    const out = chat.aggregate(payloads, (modelMeta && modelMeta.name) || modelKey);
     if (out && out.usage) noteCredits(out.usage);
     if (opts && opts.onAccount) { /* 非流式也报一次 */ }
     meter.settle(peakCredits);
@@ -263,10 +283,15 @@ async function listModelEntries() {
         // 顺手告诉 model-info 上游下发的完整表（带倍率），界面据此标「上游下发」
         try { require('../model-info').setQoderModels(r.models); } catch (e) { /* 不影响返回 */ }
         return r.models.map((m) => ({
-          id: `qoder/${m.key}`,
+          // **id 用真实模型名**（GLM-5.3-Flash），不用内部代号（gfmodel）：
+          // cc-switch 里填的是这个字段，代号根本分不清是哪个模型。
+          // 两种写法都能被 resolveModelKey 解析，旧配置不受影响。
+          id: `qoder/${m.name || m.key}`,
           name: m.name || m.key,
-          contextWindow: m.contextWindow || null,
-          maxContextWindow: m.contextWindow || null,
+          // cc-switch 用这个值决定何时压缩历史。给**最大档**而不是默认档：
+          // 上游多数模型挂着 1M 档，声明 180K 会让长会话提前压缩。
+          contextWindow: m.maxInputTokens || m.contextWindow || null,
+          maxContextWindow: m.maxInputTokens || m.contextWindow || null,
         }));
       }
     }

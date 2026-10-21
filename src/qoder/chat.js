@@ -49,13 +49,55 @@ function withAgentDiscipline(system, hasTools) {
   return String(system || '') + AGENT_DISCIPLINE;
 }
 
-function resolveModelKey(name) {
-  const raw = String(name || '').trim() || c.DEFAULT_MODEL;
-  return c.MODEL_ALIASES[raw] || raw;
+/**
+ * 把调用方写的模型名解析成**上游的 model key**。
+ *
+ * 上游的 key 是内部代号（`gfmodel` / `dmodel` / `kmodel`），真实名字在模型表的
+ * `display_name`（GLM-5.3-Flash / DeepSeek-V4-Pro / Kimi-K3）。只认代号时，
+ * 用户在 cc-switch 里看到 `qoder/gfmodel` 根本分不清是哪个模型，所以这里
+ * 三种写法都接受，按优先级匹配：
+ *
+ *   1. 内部 key            qoder/gfmodel
+ *   2. 显示名（忽略大小写） qoder/GLM-5.3-Flash
+ *   3. 去掉分隔符再比       qoder/glm53flash、qoder/DeepSeekV4Pro
+ *
+ * 常量别名表（qwen-max → qmodel_latest）保留在最前面，属于历史兼容。
+ * 匹配不上就原样透传——上游会明确报错，比静默回落到别的模型好。
+ *
+ * @param {string} name 调用方传的名字（可带 qoder/ 前缀）
+ * @param {Array} [models] 模型表（session.cachedModels 的结果）；不传则只走别名
+ */
+function resolveModelKey(name, models) {
+  const raw = String(name || '').trim();
+  const bare = raw.toLowerCase().startsWith('qoder/') ? raw.slice('qoder/'.length).trim() : raw;
+  if (!bare) return c.DEFAULT_MODEL;
+  if (c.MODEL_ALIASES[bare]) return c.MODEL_ALIASES[bare];
+
+  const list = Array.isArray(models) ? models.filter((m) => m && m.key) : [];
+  if (!list.length) return bare;
+
+  const byKey = list.find((m) => m.key === bare);
+  if (byKey) return byKey.key;
+
+  const lower = bare.toLowerCase();
+  const byName = list.find((m) => String(m.name || '').toLowerCase() === lower);
+  if (byName) return byName.key;
+
+  const norm = (x) => String(x || '').toLowerCase().replace(/[\s._\-]+/g, '');
+  const target = norm(bare);
+  const byNorm = list.find((m) => norm(m.name) === target || norm(m.key) === target);
+  if (byNorm) return byNorm.key;
+
+  return bare;
 }
 
 /** 构造上游请求体（OpenAI 形状 → Qoder 形状） */
-function buildBody(modelKey, payload) {
+function buildBody(modelKey, payload, opts = {}) {
+  // 上下文档位：上游同一模型挂着 200K / 400K / 1M 三档（模型表的
+  // context_config），请求体里用 max_input_tokens 指定。默认档只给 180K
+  // 可用输入，所以**默认请求该模型的最大档**（由 index.runOnce 从缓存查出）。
+  // 显式传 opts.maxInputTokens 可以覆盖；DUMATE_QODER_CONTEXT=default 退回默认档。
+  const maxInputTokens = Number(opts.maxInputTokens) > 0 ? Number(opts.maxInputTokens) : 200000;
   const requestId = crypto.randomUUID();
   const sessionId = (payload && payload.session_id) || crypto.randomUUID();
   const messages = (payload && payload.messages) || [];
@@ -121,7 +163,7 @@ function buildBody(modelKey, payload) {
       api_key: '',
       url: '',
       source: 'system',
-      max_input_tokens: 200000,
+      max_input_tokens: maxInputTokens,
     },
     business: {
       product: 'qoder_work',
