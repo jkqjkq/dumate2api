@@ -14,6 +14,11 @@
         <span v-if="twModels.length" class="text-xs text-slate-500 ml-2">
           共 {{ twModels.length }} 个 · 可见 {{ twVisible.length }} 个
         </span>
+        <!-- 上游拉取时间：模型表有 5 分钟缓存，没有这个时间戳就分不清
+             「刷新后还是旧的」到底是缓存命中还是上游没变 -->
+        <span v-if="twFetchedAt" class="text-xs text-slate-400 ml-2">
+          数据时间 {{ fmtFetchedAt(twFetchedAt) }}
+        </span>
       </template>
       <template #extra>
         <a-button size="small" class="ghost-btn" :loading="loading" @click="loadTwModels(true)">
@@ -412,7 +417,7 @@
     </a-card>
 
     <a-card :bordered="false" class="mt-4">
-      <div class="flex items-center justify-between mb-3">
+      <div class="card-head-row">
         <div>
           <span class="section-title">模型映射</span>
         </div>
@@ -476,9 +481,10 @@
       <a-col :span="12">
         <a-card title="上游原生模型" :bordered="false">
           <div class="text-xs text-slate-500 mb-2">
-            上游直接认识的 ID，无需转换。名称错误时上游会返回 404。
+            上游直接认识的 ID，无需转换。上游**没有模型列表接口**，这三个是探测出来的；
+            其余名字（glm-5.2 / glm-5.1 / glm-4.6 等）实测一律 404。
           </div>
-          <a-tag v-for="m in upstreamModels" :key="m" color="green" class="mb-1">{{ m }}</a-tag>
+          <a-tag v-for="m in upstreamModels" :key="m" color="green" class="mb-1">{{ dumateLabel(m) }}</a-tag>
         </a-card>
       </a-col>
       <a-col :span="12">
@@ -486,7 +492,12 @@
           <div class="text-xs text-slate-500 mb-2">
             网关 /v1/models 返回的条目，Codex 与 Claude Code 从这里选模型。
           </div>
-          <a-tag v-for="m in exposed" :key="m" color="blue" class="mb-1">{{ m }}</a-tag>
+          <a-tag v-for="m in exposed" :key="m" color="blue" class="mb-1">
+            {{ dumateLabel(m) }}
+            <!-- 别名要标出实际落到哪个上游模型：不标的话「claude-3-5-sonnet」
+                 看起来像独立模型，实际走的是 model-text -->
+            <span v-if="dumateTarget(m)" class="opacity-70"> → {{ dumateTarget(m) }}</span>
+          </a-tag>
           <div class="text-xs text-slate-400 mt-2">默认回落模型：{{ map?.fallback }}</div>
         </a-card>
       </a-col>
@@ -590,6 +601,15 @@ async function loadQd(force = false) {
 
 // TRAE 模型表与额度
 const twModels = ref<TraeworkModel[]>([])
+// 上游模型表的拉取时间（/traework/models 的 fetchedAt）。缓存命中时是上次
+// 实际拉取的时刻，正好用来判断「刷新有没有真的打到上游」
+const twFetchedAt = ref(0)
+const fmtFetchedAt = (ts: number) => {
+  if (!ts) return ''
+  const d = new Date(ts)
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
+}
 const twError = ref('')
 const twRateNote = ref('')
 // 统一形状的模型信息行（倍率 / 上下文 / 输出上限，字段带来源标记）。
@@ -597,6 +617,23 @@ const twRateNote = ref('')
 const twInfoRows = ref<ModelInfoRow[] | null>(null)
 const qwInfoRows = ref<ModelInfoRow[] | null>(null)
 const dumateInfoRows = ref<ModelInfoRow[] | null>(null)
+
+// 搭子的可读名与别名目标：来自 /models/info?channel=dumate（后端已按
+// modelmap.displayName + 实际 target 给好），这里只做查表——前端不重复维护
+// 一份名字映射，否则改一处漏一处
+const dumateRowById = computed(() => {
+  const m = new Map<string, ModelInfoRow>()
+  for (const r of dumateInfoRows.value || []) m.set(r.id, r)
+  return m
+})
+function dumateLabel(id: string) {
+  const r = dumateRowById.value.get(id)
+  return r && r.name && r.name !== id ? `${r.name}（${id}）` : id
+}
+function dumateTarget(id: string) {
+  const r = dumateRowById.value.get(id)
+  return r && r.target && r.target !== id ? r.target : ''
+}
 // 通道元信息（账号数 / 当前账号 / token 到期）来自 /system/status 的
 // channels.traework——/traework/status 给的是账号数组，没有聚合后的这些字段
 const twStatus = computed(() => channelStore.infos['traework'] || null)
@@ -735,6 +772,7 @@ async function loadTwModels(force = false) {
       .catch(() => ({ data: { rows: [], error: '' } })),
   ])
   twModels.value = m.data.models || []
+  twFetchedAt.value = m.data.fetchedAt || 0
   twError.value = m.data.error || ''
   twRateNote.value = m.data.rateNote || ''
   twRows.value = credits.data.rows || []
@@ -890,48 +928,8 @@ watch(() => channelStore.current, async () => {
 </script>
 
 <style scoped>
-/* 千问积分池：与用量页同一套视觉，密度对齐顶部卡片 */
-.qw-pool {
-  padding: 12px 14px;
-  border: 1px solid var(--lab-border);
-  border-radius: 10px;
-  background: var(--lab-surface-2);
-  height: 100%;
-}
-.qw-pool-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  margin-bottom: 6px;
-}
-.qw-pool-label {
-  font-size: 12px;
-  color: var(--lab-text-sub);
-}
-.qw-pool-value {
-  font-size: 20px;
-  font-weight: 600;
-  color: var(--lab-text);
-  line-height: 1.3;
-}
-.qw-pool-cap {
-  font-size: 12px;
-  font-weight: 400;
-  color: var(--lab-text-mute);
-}
-.qw-pool-sub {
-  margin-top: 4px;
-  font-size: 11px;
-  color: var(--lab-text-mute);
-  line-height: 1.6;
-}
-.qw-mini {
-  font-size: 10px;
-  line-height: 16px;
-  padding: 0 6px;
-  margin: 0;
-}
+/* 千问积分池 .qw-pool 系列已收敛到全局 style.css（用量 / 模型 / 账号三页共用），
+   此处不再重复定义 */
 
 /* 千问通道顶部三联卡（账号 / 套餐 / token 状态） */
 .qw-channel-row {
@@ -941,19 +939,27 @@ watch(() => channelStore.current, async () => {
   margin-bottom: 14px;
 }
 .qw-channel-cell {
-  padding: 10px 14px;
+  padding: 12px 16px;
   border: 1px solid var(--lab-border);
-  border-radius: 10px;
+  border-radius: var(--lab-radius-sm);
   background: var(--lab-surface-2);
+  transition: all 0.2s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.qw-channel-cell:hover {
+  background: var(--lab-surface);
+  border-color: var(--lab-border-strong);
+  box-shadow: var(--lab-shadow-card);
 }
 .cell-label {
   font-size: 11px;
+  font-weight: 500;
   color: var(--lab-text-mute);
-  margin-bottom: 4px;
+  letter-spacing: 0.4px;
+  margin-bottom: 5px;
 }
 .cell-value {
   font-size: 14px;
-  font-weight: 500;
+  font-weight: 600;
   color: var(--lab-text);
 }
 .cell-sub {

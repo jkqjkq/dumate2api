@@ -25,8 +25,14 @@ export interface ModelInfoRow {
   rateDiscounted?: number | null
   memberDiscount?: number | null
   discountMatched?: boolean
-  /** 上下文窗口。拿不到为 null */
+  /** 上下文窗口（上游声明，实际是**客户端压缩阈值**）。拿不到为 null */
   contextWindow: number | null
+  /**
+   * 服务端实测硬限。null = 该模型没测过——不要用 contextWindow 顶替，
+   * 两者在很多模型上差 5 倍（声明 200K / 实测 1M）
+   */
+  contextWindowHard?: number | null
+  contextHardSource?: ModelFieldSource | null
   /** 实测下限（搭子：32K 通过 / 128K 超时，所以给区间而非单值） */
   contextWindowMin: number | null
   contextSource: ModelFieldSource | null

@@ -109,7 +109,22 @@
         </template>
 
         <template v-else-if="column.key === 'ctx'">
-          <template v-if="record.contextWindow">
+          <!-- 实测硬限优先。上游下发的 context_window_tokens 是**客户端压缩阈值**，
+               不是服务端上限：GLM-5.3-Flash / DeepSeek-V4.1-Flash 都声明 200K，
+               实测 1M 输入照样 200。把声明值当上限展示会让人以为只能用 200K。 -->
+          <template v-if="record.contextWindowHard">
+            <div class="num">{{ compactNum(record.contextWindowHard) }}</div>
+            <div class="text-xs text-slate-400">
+              <span class="src-tag">实测</span>
+            </div>
+            <div v-if="record.contextWindow" class="text-xs text-slate-500">
+              上游声明 {{ compactNum(record.contextWindow) }}
+            </div>
+            <a-tooltip v-if="record.contextNote" :title="record.contextNote">
+              <div class="text-xs text-slate-500 ctx-note">实测说明</div>
+            </a-tooltip>
+          </template>
+          <template v-else-if="record.contextWindow">
             <!-- 搭子给的是区间（32K 通过 / 128K 超时），只报单值会让人
                  以为上限真的能用满 -->
             <div class="num">
@@ -120,6 +135,9 @@
             </div>
             <div class="text-xs text-slate-400">
               <span class="src-tag">{{ srcText(record.contextSource) }}</span>
+              <!-- TRAE 的这个值只是压缩阈值。没测过的模型必须标出来，
+                   否则会被读成「上限就是这样」 -->
+              <span v-if="record.channel === 'traework'" class="ml-1">压缩阈值 · 未实测</span>
             </div>
             <a-tooltip v-if="record.contextNote" :title="record.contextNote">
               <div class="text-xs text-slate-500 ctx-note">实测说明</div>
