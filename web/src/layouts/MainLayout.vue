@@ -1,6 +1,6 @@
 <template>
   <a-layout class="min-h-screen lab-shell">
-    <a-layout-sider v-model:collapsed="collapsed" collapsible :width="216" class="lab-sider">
+    <a-layout-sider v-model:collapsed="collapsed" collapsible :width="216" breakpoint="md" class="lab-sider">
       <div class="lab-logo">
         <span class="logo-mark"><AppLogo :size="19" /></span>
         <span v-if="!collapsed" class="logo-text">DuMate<span class="logo-accent">控制台</span></span>
@@ -386,4 +386,22 @@ onMounted(() => { channelStore.load() })
 .lab-content {
   margin: 20px;
 }
+
+/* 窄屏适配：面包屑只留当前页名，避免顶栏溢出 */
+@media (max-width: 900px) {
+  .lab-header {
+    overflow-x: auto;
+  }
+  .crumb-root,
+  .crumb-sep {
+    display: none;
+  }
+}
+
+@media (max-width: 640px) {
+  .lab-content {
+    margin: 12px;
+  }
+}
+
 </style>

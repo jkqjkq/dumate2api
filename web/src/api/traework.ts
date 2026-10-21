@@ -28,6 +28,8 @@ export interface TraeworkAccount {
   credits: number | null
   lastCheckin: number | null
   lastError: string
+  /** lastError 的写入时刻。无错误或旧数据为 null；界面据此判断故障是否已陈旧 */
+  lastErrorAt: number | null
   deviceId: string
   refreshTail: string
   /**
@@ -150,6 +152,7 @@ export interface TraeworkDashAccount {
   lastCheckin: number | null
   checkedInToday: boolean
   lastError: string
+  lastErrorAt: number | null
   refreshTail: string
 }
 

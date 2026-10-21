@@ -1,14 +1,11 @@
 <template>
-  <div class="chatlab">
+  <div class="page chatlab">
     <!-- 顶部标题栏 -->
-    <header class="lab-head">
-      <div class="lab-title">
-        <h2>聊天测试台</h2>
-        <p>
-          走管理端登录态，不经密钥与 IP 管控 · 真实消耗积分，仅管理员可用
-        </p>
-      </div>
-      <a-space :size="8">
+    <PageHeader
+      title="聊天测试台"
+      sub="走管理端登录态，不经密钥与 IP 管控 · 真实消耗积分，仅管理员可用"
+    >
+      <template #actions>
         <a-button size="small" class="ghost-btn" :loading="modelsLoading" @click="refreshModels">
           <template #icon><ReloadOutlined /></template>
           刷新模型
@@ -17,8 +14,8 @@
           <template #icon><DeleteOutlined /></template>
           清空对话
         </a-button>
-      </a-space>
-    </header>
+      </template>
+    </PageHeader>
 
     <!-- 对话主体 -->
     <div class="lab-body">
@@ -57,7 +54,7 @@
                 <button class="reason-toggle" @click="m.showReasoning = !m.showReasoning">
                   <BulbOutlined />
                   思维链
-                  <span class="reason-len">{{ m.reasoning.length }} 字</span>
+                  <span class="reason-len num">{{ m.reasoning.length }} 字</span>
                   <DownOutlined class="reason-arrow" :class="{ open: m.showReasoning }" />
                 </button>
                 <pre v-if="m.showReasoning" class="reason-text">{{ m.reasoning }}</pre>
@@ -79,14 +76,14 @@
 
             <!-- 元信息：实测消耗、账号、token、耗时 -->
             <div v-if="m.role === 'assistant' && !m.streaming" class="meta">
-              <span class="chip chip-cost" :class="{ muted: m.cost === null || m.cost === undefined }">
+              <span class="chip chip-cost num" :class="{ muted: m.cost === null || m.cost === undefined }">
                 <ThunderboltOutlined />
-                <template v-if="m.cost !== null && m.cost !== undefined">{{ m.cost }} 积分</template>
+                <template v-if="m.cost !== null && m.cost !== undefined">{{ m.cost.toLocaleString('zh-CN', { maximumFractionDigits: 6 }) }} 积分</template>
                 <template v-else>{{ m.costNote || '未测到消耗' }}</template>
               </span>
               <span v-if="m.account" class="chip">{{ m.account }}</span>
-              <span v-if="m.usage" class="chip">{{ fmtNum(m.usage.total) }} Token</span>
-              <span v-if="m.ms" class="chip">{{ fmtMs(m.ms) }}</span>
+              <span v-if="m.usage" class="chip num">{{ fmtNum(m.usage.total) }} Token</span>
+              <span v-if="m.ms" class="chip num">{{ fmtMs(m.ms) }}</span>
             </div>
           </div>
         </div>
@@ -125,10 +122,10 @@
           </div>
 
           <div class="bar-right">
-            <span class="hint">共 {{ modelCount }} 个可用模型</span>
+            <span class="hint num">共 {{ modelCount }} 个可用模型</span>
             <span class="hint session-cost">
               本次消耗
-              <b>{{ sessionCost === null ? '—' : sessionCost }}</b>
+              <b class="num">{{ sessionCost === null ? '—' : sessionCost }}</b>
             </span>
             <button
               class="send-btn"
@@ -159,6 +156,7 @@ import {
   ExclamationCircleOutlined, CommentOutlined,
 } from '@ant-design/icons-vue'
 import client from '@/api/client'
+import PageHeader from '@/components/PageHeader.vue'
 import { channelStore, CHANNELS, isDirectChannel } from '@/stores/channel'
 import { qwenworkApi as qwenApi } from '@/api/qwenwork'
 import { traeworkApi } from '@/api/traework'
@@ -427,7 +425,11 @@ async function send() {
         let evt: any
         try { evt = JSON.parse(line.slice(5).trim()) } catch (e) { continue }
         if (evt.type === 'delta') { target.content += evt.text; await scrollToBottom() }
-        else if (evt.type === 'reasoning') { target.reasoning = (target.reasoning || '') + evt.text }
+        else if (evt.type === 'reasoning') {
+          target.reasoning = (target.reasoning || '') + evt.text
+          // 思维链默认折叠：只有用户展开时才跟着滚，否则每帧都强制滚到底
+          if (target.showReasoning) await scrollToBottom()
+        }
         else if (evt.type === 'meta') { target.account = evt.account }
         else if (evt.type === 'usage') { target.usage = evt.usage }
         else if (evt.type === 'error') { target.error = evt.error }
@@ -460,35 +462,10 @@ onMounted(async () => {
 </script>
 
 <style scoped>
-/* 整页铺满内容区：对话要占满高度，输入框贴底 */
+/* 整页铺满内容区：对话要占满高度，输入框贴底。
+   纵向布局与间距由全局 .page（flex + gap）负责，这里只补高度 */
 .chatlab {
-  display: flex;
-  flex-direction: column;
   height: calc(100vh - 96px);
-  gap: 12px;
-}
-
-/* ---------- 顶部 ---------- */
-.lab-head {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 16px;
-  padding-bottom: 2px;
-}
-.lab-title h2 {
-  margin: 0;
-  font-family: var(--lab-display);
-  font-size: 20px;
-  font-weight: 700;
-  color: var(--lab-text);
-  letter-spacing: 0.5px;
-}
-.lab-title p {
-  margin: 5px 0 0;
-  font-size: 12.5px;
-  color: var(--lab-text-mute);
-  line-height: 1.5;
 }
 
 /* ---------- 主体 ---------- */
@@ -664,9 +641,7 @@ onMounted(async () => {
   align-items: center;
   gap: 6px;
   background: var(--lab-danger-dim);
-  border-radius: 0 0 10px 10px;
-  margin: 10px -16px -12px;
-  padding: 8px 16px;
+  border-radius: 10px;
 }
 
 /* 思维链 */
@@ -824,6 +799,10 @@ onMounted(async () => {
   align-items: center;
   gap: 8px;
 }
+/* 通道/模型/模式三个下拉在窄屏放不下时换行，别把右侧按钮挤出去 */
+.bar-left {
+  flex-wrap: wrap;
+}
 .model-select {
   min-width: 240px;
 }
@@ -872,5 +851,20 @@ onMounted(async () => {
   color: var(--lab-text-mute);
   line-height: 1.9;
   opacity: 0.75;
+}
+
+/* 窄屏：模型下拉允许收缩换行，桌面（>=769px）保持 240px 不动 */
+@media (max-width: 768px) {
+  .model-select {
+    flex: 1 1 160px;
+    min-width: 0;
+  }
+}
+
+/* 用户要求减少动效时：只保留静态呈现 */
+@media (prefers-reduced-motion: reduce) {
+  .empty, .msg, .caret, .thinking .dot {
+    animation: none;
+  }
 }
 </style>

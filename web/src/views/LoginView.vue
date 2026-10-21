@@ -93,6 +93,7 @@ async function onSubmit() {
   display: flex;
   align-items: center;
   justify-content: center;
+  padding: 24px 16px;
   background: var(--lab-bg);
   position: relative;
   overflow: hidden;
@@ -164,7 +165,8 @@ async function onSubmit() {
 .login-card {
   position: relative;
   z-index: 1;
-  width: 420px;
+  /* 窄屏留出 16px 边距，卡片不会贴边或被裁 */
+  width: min(420px, calc(100vw - 32px));
   padding: 40px 40px 32px;
   background: rgba(255, 255, 255, 0.94);
   backdrop-filter: blur(20px);
@@ -312,5 +314,14 @@ async function onSubmit() {
   color: var(--lab-text-mute);
   letter-spacing: 0.4px;
   opacity: 0.8;
+}
+
+/* 用户要求减少动效时：辉光漂浮、品牌扫光、卡片入场全部关掉 */
+@media (prefers-reduced-motion: reduce) {
+  .glow,
+  .brand-mark::after,
+  .login-card {
+    animation: none;
+  }
 }
 </style>

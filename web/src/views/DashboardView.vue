@@ -18,7 +18,7 @@
            积分余额）。各通道独有的账（TRAE 的签到、千问的三池）放在下面的
            专有卡片里，不塞进这一排，否则切通道时这排数字含义会变。 -->
       <a-row :gutter="[16, 16]">
-        <a-col :span="5">
+        <a-col :xs="12" :sm="12" :xl="5">
           <a-card :bordered="false" class="h-full">
             <a-statistic title="账号总数" :value="twSummary?.total ?? '—'">
               <template #suffix><span class="text-sm text-slate-400">个</span></template>
@@ -29,9 +29,9 @@
             </div>
           </a-card>
         </a-col>
-        <a-col :span="5">
+        <a-col :xs="12" :sm="12" :xl="5">
           <a-card :bordered="false" class="h-full">
-            <a-statistic title="有效期内" :value="twSummary?.valid ?? '—'" value-style="color:#059669">
+            <a-statistic title="有效期内" :value="twSummary?.valid ?? '—'" value-style="color:var(--lab-ok)">
               <template #suffix><span class="text-sm text-slate-400">个</span></template>
             </a-statistic>
             <div class="text-xs text-slate-500 mt-2">
@@ -43,13 +43,13 @@
             </div>
           </a-card>
         </a-col>
-        <a-col :span="5">
+        <a-col :xs="12" :sm="12" :xl="5">
           <a-card :bordered="false" class="h-full">
             <a-statistic
               title="即将过期积分"
               :value="twExpiringPoints"
               :precision="2"
-              :value-style="twExpiringPoints > 0 ? 'color:#d97706' : ''"
+              :value-style="twExpiringPoints > 0 ? 'color:var(--lab-warn)' : ''"
             />
             <div class="text-xs text-slate-500 mt-2">
               <template v-if="twExpiring.length">
@@ -60,7 +60,7 @@
             </div>
           </a-card>
         </a-col>
-        <a-col :span="5">
+        <a-col :xs="12" :sm="12" :xl="5">
           <a-card :bordered="false" class="h-full">
             <a-statistic title="额度余额" :value="twSummary?.remainTotal ?? '—'" :precision="2" />
             <div class="text-xs text-slate-500 mt-2">
@@ -69,9 +69,9 @@
             </div>
           </a-card>
         </a-col>
-        <a-col :span="4">
+        <a-col :xs="12" :sm="12" :xl="4">
           <a-card :bordered="false" class="h-full">
-            <a-statistic title="今日请求" :value="usage?.cards.today.requests ?? '—'" value-style="color:#0891b2" />
+            <a-statistic title="今日请求" :value="usage?.cards.today.requests ?? '—'" value-style="color:var(--lab-primary)" />
             <div class="text-xs text-slate-500 mt-2">
               <template v-if="usage">{{ compact(usage.cards.today.tokens) }} Token</template>
               <span v-else>—</span>
@@ -89,7 +89,7 @@
         class="mt-4"
       >
         <template #extra>
-          <span class="text-xs text-slate-400">7 天内到期 · 合计 {{ fmt(twExpiringPoints) }}</span>
+          <span class="text-xs text-slate-500">7 天内到期 · 合计 {{ fmt(twExpiringPoints) }}</span>
         </template>
         <a-table
           size="small"
@@ -106,8 +106,8 @@
               <a-tag :color="record.daysLeft <= 3 ? 'red' : 'orange'">{{ record.name }}</a-tag>
             </template>
             <template v-else-if="column.key === 'remain'">
-              <span class="font-medium text-amber-700">{{ fmt(record.remain) }}</span>
-              <span v-if="record.limit" class="text-xs text-slate-400 ml-1">/ {{ fmt(record.limit) }}</span>
+              <span class="font-medium text-amber-700 num">{{ fmt(record.remain) }}</span>
+              <span v-if="record.limit" class="text-xs text-slate-500 ml-1">/ {{ fmt(record.limit) }}</span>
             </template>
             <template v-else-if="column.key === 'expireAt'">
               <span class="text-xs">{{ new Date(record.expireAt).toLocaleString('zh-CN', { hour12: false }) }}</span>
@@ -117,16 +117,16 @@
             </template>
           </template>
         </a-table>
-        <div class="text-xs text-slate-400 mt-2">
+        <div class="text-xs text-slate-500 mt-2">
           这些积分包到期即作废（签到奖励与月度赠送按各自有效期，不累积）。
           已用完的包不计入——到期不构成损失。
         </div>
       </a-card>
 
       <a-row :gutter="[16, 16]" class="mt-4">
-        <a-col :span="17">
+        <a-col :xs="24" :lg="17">
           <a-card title="请求量趋势" :bordered="false" class="h-full">
-            <template #extra><span class="text-xs text-slate-400">按天聚合 · 与搭子仪表盘同口径</span></template>
+            <template #extra><span class="text-xs text-slate-500">按天聚合 · 与搭子仪表盘同口径</span></template>
             <a-empty v-if="!(usage?.daily || []).length" description="还没有 TRAE Work 请求记录" />
             <template v-else>
               <!-- 与搭子一样拆成上下两张共享 X 轴的小图，而不是双 Y 轴：
@@ -142,7 +142,7 @@
             </template>
           </a-card>
         </a-col>
-        <a-col :span="7">
+        <a-col :xs="24" :lg="7">
           <a-card title="通道状态" :bordered="false" class="h-full">
             <a-descriptions :column="1" size="small">
               <a-descriptions-item label="账号">
@@ -186,7 +186,7 @@
         </template>
         <a-empty v-if="!twAccounts.length" description="还没有添加 TRAE Work 账号，到「账号管理」加一个" />
         <a-row v-else :gutter="[16, 16]">
-          <a-col v-for="a in twAccounts" :key="a.id" :span="8">
+          <a-col v-for="a in twAccounts" :key="a.id" :xs="24" :sm="12" :lg="8">
             <div class="account-card">
               <div class="account-card-header">
                 <span class="account-card-name">{{ a.name }}</span>
@@ -234,24 +234,24 @@
            与上面「剩余额度」是两回事，不要相加。 -->
       <a-card title="今日积分明细" :bordered="false" class="mt-4">
         <template #extra>
-          <span class="text-xs text-slate-400">
+          <span class="text-xs text-slate-500">
             最近 {{ twRecords.length }} 条 · 合计 {{ fmt(twWindow.cost) }}
           </span>
         </template>
         <a-row :gutter="[16, 16]" class="mb-3">
-          <a-col :span="6">
+          <a-col :xs="24" :sm="12" :lg="6">
             <a-statistic title="今日消耗" :value="twToday?.cost ?? '—'" :precision="2" />
             <div class="text-xs text-slate-500 mt-1">按相邻账号游标差值算出</div>
           </a-col>
-          <a-col :span="6">
+          <a-col :xs="24" :sm="12" :lg="6">
             <a-statistic title="今日经网关请求" :value="twToday?.requests ?? '—'" />
             <div class="text-xs text-slate-500 mt-1">
               <a-tag v-if="twToday?.concurrent" color="orange" class="mr-1">并发 {{ twToday.concurrent }}</a-tag>
-              仅统计经本网关的请求
+              <span class="text-slate-500">仅统计经本网关的请求</span>
             </div>
           </a-col>
-          <a-col :span="12">
-            <div class="text-xs text-slate-400 leading-relaxed">
+          <a-col :xs="24" :lg="12">
+            <div class="text-xs text-slate-500 leading-relaxed">
               成本来自「同一账号相邻两次累计已消耗的差值」，不是上游账单——
               TRAE 的额度接口只给累计值，没有逐笔流水。
               每账号的第一条没有参照点，如实留空（显示 —）而不是补 0。
@@ -279,20 +279,20 @@
               <span class="font-mono text-xs">{{ record.model || '—' }}</span>
             </template>
             <template v-else-if="column.key === 'cost'">
-              <span v-if="record.cost != null" class="font-medium">{{ fmt(record.cost) }}</span>
+              <span v-if="record.cost != null" class="font-medium num">{{ fmt(record.cost) }}</span>
               <span v-else class="text-slate-400">—</span>
               <a-tooltip v-if="record.cost != null && !record.exact" title="与相邻请求并发，差值可能含其它请求的消耗">
                 <a-tag color="orange" class="ml-1">并发</a-tag>
               </a-tooltip>
             </template>
             <template v-else-if="column.key === 'remain'">
-              <span class="text-xs text-slate-400">
-                <template v-if="record.remain != null">{{ fmt(record.remain) }}</template>
+              <span class="text-xs text-slate-500">
+                <template v-if="record.remain != null"><span class="num">{{ fmt(record.remain) }}</span></template>
                 <template v-else>—</template>
               </span>
             </template>
             <template v-else-if="column.key === 'ms'">
-              <span class="text-xs text-slate-400">{{ record.ms != null ? record.ms + ' ms' : '—' }}</span>
+              <span class="text-xs text-slate-500">{{ record.ms != null ? record.ms + ' ms' : '—' }}</span>
             </template>
           </template>
         </a-table>
@@ -303,7 +303,7 @@
          但额度分两块（签到积分 / 套餐内额度），且不需要客户端 ============ -->
     <template v-else-if="isQd">
       <a-row :gutter="[16, 16]">
-        <a-col :span="4">
+        <a-col :xs="12" :sm="12" :lg="8" :xl="4">
           <a-card :bordered="false" class="h-full">
             <a-statistic title="账号总数" :value="qdSummary?.total ?? '—'">
               <template #suffix><span class="text-sm text-slate-400">个</span></template>
@@ -314,7 +314,7 @@
             </div>
           </a-card>
         </a-col>
-        <a-col :span="4">
+        <a-col :xs="12" :sm="12" :lg="8" :xl="4">
           <a-card :bordered="false" class="h-full">
             <a-statistic title="有效期内" :value="qdValid ?? '—'">
               <template #suffix><span class="text-sm text-slate-400">个</span></template>
@@ -322,45 +322,47 @@
             <div class="text-xs text-slate-500 mt-2">凭证可用</div>
           </a-card>
         </a-col>
-        <a-col :span="4">
+        <a-col :xs="12" :sm="12" :lg="8" :xl="4">
           <a-card :bordered="false" class="h-full">
             <a-statistic
               title="签到积分合计"
-              :value="qdTotals.addOn"
+              :value="qdTotals?.addOn ?? '—'"
               :precision="4"
             />
             <div class="text-xs text-slate-500 mt-2">签到/赠送，免费用户实际可用</div>
           </a-card>
         </a-col>
-        <a-col :span="4">
+        <a-col :xs="12" :sm="12" :lg="8" :xl="4">
           <a-card :bordered="false" class="h-full">
-            <a-statistic title="套餐内额度合计" :value="qdTotals.user" :precision="4" />
+            <a-statistic title="套餐内额度合计" :value="qdTotals?.user ?? '—'" :precision="4" />
             <div class="text-xs text-slate-500 mt-2">订阅套餐内（Free 恒为 0）</div>
           </a-card>
         </a-col>
-        <a-col :span="4">
+        <a-col :xs="12" :sm="12" :lg="8" :xl="4">
           <a-card :bordered="false" class="h-full">
             <a-statistic
               title="即将过期积分"
-              :value="qdCreditsSummary?.expiringAmount ?? 0"
+              :value="qdCreditsSummary?.expiringAmount ?? '—'"
               :precision="4"
-              :value-style="(qdCreditsSummary?.expiringAmount ?? 0) > 0 ? 'color:#d97706' : ''"
+              :value-style="(qdCreditsSummary?.expiringAmount ?? 0) > 0 ? 'color:var(--lab-warn)' : ''"
             />
             <div class="text-xs text-slate-500 mt-2">
               <template v-if="qdCreditsSummary?.expiringCount">
                 {{ qdCreditsSummary.expiringCount }} 个批次 7 天内到期
               </template>
-              <template v-else>暂无即将过期</template>
+              <template v-else-if="qdCreditsSummary">暂无即将过期</template>
+              <span v-else>—</span>
             </div>
           </a-card>
         </a-col>
-        <a-col :span="4">
+        <a-col :xs="12" :sm="12" :lg="8" :xl="4">
           <a-card :bordered="false" class="h-full">
-            <a-statistic title="今日请求" :value="qdToday.requests">
+            <a-statistic title="今日请求" :value="qdToday?.requests ?? '—'">
               <template #suffix><span class="text-sm text-slate-400">次</span></template>
             </a-statistic>
             <div class="text-xs text-slate-500 mt-2">
-              {{ qdToday.tokens }} Token
+              <template v-if="qdToday"><span class="num">{{ qdToday.tokens }}</span> Token</template>
+              <span v-else>—</span>
             </div>
           </a-card>
         </a-col>
@@ -377,7 +379,7 @@
         class="mt-4"
       >
         <template #extra>
-          <span class="text-xs text-slate-400">
+          <span class="text-xs text-slate-500">
             {{ qdGrantsWindowDays }} 天内到期 · {{ qdGrants.length }} 个批次 ·
             领取额合计 {{ qdCreditsSummary?.expiringAmount ?? 0 }}
           </span>
@@ -411,7 +413,7 @@
             </template>
           </template>
         </a-table>
-        <div class="text-xs text-slate-400 mt-2">
+        <div class="text-xs text-slate-500 mt-2">
           Qoder 的签到积分<b>领取后 30 天作废</b>（每日 10:00 UTC+8 刷新领取资格）。
           <b>「领取额」是这批领到的数量，不是剩余量</b>——上游不提供逐批余额，
           实际剩余请看上面的额度卡。
@@ -430,9 +432,9 @@
       <!-- 趋势 + 上游状态。与 TRAE 同一布局（左趋势右状态），
            三条直连通道并排看时位置一致才不会找不着。 -->
       <a-row :gutter="[16, 16]" class="mt-4">
-        <a-col :span="17">
+        <a-col :xs="24" :lg="17">
           <a-card title="近 14 天调用趋势" :bordered="false" class="h-full">
-            <template #extra><span class="text-xs text-slate-400">按天聚合 · 与搭子仪表盘同口径</span></template>
+            <template #extra><span class="text-xs text-slate-500">按天聚合 · 与搭子仪表盘同口径</span></template>
             <a-empty v-if="!qdDaily.length" description="还没有 Qoder 请求记录" />
             <!-- 同样拆成上下两张共享 X 轴的小图而不是双 Y 轴：请求数与 Token
                  量纲不同，共图会凭空造出「此消彼长」的相关性。 -->
@@ -449,7 +451,7 @@
           </a-card>
         </a-col>
 
-        <a-col :span="7">
+        <a-col :xs="24" :lg="7">
           <a-card title="上游状态" :bordered="false" class="h-full">
             <a-descriptions :column="1" size="small">
               <a-descriptions-item label="通道">
@@ -491,13 +493,14 @@
       </a-row>
 
       <!-- 账号健康快照：本地落盘数据，不打上游 -->
-      <a-card title="账号健康快照" :bordered="false" class="mt-4">
-        <template #extra>
-          <a-tag color="green">在线 {{ qdDashAccounts.filter((a) => !a.lastError).length }}</a-tag>
+      <a-card :bordered="false" class="mt-4">
+        <template #title>
+          <span>账号健康快照</span>
+          <a-tag v-if="qdDashAccounts.length" color="green" class="ml-2">在线 {{ qdOnlineCount }}</a-tag>
         </template>
         <a-empty v-if="!qdDashAccounts.length" description="还没有添加 Qoder 账号，到「账号管理」加一个" />
         <a-row v-else :gutter="[16, 16]">
-          <a-col v-for="a in qdDashAccounts" :key="a.id" :span="8">
+          <a-col v-for="a in qdDashAccounts" :key="a.id" :xs="24" :sm="12" :lg="8">
             <div class="account-card">
               <div class="account-card-header">
                 <span class="account-card-name">
@@ -575,7 +578,7 @@
            积分余额）。千问独有的三池放在下面，不塞进这一排——否则切通道时
            这排数字的含义会变。 -->
       <a-row :gutter="[16, 16]">
-        <a-col :span="5">
+        <a-col :xs="12" :sm="12" :xl="5">
           <a-card :bordered="false" class="h-full">
             <a-statistic title="账号总数" :value="qwSummary?.total ?? '—'">
               <template #suffix><span class="text-sm text-slate-400">个</span></template>
@@ -588,9 +591,9 @@
             </div>
           </a-card>
         </a-col>
-        <a-col :span="5">
+        <a-col :xs="12" :sm="12" :xl="5">
           <a-card :bordered="false" class="h-full">
-            <a-statistic title="有效期内" :value="qwSummary?.valid ?? '—'" value-style="color:#059669">
+            <a-statistic title="有效期内" :value="qwSummary?.valid ?? '—'" value-style="color:var(--lab-ok)">
               <template #suffix><span class="text-sm text-slate-400">个</span></template>
             </a-statistic>
             <div class="text-xs text-slate-500 mt-2">
@@ -601,13 +604,13 @@
             </div>
           </a-card>
         </a-col>
-        <a-col :span="5">
+        <a-col :xs="12" :sm="12" :xl="5">
           <a-card :bordered="false" class="h-full">
             <a-statistic
               title="即将过期积分"
               :value="qwSummary?.expiringSoonPoints ?? '—'"
               :precision="4"
-              :value-style="(qwSummary?.expiringSoonPoints ?? 0) > 0 ? 'color:#d97706' : ''"
+              :value-style="(qwSummary?.expiringSoonPoints ?? 0) > 0 ? 'color:var(--lab-warn)' : ''"
             />
             <div class="text-xs text-slate-500 mt-2">
               <template v-if="qwSummary?.expiringSoon">
@@ -618,7 +621,7 @@
             </div>
           </a-card>
         </a-col>
-        <a-col :span="5">
+        <a-col :xs="12" :sm="12" :xl="5">
           <a-card :bordered="false" class="h-full">
             <a-statistic title="积分余额" :value="qwSummary?.pointsTotal ?? '—'" :precision="2" />
             <div class="text-xs text-slate-500 mt-2">
@@ -629,9 +632,9 @@
             </div>
           </a-card>
         </a-col>
-        <a-col :span="4">
+        <a-col :xs="12" :sm="12" :xl="4">
           <a-card :bordered="false" class="h-full">
-            <a-statistic title="今日请求" :value="usage?.cards.today.requests ?? '—'" value-style="color:#0891b2" />
+            <a-statistic title="今日请求" :value="usage?.cards.today.requests ?? '—'" value-style="color:var(--lab-primary)" />
             <div class="text-xs text-slate-500 mt-2">
               <template v-if="usage">{{ compact(usage.cards.today.tokens) }} Token</template>
               <span v-else>—</span>
@@ -651,7 +654,7 @@
         class="mt-4"
       >
         <template #extra>
-          <span class="text-xs text-slate-400">
+          <span class="text-xs text-slate-500">
             {{ qwExpiringRows.length }} 笔 · 合计 {{ fmtQw(qwSummary?.expiringSoonPoints ?? 0) }}
           </span>
         </template>
@@ -670,7 +673,7 @@
               <a-tag :color="record.daysLeft <= 3 ? 'red' : 'orange'">{{ record.name }}</a-tag>
             </template>
             <template v-else-if="column.key === 'remain'">
-              <span class="font-medium text-amber-700">{{ fmtQw(record.remain) }}</span>
+              <span class="font-medium text-amber-700 num">{{ fmtQw(record.remain) }}</span>
             </template>
             <template v-else-if="column.key === 'expireAt'">
               <span class="text-xs">{{ new Date(record.expireAt).toLocaleString('zh-CN', { hour12: false }) }}</span>
@@ -680,7 +683,7 @@
             </template>
           </template>
         </a-table>
-        <div class="text-xs text-slate-400 mt-2">
+        <div class="text-xs text-slate-500 mt-2">
           这些是上游标记「即将过期」的付费积分，到期即作废。
           每日免费额度不在此列——它每天 00:00 重置，不是损失。
         </div>
@@ -690,10 +693,10 @@
            不能合并成一张「付费额度」卡。**余额是全账号合计**——每个账号各有
            一份每日免费额度，两账号各 100 就是 200。与顶部「积分余额」同源。 -->
       <a-row :gutter="[16, 16]">
-        <a-col v-for="w in qwWallets" :key="w.id" :span="6">
+        <a-col v-for="w in qwWallets" :key="w.id" :xs="12" :sm="12" :lg="6" :xl="6">
           <a-card :bordered="false" class="h-full">
             <a-statistic :title="w.label" :value="w.balance ?? '—'" :precision="2"
-              :value-style="w.kind === 'free' && (w.balance ?? 0) < 20 ? 'color:#d97706' : ''">
+              :value-style="w.kind === 'free' && (w.balance ?? 0) < 20 ? 'color:var(--lab-warn)' : ''">
               <template #suffix><span class="text-sm text-slate-400">积分</span></template>
             </a-statistic>
             <div class="text-xs text-slate-500 mt-2">
@@ -749,7 +752,7 @@
           </a-card>
         </a-col>
 
-        <a-col :span="6">
+        <a-col :xs="12" :sm="12" :lg="6" :xl="6">
           <a-card :bordered="false" class="h-full">
             <a-statistic title="经本网关消耗" :value="qw?.today.total ?? '—'" :precision="4" />
             <div class="text-xs text-slate-500 mt-2">
@@ -761,7 +764,7 @@
               </template>
               <span v-else>—</span>
             </div>
-            <div v-if="qw?.today.scope === 'gateway'" class="text-xs text-slate-400 mt-1">
+            <div v-if="qw?.today.scope === 'gateway'" class="text-xs text-slate-500 mt-1">
               仅统计经本网关的请求；客户端/网页里的对话不计入
             </div>
           </a-card>
@@ -769,9 +772,9 @@
       </a-row>
 
       <a-row :gutter="[16, 16]" class="mt-4">
-        <a-col :span="17">
+        <a-col :xs="24" :lg="17">
           <a-card title="用量趋势" :bordered="false" class="h-full">
-            <template #extra><span class="text-xs text-slate-400">按天聚合 · 积分免费/付费分开</span></template>
+            <template #extra><span class="text-xs text-slate-500">按天聚合 · 积分免费/付费分开</span></template>
             <a-empty v-if="!qwDaily.length" description="还没有归因记录" />
             <template v-else>
               <div ref="qwChartEl" class="qw-chart" />
@@ -784,7 +787,7 @@
             </template>
           </a-card>
         </a-col>
-        <a-col :span="7">
+        <a-col :xs="24" :lg="7">
           <a-card title="通道状态" :bordered="false" class="h-full">
             <a-descriptions :column="1" size="small">
               <a-descriptions-item label="状态">
@@ -834,7 +837,7 @@
         </template>
         <a-empty v-if="!qwAccounts.length" description="还没有添加千问账号，到「账号管理」加一个" />
         <a-row v-else :gutter="[16, 16]">
-          <a-col v-for="a in qwAccounts" :key="a.id" :span="8">
+          <a-col v-for="a in qwAccounts" :key="a.id" :xs="24" :sm="12" :lg="8">
             <div class="account-card">
               <div class="account-card-header">
                 <span class="account-card-name">
@@ -895,16 +898,16 @@
            额度还是付费额度，是本通道最要紧的一件事。 -->
       <a-card title="今日积分明细" :bordered="false" class="mt-4">
         <template #extra>
-          <span class="text-xs text-slate-400">
+          <span class="text-xs text-slate-500">
             最近 {{ qwRecords.length }} 条 · 合计 {{ fmtQw(qwWindow.total) }}
           </span>
         </template>
         <a-row :gutter="[16, 16]" class="mb-3">
-          <a-col :span="6">
+          <a-col :xs="24" :sm="12" :lg="6">
             <a-statistic title="今日消耗（经网关）" :value="fmtQw(qw?.today.total ?? 0)" />
             <div class="text-xs text-slate-500 mt-1">{{ qw?.today.requests ?? 0 }} 次请求</div>
           </a-col>
-          <a-col :span="6">
+          <a-col :xs="24" :sm="12" :lg="6">
             <a-statistic title="免费 / 付费" :value="`${fmtQw(qw?.today.free ?? 0)} / ${fmtQw(qw?.today.paid ?? 0)}`" />
             <div class="text-xs text-slate-500 mt-1">
               <a-tag :color="(qw?.today.paid ?? 0) > 0 ? 'orange' : 'green'" class="mr-1">
@@ -912,8 +915,8 @@
               </a-tag>
             </div>
           </a-col>
-          <a-col :span="12">
-            <div class="text-xs text-slate-400 leading-relaxed">
+          <a-col :xs="24" :lg="12">
+            <div class="text-xs text-slate-500 leading-relaxed">
               仅统计经本网关的请求——在千问客户端 / 网页里直接对话的部分不计入。
               「今日全部消耗」在上面的额度卡里（由上限减余额得出），
               两套口径<b>不要相加</b>。
@@ -942,19 +945,19 @@
               </a-tag>
             </template>
             <template v-else-if="column.key === 'free'">
-              <span class="text-cyan-700">{{ fmtQw(record.free) }}</span>
+              <span class="text-cyan-700 num">{{ fmtQw(record.free) }}</span>
             </template>
             <template v-else-if="column.key === 'paid'">
-              <span class="text-blue-600">{{ fmtQw(record.paid) }}</span>
+              <span class="text-blue-600 num">{{ fmtQw(record.paid) }}</span>
             </template>
             <template v-else-if="column.key === 'total'">
-              <span class="font-medium">{{ fmtQw(record.total) }}</span>
+              <span class="font-medium num">{{ fmtQw(record.total) }}</span>
               <a-tooltip v-if="record.concurrent" title="与相邻请求并发，差值可能含其它请求的消耗">
                 <a-tag color="orange" class="ml-1">并发</a-tag>
               </a-tooltip>
             </template>
             <template v-else-if="column.key === 'ms'">
-              <span class="text-xs text-slate-400">{{ record.ms != null ? record.ms + ' ms' : '—' }}</span>
+              <span class="text-xs text-slate-500">{{ record.ms != null ? record.ms + ' ms' : '—' }}</span>
             </template>
           </template>
         </a-table>
@@ -965,7 +968,7 @@
     <template v-else>
     <!-- 顶部指标卡：数据来自 /web-accounts/dashboard（账号池）+ /stats（用量） -->
     <a-row :gutter="[16, 16]">
-      <a-col :span="5">
+      <a-col :xs="12" :sm="12" :xl="5">
         <a-card :bordered="false" class="h-full">
           <a-statistic title="账号总数" :value="dash?.summary.total ?? '—'">
             <template #suffix><span class="text-sm text-slate-400">个</span></template>
@@ -979,9 +982,9 @@
         </a-card>
       </a-col>
 
-      <a-col :span="5">
+      <a-col :xs="12" :sm="12" :xl="5">
         <a-card :bordered="false" class="h-full">
-          <a-statistic title="有效期内" :value="dash?.summary.valid ?? '—'" value-style="color:#059669">
+          <a-statistic title="有效期内" :value="dash?.summary.valid ?? '—'" value-style="color:var(--lab-ok)">
             <template #suffix><span class="text-sm text-slate-400">个</span></template>
           </a-statistic>
           <div class="text-xs text-slate-500 mt-2">
@@ -993,13 +996,13 @@
         </a-card>
       </a-col>
 
-      <a-col :span="5">
+      <a-col :xs="12" :sm="12" :xl="5">
         <a-card :bordered="false" class="h-full">
           <a-statistic
             title="即将过期积分"
             :value="dash?.summary.expiring_points ?? '—'"
             :precision="2"
-            :value-style="(dash?.summary.expiring_points ?? 0) > 0 ? 'color:#d97706' : ''"
+            :value-style="(dash?.summary.expiring_points ?? 0) > 0 ? 'color:var(--lab-warn)' : ''"
           />
           <div class="text-xs text-slate-500 mt-2">
             <template v-if="dashExpiringRows.length">
@@ -1013,7 +1016,7 @@
         </a-card>
       </a-col>
 
-      <a-col :span="5">
+      <a-col :xs="12" :sm="12" :xl="5">
         <a-card :bordered="false" class="h-full">
           <a-statistic title="积分余额" :value="dash ? dash.summary.points_left : '—'" :precision="2" />
           <div class="text-xs text-slate-500 mt-2">
@@ -1028,9 +1031,9 @@
         </a-card>
       </a-col>
 
-      <a-col :span="4">
+      <a-col :xs="12" :sm="12" :xl="4">
         <a-card :bordered="false" class="h-full">
-          <a-statistic title="今日 Token" :value="todayTokensText" value-style="color:#0891b2" />
+          <a-statistic title="今日 Token" :value="todayTokensText" value-style="color:var(--lab-primary)" />
           <div class="text-xs text-slate-500 mt-2">
             <template v-if="stats">{{ stats.today.requests }} 次请求</template>
             <span v-else>—</span>
@@ -1050,7 +1053,7 @@
       class="mt-4"
     >
       <template #extra>
-        <span class="text-xs text-slate-400">
+        <span class="text-xs text-slate-500">
           {{ dash?.summary.expiring_days }} 天内到期 · 合计 {{ fmt(dash?.summary.expiring_points ?? 0) }}
         </span>
       </template>
@@ -1069,7 +1072,7 @@
             <span class="text-xs">{{ record.date }}</span>
           </template>
           <template v-else-if="column.key === 'points'">
-            <span class="font-medium text-amber-700">{{ fmt(record.points) }}</span>
+            <span class="font-medium text-amber-700 num">{{ fmt(record.points) }}</span>
             <span class="text-xs text-slate-400 ml-1">（{{ record.count }} 个包）</span>
           </template>
           <template v-else-if="column.key === 'sources'">
@@ -1080,7 +1083,7 @@
           </template>
         </template>
       </a-table>
-      <div class="text-xs text-slate-400 mt-2">
+      <div class="text-xs text-slate-500 mt-2">
         这些积分包到期即作废（签到赠送、成长计划奖励按各自有效期，不累积）。
         已用完的包不计入——到期不构成损失。
       </div>
@@ -1088,7 +1091,7 @@
 
     <!-- 趋势 + 上游状态 -->
     <a-row :gutter="[16, 16]" class="mt-4">
-      <a-col :span="17">
+      <a-col :xs="24" :lg="17">
         <a-card title="近 14 天调用趋势" :bordered="false" class="h-full">
           <a-empty v-if="!daily.length" description="还没有请求记录" />
           <!-- 请求数与 Token 拆成上下两张共享 X 轴的小图，而不是叠在一张图上用双 Y 轴：
@@ -1107,7 +1110,7 @@
         </a-card>
       </a-col>
 
-      <a-col :span="7">
+      <a-col :xs="24" :lg="7">
         <a-card title="上游状态" :bordered="false" class="h-full">
           <a-descriptions :column="1" size="small">
             <a-descriptions-item label="网关">
@@ -1151,7 +1154,7 @@
       </template>
       <a-empty v-if="!dash?.accounts.length" description="还没有添加账号" />
       <a-row v-else :gutter="[16, 16]">
-        <a-col v-for="a in dash.accounts" :key="a.id" :span="8">
+        <a-col v-for="a in dash.accounts" :key="a.id" :xs="24" :sm="12" :lg="8">
           <div class="account-card">
             <div class="account-card-header">
               <span class="account-card-name">{{ a.name }}</span>
@@ -1186,20 +1189,20 @@
 
     <!-- 用量与账号状态明细 -->
     <a-row :gutter="[16, 16]" class="mt-4">
-      <a-col :span="12">
+      <a-col :xs="24" :lg="12">
         <a-card title="今日用量" :bordered="false">
           <!-- 与千问/TRAE 用同一个组件：同一组指标（含成功率、首字延迟、
                流式占比）。此前这里用 stats/summary，缺那三项，切通道时
                指标会变——对齐后三处一致。 -->
           <TodayUsageCard :today="usage?.cards.today" />
-          <div v-if="stats" class="text-xs text-slate-400 mt-2">
+          <div v-if="stats" class="text-xs text-slate-500 mt-2">
             累计 {{ stats.days }} 天：{{ fmt(stats.total.total_tokens) }} tokens
             / {{ stats.total.requests }} 次
           </div>
         </a-card>
       </a-col>
 
-      <a-col :span="12">
+      <a-col :xs="24" :lg="12">
         <a-card title="本地代理账号" :bordered="false">
           <a-table
             size="small"
@@ -1321,12 +1324,20 @@ const qdSummary = ref<{ total: number; enabled: number; refreshExpired: number; 
 // 额度来自 /qoder/credits（打上游）。**两份额度分开合计，不能相加**：
 // addOn 是签到/赠送（免费用户实际可用），user 是订阅套餐内（Free 恒为 0）。
 const qdCreditRows = ref<QoderCreditRow[]>([])
+// 「查过没有」的标志：credits 接口还没回来（或失败）时，合计应显示 — 而不是 0
+// ——0 会被读成「账号里一分签到积分都没有」。
+const qdCreditsLoaded = ref(false)
 const qdTotals = computed(() => {
+  if (!qdCreditsLoaded.value) return null
   let addOn = 0, user = 0
+  let known = 0
   for (const r of qdCreditRows.value) {
-    if (r.addOnQuota) addOn += r.addOnQuota.remaining || 0
-    if (r.userQuota) user += r.userQuota.remaining || 0
+    if (r.addOnQuota) { addOn += r.addOnQuota.remaining || 0; known++ }
+    if (r.userQuota) { user += r.userQuota.remaining || 0; known++ }
   }
+  // 有账号行但两池全都取不到（上游失败时后端给 null，不补 0）：
+  // 合计显示 —，不拿 0 充数（0 会被读成「一分签到积分都没有」）。
+  if (qdCreditRows.value.length && !known) return null
   return { addOn, user }
 })
 const qdValid = computed(() => qdSummary.value
@@ -1337,8 +1348,8 @@ const qdCreditsSummary = ref<{
   addOnTotal: number; userTotal: number; exceeded: number
   expiringCount: number; expiringAmount: number
 } | null>(null)
-// 今日用量取当前通道的埋点（与其它通道同源）
-const qdToday = computed(() => usage.value?.cards?.today || { requests: 0, tokens: 0 })
+// 今日用量取当前通道的埋点（与其它通道同源）。未拉到时显示 —，不用 0 充数
+const qdToday = computed(() => usage.value?.cards?.today || null)
 // 趋势数据：/usage/overview?days=14&channel=qoder 已在 refreshQd 里拉了，
 // 这里只是把 daily 取出来。与 TRAE 同源同口径（按天聚合请求数与 Token）。
 const qdDaily = computed(() => usage.value?.daily || [])
@@ -1383,8 +1394,11 @@ function qdHealthColor(id: number) {
   // 签到积分是**会过期**的（30 天），所以低余额标红——不像 TRAE 只是补充
   if (pct <= 0.1) return 'bg-red-400'
   if (pct <= 0.3) return 'bg-orange-400'
-  return 'bg-cyan-400'
+  return 'bg-green-500'
 }
+// 在线判定与其他三通道同口径：无新鲜错误、未待重登、且未停用
+const qdOnlineCount = computed(() =>
+  qdDashAccounts.value.filter((a) => !errFresh(a) && !a.refreshExpired && a.enabled).length)
 // 该账号最早到期的批次（返回归一化对象，daysLeft 保证是数字）
 const qdGrantOf = (id: number): { daysLeft: number; expiresAt: number } | null => {
   const list = qdGrants.value.filter((g) => g.accountId === id)
@@ -1783,7 +1797,9 @@ async function refreshQd() {
       // 账号健康快照：本地落盘，不打上游
       qoderApi.dashboard().catch(() => ({ data: { accounts: [], summary: null } })),
       // 额度：打上游。两份额度分开合计，不合并
-      qoderApi.credits().catch(() => ({ data: { rows: [] } })),
+      // 失败返回 null（不是空 rows）：下面的 loaded 只在真拿到数据时才置 true，
+      // 否则失败会被渲染成「合计 0.0000」，与「缺失显示 —」的口径相反。
+      qoderApi.credits().catch(() => null),
       // 积分过期明细：本地账本，不打上游
       qoderApi.grants(30).catch(() => ({ data: { rows: [], windowDays: 30 } })),
       // 今日用量：与其它通道同一数据源
@@ -1791,9 +1807,16 @@ async function refreshQd() {
     ])
     qdDashAccounts.value = (d.data.accounts || []) as QoderDashboardAccount[]
     qdSummary.value = d.data.summary || null
-    qdCreditRows.value = (c.data.rows || []) as QoderCreditRow[]
-    // 过期批次数与领取额合计来自 credits 的 summary（dashboard 的 summary 里没有）
-    qdCreditsSummary.value = (c.data as any).summary || null
+    if (c) {
+      qdCreditRows.value = (c.data.rows || []) as QoderCreditRow[]
+      qdCreditsLoaded.value = true
+      // 过期批次数与领取额合计来自 credits 的 summary（dashboard 的 summary 里没有）
+      qdCreditsSummary.value = (c.data as any).summary || null
+    } else {
+      qdCreditRows.value = []
+      qdCreditsLoaded.value = false
+      qdCreditsSummary.value = null
+    }
     qdGrants.value = (g.data.rows || []) as QoderGrant[]
     qdGrantsWindowDays.value = g.data.windowDays || 30
     usage.value = u.data
@@ -2080,12 +2103,6 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
-/* TRAE 的趋势图：单张，比搭子的两联图高一些——它只画一条线，
-   给足高度才能看出起伏 */
-.dash-chart {
-  height: 260px;
-  width: 100%;
-}
 .qw-chart {
   height: 260px;
   width: 100%;

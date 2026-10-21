@@ -33,7 +33,7 @@
 
       <template v-if="qw?.ok">
         <a-row :gutter="[16, 16]" class="mt-4">
-          <a-col :span="8">
+          <a-col :span="8" :xs="24" :sm="8">
             <a-card :bordered="false" class="h-full">
               <a-statistic title="登录账号" :value="qw.account?.name || '—'" />
               <div class="text-xs text-slate-500 mt-2">
@@ -42,7 +42,7 @@
               </div>
             </a-card>
           </a-col>
-          <a-col :span="8">
+          <a-col :span="8" :xs="24" :sm="8">
             <a-card :bordered="false" class="h-full">
               <a-statistic title="套餐" :value="qw.account?.tier || '—'" />
               <div class="text-xs text-slate-500 mt-2">
@@ -51,7 +51,7 @@
               </div>
             </a-card>
           </a-col>
-          <a-col :span="8">
+          <a-col :span="8" :xs="24" :sm="8">
             <a-card :bordered="false" class="h-full">
               <a-statistic
                 title="登录态"
@@ -67,7 +67,7 @@
         </a-row>
 
         <a-row :gutter="[16, 16]" class="mt-4">
-          <a-col :span="12">
+          <a-col :span="12" :xs="24" :sm="12">
             <a-card title="账号信息" :bordered="false" class="h-full">
               <a-descriptions :column="1" size="small" bordered>
                 <a-descriptions-item label="显示名">
@@ -95,17 +95,17 @@
             </a-card>
           </a-col>
 
-          <a-col :span="12">
+          <a-col :span="12" :xs="24" :sm="12">
             <a-card title="登录凭证" :bordered="false" class="h-full">
               <a-descriptions :column="1" size="small" bordered>
                 <a-descriptions-item label="登录态文件">
                   <span class="break-all text-xs">{{ qw.file || '—' }}</span>
                 </a-descriptions-item>
                 <a-descriptions-item label="文件大小">
-                  {{ qw.fileStat ? qw.fileStat.size + ' 字节' : '—' }}
+                  <span class="num">{{ qw.fileStat ? qw.fileStat.size + ' 字节' : '—' }}</span>
                 </a-descriptions-item>
                 <a-descriptions-item label="最后更新">
-                  {{ qw.fileStat ? dateText(qw.fileStat.mtime) : '—' }}
+                  <span class="num">{{ qw.fileStat ? dateText(qw.fileStat.mtime) : '—' }}</span>
                 </a-descriptions-item>
                 <a-descriptions-item label="机器码">
                   <span class="font-mono text-xs break-all">{{ qw.machineId || '—' }}</span>
@@ -114,7 +114,7 @@
                   <a-tag :color="qw.token.accessExpired ? 'red' : 'green'">
                     {{ qw.token.accessExpired ? '已过期' : '有效' }}
                   </a-tag>
-                  <span class="text-xs text-slate-500 ml-1">
+                  <span class="text-xs text-slate-500 ml-1 num">
                     {{ qw.token.accessExpiresAt ? dateText(qw.token.accessExpiresAt) : '—' }}
                   </span>
                 </a-descriptions-item>
@@ -122,7 +122,7 @@
                   <a-tag :color="qw.token.refreshExpired ? 'red' : 'green'">
                     {{ qw.token.refreshExpired ? '已过期' : '有效' }}
                   </a-tag>
-                  <span class="text-xs text-slate-500 ml-1">
+                  <span class="text-xs text-slate-500 ml-1 num">
                     {{ qw.token.refreshExpiresAt ? dateText(qw.token.refreshExpiresAt) : '—' }}
                   </span>
                 </a-descriptions-item>
@@ -144,13 +144,13 @@
             千问办公按「页面数 / 月请求数 / 流量」限额，与积分是两套计量
           </div>
           <a-row :gutter="[16, 16]">
-            <a-col :span="8">
+            <a-col :span="8" :xs="24" :sm="8">
               <div class="qw-pool">
                 <div class="qw-pool-label">页面数</div>
                 <div class="qw-pool-value num">{{ qw.account.entitlements.pageQuota ?? '—' }}</div>
               </div>
             </a-col>
-            <a-col :span="8">
+            <a-col :span="8" :xs="24" :sm="8">
               <div class="qw-pool">
                 <div class="qw-pool-label">月请求数</div>
                 <div class="qw-pool-value num">
@@ -159,7 +159,7 @@
                 </div>
               </div>
             </a-col>
-            <a-col :span="8">
+            <a-col :span="8" :xs="24" :sm="8">
               <div class="qw-pool">
                 <div class="qw-pool-label">月流量</div>
                 <div class="qw-pool-value num">{{ qw.account.entitlements.monthTraffic || '—' }}</div>
@@ -180,7 +180,7 @@
       </a-alert>
 
       <a-row :gutter="[16, 16]">
-        <a-col :span="8">
+        <a-col :span="8" :xs="24" :sm="8">
           <a-card :bordered="false">
             <a-statistic title="客户端版本" :value="data?.version?.file_version || '未知'" />
             <div class="text-xs text-slate-500 mt-2">
@@ -191,7 +191,7 @@
             </div>
           </a-card>
         </a-col>
-        <a-col :span="8">
+        <a-col :span="8" :xs="24" :sm="8">
           <a-card :bordered="false">
             <a-statistic title="登录账号" :value="activeAccount?.name || '未登录'" />
             <div class="text-xs text-slate-500 mt-2">
@@ -202,7 +202,7 @@
             </div>
           </a-card>
         </a-col>
-        <a-col :span="8">
+        <a-col :span="8" :xs="24" :sm="8">
           <a-card :bordered="false">
             <a-statistic
               title="后端进程"
@@ -221,7 +221,7 @@
       </a-row>
 
       <a-row :gutter="[16, 16]" class="mt-4">
-        <a-col :span="12">
+        <a-col :span="12" :xs="24" :sm="12">
           <a-card title="登录态" :bordered="false">
             <a-empty v-if="!data?.login.ok" :description="data?.login.reason || '读取失败'" />
             <template v-else>
@@ -230,10 +230,10 @@
                   <span class="break-all text-xs">{{ data.login.file }}</span>
                 </a-descriptions-item>
                 <a-descriptions-item label="文件大小">
-                  {{ data.login.file_stat?.size ?? '—' }} 字节
+                  <span class="num">{{ data.login.file_stat?.size ?? '—' }} 字节</span>
                 </a-descriptions-item>
                 <a-descriptions-item label="最后更新">
-                  {{ data.login.file_stat ? dateText(data.login.file_stat.mtime) : '—' }}
+                  <span class="num">{{ data.login.file_stat ? dateText(data.login.file_stat.mtime) : '—' }}</span>
                 </a-descriptions-item>
                 <a-descriptions-item label="当前凭证">
                   <a-tag :color="data.login.has_top_level_cookies ? 'green' : 'red'">
@@ -255,7 +255,7 @@
           </a-card>
         </a-col>
 
-        <a-col :span="12">
+        <a-col :span="12" :xs="24" :sm="12">
           <a-card title="账号列表" :bordered="false">
             <a-empty v-if="!data?.login.accounts?.length" description="没有已登录的账号" />
             <a-table
@@ -280,8 +280,8 @@
                   <a-tag v-if="record.active" color="blue">当前</a-tag>
                 </template>
                 <template v-else-if="column.key === 'last'">
-                  {{ record.last_login ? dateText(record.last_login) : '—' }}
-                  <span v-if="record.age_days !== null" class="text-xs text-slate-400 ml-1">
+                  <span class="num">{{ record.last_login ? dateText(record.last_login) : '—' }}</span>
+                  <span v-if="record.age_days !== null" class="text-xs text-slate-400 ml-1 num">
                     ({{ record.age_days }} 天前)
                   </span>
                 </template>
@@ -314,7 +314,7 @@
               </a-tag>
             </template>
             <template v-else-if="column.key === 'size'">
-              <span class="text-slate-500">
+              <span class="text-slate-500 num">
                 {{ record.kind === 'file' && record.size !== null ? record.size + ' 字节' : '—' }}
               </span>
             </template>
@@ -395,10 +395,10 @@ const tokenStateText = computed(() => {
 })
 const tokenStateColor = computed(() => {
   const t = qw.value?.token
-  if (!t) return '#94a3b8'
-  if (t.refreshExpired) return '#dc2626'
-  if (t.accessExpired) return '#d97706'
-  return '#059669'
+  if (!t) return 'var(--lab-text-mute)'
+  if (t.refreshExpired) return 'var(--lab-danger)'
+  if (t.accessExpired) return 'var(--lab-warn)'
+  return 'var(--lab-ok)'
 })
 
 async function load() {

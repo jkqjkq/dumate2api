@@ -22,13 +22,15 @@
   --lab-surface: #ffffff;
   --lab-surface-2: #f7f9fc;
   --lab-surface-3: #eff2f7;
+  --lab-surface-hover: #eef2f7;
 
   --lab-border: #e2e7ee;
   --lab-border-strong: #ccd4df;
 
   --lab-text: #1a2332;
   --lab-text-sub: #4e5f75;
-  --lab-text-mute: #8494a9;
+  /* 白底对比 4.76:1（WCAG AA 正文标准），与 --lab-text-sub #4e5f75 层级仍拉开 */
+  --lab-text-mute: #64748b;
 
   /* 信号色：整站唯一强调色，用在选中态、主按钮、关键数值。
      浅底上用 cyan-600（#0891b2）——亮青 #22d3ee 在白底上对比不足 */
@@ -43,6 +45,10 @@
   --lab-warn-dim: rgba(217, 119, 6, 0.08);
   --lab-danger: #dc2626;
   --lab-danger-dim: rgba(220, 38, 38, 0.08);
+  /* sky 蓝为信息/序列/付费区分色，非漂移，不要收敛成主色青 */
+  --lab-info: #0284c7;
+  --lab-info-dim: rgba(2, 132, 199, 0.07);
+  --lab-info-line: rgba(2, 132, 199, 0.28);
 
   --lab-radius: 14px;
   --lab-radius-sm: 10px;
@@ -50,7 +56,9 @@
   --lab-shadow-hover: 0 2px 4px rgba(16, 24, 40, 0.05), 0 12px 32px rgba(16, 24, 40, 0.10);
   --lab-shadow-card: 0 1px 3px rgba(16, 24, 40, 0.03), 0 2px 8px rgba(16, 24, 40, 0.04);
 
-  --lab-mono: 'JetBrains Mono', 'Cascadia Mono', 'SF Mono', Consolas, 'Liberation Mono', monospace;
+  /* 仅系统字体，无网络字体 */
+  --lab-mono: Consolas, 'Liberation Mono', monospace;
+  /* 仅系统字体，无网络字体 */
   --lab-display: 'Bahnschrift', 'DIN Alternate', 'Segoe UI Variable Display', sans-serif;
 }
 
@@ -64,7 +72,7 @@ body,
 body {
   background: var(--lab-bg);
   color: var(--lab-text);
-  font-family: 'Inter Tight', -apple-system, BlinkMacSystemFont, 'Segoe UI',
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI',
     'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Helvetica Neue', Helvetica, Arial, sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
@@ -82,7 +90,7 @@ body::before {
   pointer-events: none;
   background-image:
     radial-gradient(1200px 560px at 6% -6%, rgba(8, 145, 178, 0.07), transparent 65%),
-    radial-gradient(1000px 500px at 98% -2%, rgba(2, 132, 199, 0.05), transparent 62%),
+    radial-gradient(1000px 500px at 98% -2%, rgba(8, 145, 178, 0.05), transparent 62%),
     radial-gradient(800px 400px at 50% 100%, rgba(8, 145, 178, 0.02), transparent 55%),
     linear-gradient(rgba(15, 23, 42, 0.018) 1px, transparent 1px),
     linear-gradient(90deg, rgba(15, 23, 42, 0.018) 1px, transparent 1px);
@@ -191,10 +199,11 @@ body::before {
   transition: background 0.15s ease;
 }
 .ant-table-tbody > tr:nth-child(even) > td {
+  /* 字面量：极淡 slate 底，只此一处用 rgba 字面值，归属 token 体系的 slate 底层（slate-900 按 1.2% 透明度） */
   background: rgba(15, 23, 42, 0.012);
 }
 .ant-table-tbody > tr:hover > td {
-  background: #eef2f7 !important;
+  background: var(--lab-surface-hover) !important;
 }
 .ant-table-tbody > tr.row-selected > td {
   background: var(--lab-primary-dim) !important;

@@ -88,15 +88,15 @@
               </div>
               <div>
                 <div class="text-xs text-slate-400">积分余额</div>
-                <div>{{ a.points ? fmt(a.points.left) : '—' }}</div>
+                <div class="num">{{ a.points ? fmt(a.points.left) : '—' }}</div>
               </div>
               <div>
                 <div class="text-xs text-slate-400">本月已签</div>
-                <div>{{ a.checkin.sign_in_days?.length ?? '—' }} 天</div>
+                <div class="num">{{ a.checkin.sign_in_days?.length ?? '—' }} 天</div>
               </div>
               <div>
                 <div class="text-xs text-slate-400">抽奖次数</div>
-                <div>{{ a.lottery.remaining ?? '—' }}</div>
+                <div class="num">{{ a.lottery.remaining ?? '—' }}</div>
               </div>
             </div>
 
@@ -152,7 +152,7 @@
         </template>
       </a-alert>
 
-      <div class="flex items-center justify-between mb-3 p-3 bg-slate-50 rounded">
+      <div class="poll-bar flex items-center justify-between mb-3 p-3 rounded">
         <div>
           <div class="text-sm">
             <span class="font-medium">后台自动轮询</span>
@@ -227,8 +227,8 @@
             </div>
           </template>
           <template v-else-if="column.key === 'draw'">
-            <div>{{ record.draw_remaining ?? '—' }} 次</div>
-            <div class="text-xs text-slate-400">奖品 {{ record.my_prizes ?? '—' }} 个</div>
+            <div class="num">{{ record.draw_remaining ?? '—' }} 次</div>
+            <div class="text-xs text-slate-400 num">奖品 {{ record.my_prizes ?? '—' }} 个</div>
           </template>
         </template>
       </a-table>
@@ -440,7 +440,7 @@
 
           <a-descriptions title="积分" :column="2" size="small" bordered class="mb-4">
             <a-descriptions-item label="可用余额">
-              {{ detail.points.left ?? '—' }}
+              <span class="num">{{ detail.points.left ?? '—' }}</span>
             </a-descriptions-item>
             <a-descriptions-item label="累计总量">
               {{ detail.points.total ?? '—' }}
@@ -495,13 +495,16 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import PageHeader from '@/components/PageHeader.vue'
-import { message } from 'ant-design-vue'
+import { App } from 'ant-design-vue'
 import client from '@/api/client'
 import { channelStore, isTraework, isQwenwork, isQoder } from '@/stores/channel'
 import TraeworkAccounts from '@/components/traework/TraeworkAccounts.vue'
 import QwenworkAccounts from '@/components/qwenwork/QwenworkAccounts.vue'
 import QoderAccounts from '@/components/qoder/QoderAccounts.vue'
 import type { WebAccount, AccountStatus, PoolData, PoolAccount } from '@/api/webaccounts'
+
+// message 走 App.useApp() 的实例（App.vue 已包 <a-app>），静态 import 拿不到上下文
+const { message } = App.useApp()
 
 // 三条通道三种账号形态：搭子是网页凭证池、千问与 TRAE 都是凭证自持可增删。
 // 后两者的数据由各自的子组件自己拉（字段与搭子不同），这里只做分支。
@@ -928,4 +931,9 @@ watch(() => channelStore.current, async () => {
 
 <style scoped>
 /* 千问账号卡里的积分池小卡 .qw-pool 已收敛到全局 style.css */
+.poll-bar {
+  background: var(--lab-surface-2);
+  border: 1px solid var(--lab-border);
+  border-radius: var(--lab-radius-sm);
+}
 </style>

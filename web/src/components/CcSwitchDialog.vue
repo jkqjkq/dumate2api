@@ -7,9 +7,13 @@
 -->
 <script setup lang="ts">
 import { ref, computed, h } from 'vue'
-import { message, Modal } from 'ant-design-vue'
+import { App } from 'ant-design-vue'
 import { CHANNELS } from '@/stores/channel'
 import { ccswitchApi, type CcPreview, type CcApplyResult, type CcOpenResult } from '@/api/ccswitch'
+
+// 走 App.useApp() 取上下文实例：静态 import 的 message/Modal 拿不到 ConfigProvider
+// 的 token 与主题，浮层会退回默认亮色样式（与整站深色/浅色控制台不一致）
+const { message, modal } = App.useApp()
 
 const open = ref(false)
 const channel = ref('dumate')
@@ -160,7 +164,7 @@ function confirmApply(): Promise<boolean> {
     '但它只在启动时读库，所以新供应商要重启它才会出现在列表里。',
   ]
   return new Promise((resolve) => {
-    Modal.confirm({
+    modal.confirm({
       title: '确认添加到 cc-switch',
       content: h('div', { style: 'white-space:pre-line;font-size:13px;line-height:1.7' }, lines.join('\n')),
       okText: '确认写入',
@@ -225,7 +229,13 @@ defineExpose({ openDialog })
 </script>
 
 <template>
-  <a-modal v-model:open="open" title="配置到 cc-switch" width="980px" :footer="null" destroy-on-close>
+  <a-modal
+    v-model:open="open"
+    title="配置到 cc-switch"
+    :width="'min(980px, calc(100vw - 32px))'"
+    :footer="null"
+    destroy-on-close
+  >
     <!-- 顶部工具条：独占一行并带下分隔线，避免和下方内容糊在一起 -->
     <div class="cc-toolbar">
       <a-space wrap size="middle">
@@ -474,7 +484,8 @@ defineExpose({ openDialog })
    （放在数值右侧会和数字连成串，读成「256000 上游」） */
 .cc-metrics {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  /* 宽度不够时自动降列，而不是把三张卡挤成窄条 */
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
   gap: 12px;
 }
 .cc-metric {

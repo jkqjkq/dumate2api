@@ -48,19 +48,21 @@
     <a-card :bordered="false">
       <div class="flex items-center justify-between mb-3">
         <div>
-          <span class="font-medium">账号列表</span>
-          <span class="text-slate-500 text-sm ml-2">
+          <span class="section-title">账号列表</span>
+          <span class="hint-text ml-2">
             共 {{ rows.length }} 个 · 启用 {{ enabledCount }} 个
           </span>
         </div>
       </div>
 
-      <a-empty v-if="!rows.length" description="还没有 TRAE Work 账号">
+      <a-empty v-if="!rows.length && !loading" description="还没有 TRAE Work 账号">
         <a-button type="primary" @click="openLogin">添加第一个账号</a-button>
       </a-empty>
 
+      <a-skeleton v-if="loading && !rows.length" active :paragraph="{ rows: 4 }" />
+
       <a-row v-else :gutter="[16, 16]">
-        <a-col v-for="a in rows" :key="a.id" :span="8">
+        <a-col v-for="a in rows" :key="a.id" :span="8" :xs="24" :md="8">
           <a-card size="small" :bordered="true" class="h-full">
             <div class="flex items-start justify-between">
               <div class="min-w-0">
@@ -87,8 +89,8 @@
 
             <a-alert
               v-if="a.lastError"
-              type="error"
-              :message="a.lastError"
+              :type="errFresh(a) ? 'error' : 'warning'"
+              :message="errorWhen(errAt(a)) + a.lastError"
               show-icon
               class="mt-2"
               style="padding: 4px 8px"
@@ -128,7 +130,9 @@
 
             <div class="mt-3 flex flex-wrap gap-1">
               <a-button size="small" :loading="busy[a.id]" @click="checkin(a)">签到</a-button>
-              <a-button size="small" :loading="busy[a.id]" @click="remove(a)">删除</a-button>
+              <a-popconfirm title="确定删除这个账号？" @confirm="remove(a)">
+                <a-button size="small" danger>删除</a-button>
+              </a-popconfirm>
             </div>
 
             <div class="mt-2 text-xs text-slate-400 font-mono break-all">
@@ -239,11 +243,15 @@
 
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from 'vue'
-import { message } from 'ant-design-vue'
+import { App } from 'ant-design-vue'
 import PageHeader from '@/components/PageHeader.vue'
 import { channelStore, isTraework } from '@/stores/channel'
 import { traeworkApi } from '@/api/traework'
 import type { TraeworkAccount, TraeworkCreditRow, TraeworkStatus } from '@/api/traework'
+import { lastErrorFresh, errorWhen } from '@/utils/lastError'
+
+// message 走 App.useApp() 的实例（App.vue 已包 <a-app>），静态 import 拿不到上下文
+const { message } = App.useApp()
 
 const status = ref<TraeworkStatus | null>(null)
 const credits = ref<{ count: number; rows: TraeworkCreditRow[] } | null>(null)
@@ -330,6 +338,11 @@ function tokenExpired(a: TraeworkAccount) {
 }
 
 const dateText = (ts: number) => new Date(ts).toLocaleString('zh-CN', { hour12: false })
+
+// lastError 只在换票/请求成功时才清空，会停在旧错误上。新鲜度判定收敛到
+// utils/lastError.ts（无时间戳的旧数据一律当陈旧，不当成当前故障）。
+const errAt = (a: TraeworkAccount) => a.lastErrorAt ?? null
+const errFresh = (a: TraeworkAccount) => lastErrorFresh(a)
 
 async function load() {
   loading.value = true

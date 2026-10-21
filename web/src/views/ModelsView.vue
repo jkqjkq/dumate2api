@@ -30,7 +30,7 @@
       <div v-if="twStatus" class="qw-channel-row">
         <div class="qw-channel-cell">
           <div class="cell-label">可用账号</div>
-          <div class="cell-value">{{ twStatus.accounts ?? '—' }}</div>
+          <div class="cell-value num">{{ twStatus.accounts ?? '—' }}</div>
         </div>
         <div class="qw-channel-cell">
           <div class="cell-label">当前账号</div>
@@ -60,11 +60,11 @@
 
     <!-- TRAE 的额度：与千问的三个池子不同，这里是每个账号独立的一份 credits，
          签到领取。放在模型页是因为「这个模型花什么」和「还剩多少」是同一问题的两面 -->
-    <a-card v-if="isTw" title="TRAE Work 额度" :bordered="false" class="mt-4">
+    <a-card v-if="isTw" title="TRAE Work 额度" :bordered="false">
       <a-empty v-if="!twRows.length" description="还没有 TRAE Work 账号" />
       <template v-else>
         <a-row :gutter="[16, 16]">
-          <a-col :span="12">
+          <a-col :xs="24" :sm="12" :lg="12">
             <div class="qw-pool">
               <div class="qw-pool-head">
                 <span class="qw-pool-label">剩余额度合计</span>
@@ -76,7 +76,7 @@
               <div class="qw-pool-sub">按账号独立计算，不共享</div>
             </div>
           </a-col>
-          <a-col :span="12">
+          <a-col :xs="24" :sm="12" :lg="12">
             <div class="qw-pool">
               <div class="qw-pool-head">
                 <span class="qw-pool-label">今日已签到</span>
@@ -148,14 +148,14 @@
               <div v-if="record.usage" class="qw-model-usage">
                 <span class="font-medium num">{{ record.usage.requests }}</span>
                 <span class="text-xs text-slate-400 ml-1">次</span>
-                <div class="text-xs text-slate-400">
+                <div class="text-xs text-slate-500">
                   免费 {{ fmtQw(record.usage.free) }} · 付费 {{ fmtQw(record.usage.paid) }} 积分
                 </div>
               </div>
               <span v-else class="text-xs text-slate-400">—</span>
             </template>
             <template v-else-if="column.key === 'last'">
-              <span v-if="record.last" class="text-xs">{{ fmtTime(record.last) }}</span>
+              <span v-if="record.last" class="text-xs num">{{ fmtTime(record.last) }}</span>
               <span v-else class="text-xs text-slate-400">—</span>
             </template>
           </template>
@@ -170,7 +170,7 @@
 
     <!-- 千问模型信息：上下文 / 输出上限。**没有倍率**——千问按积分池计费，
          本地拿不到单价，如实显示「无此数据」 -->
-    <a-card v-if="isQw" :bordered="false" class="mt-4">
+    <a-card v-if="isQw" :bordered="false">
       <template #title>
         <span class="section-title">模型信息</span>
         <a-tag class="ml-2" color="cyan">只读</a-tag>
@@ -181,11 +181,11 @@
     <!-- 千问办公的积分池：这条通道的模型消耗走这里的额度，
          与搭子的积分是两套账。放在模型页是因为「这个模型要花什么」
          和「还剩多少」是同一个问题的两面。 -->
-    <a-card v-if="isQw" title="千问办公积分" :bordered="false" class="mt-4">
+    <a-card v-if="isQw" title="千问办公积分" :bordered="false">
       <a-empty v-if="!qw?.ok" :description="qw?.error || '取不到千问积分'" />
       <template v-else>
         <a-row :gutter="[16, 16]">
-          <a-col v-for="w in qw.wallets" :key="w.id" :span="6">
+          <a-col v-for="w in qw.wallets" :key="w.id" :xs="24" :sm="12" :lg="6">
             <div class="qw-pool">
               <div class="qw-pool-head">
                 <span class="qw-pool-label">{{ w.label }}</span>
@@ -208,7 +208,7 @@
               </div>
             </div>
           </a-col>
-          <a-col :span="6">
+          <a-col :xs="24" :sm="12" :lg="6">
             <div class="qw-pool">
               <div class="qw-pool-head">
                 <span class="qw-pool-label">今日消耗</span>
@@ -243,7 +243,7 @@
       <div v-if="qdStatus" class="qw-channel-row">
         <div class="qw-channel-cell">
           <div class="cell-label">可用账号</div>
-          <div class="cell-value">{{ qdStatus.accounts ?? '—' }}</div>
+          <div class="cell-value num">{{ qdStatus.accounts ?? '—' }}</div>
         </div>
         <div class="qw-channel-cell">
           <div class="cell-label">当前账号</div>
@@ -272,24 +272,24 @@
       <div class="text-xs text-slate-500 mt-3">
         调用时用前缀名（如 <span class="font-mono">qoder/gfmodel</span>）；不带前缀的名字一律走搭子。
         <span class="text-amber-700">倍率是相对值（上游 price_factor），实际扣费 = 倍率 × 用量；开发调试请挑「省额度」的 0.1 档。</span>
-        <span class="text-slate-400">倍率为 0 的是错峰/免费模型，旁边并列显示原价——0 表示当前不扣费，不是「这个模型不要钱」。</span>
+        <span class="text-slate-500">倍率为 0 的是错峰/免费模型，旁边并列显示原价——0 表示当前不扣费，不是「这个模型不要钱」。</span>
       </div>
     </a-card>
 
     <!-- Qoder 的额度：userQuota（订阅内）与 addOnQuota（签到/赠送）**分开显示**，
          不能相加——Free 套餐的 userQuota 恒为 0，免费用户实际能用的就是 addOnQuota -->
-    <a-card v-if="isQd" title="Qoder 额度" :bordered="false" class="mt-4">
+    <a-card v-if="isQd" title="Qoder 额度" :bordered="false">
       <a-empty v-if="!qdCredits.length" description="还没有 Qoder 账号" />
       <template v-else>
         <a-row :gutter="[16, 16]">
-          <a-col :span="12">
+          <a-col :xs="24" :sm="12" :lg="12">
             <div class="qw-pool">
               <div class="qw-pool-head"><span class="qw-pool-label">签到积分合计</span></div>
               <div class="qw-pool-value num text-cyan-700">{{ fmtQw(qdTotals.addOn) }}</div>
               <div class="qw-pool-sub">签到/赠送得到，免费用户实际可用</div>
             </div>
           </a-col>
-          <a-col :span="12">
+          <a-col :xs="24" :sm="12" :lg="12">
             <div class="qw-pool">
               <div class="qw-pool-head"><span class="qw-pool-label">套餐内额度合计</span></div>
               <div class="qw-pool-value num">{{ fmtQw(qdTotals.user) }}</div>
@@ -312,7 +312,7 @@
       <div class="qw-channel-cell">
         <div class="cell-label">上游端口</div>
         <div class="cell-value">
-          {{ dumateMeta.port ?? '—' }}
+          <span class="num">{{ dumateMeta.port ?? '—' }}</span>
           <a-tag v-if="dumateMeta.managed" color="blue" class="ml-1">自建</a-tag>
         </div>
       </div>
@@ -369,11 +369,11 @@
 
     <!-- 搭子的积分：与 TRAE 的额度卡同构，回答「这些模型花的是哪份额度」。
          与千问的三池、TRAE 的 credits 是三套账，数字不能相加 -->
-    <a-card title="搭子积分" :bordered="false" class="mt-4">
+    <a-card title="搭子积分" :bordered="false">
       <a-empty v-if="!dumatePoints" description="取不到搭子积分" />
       <template v-else>
         <a-row :gutter="[16, 16]">
-          <a-col :span="8">
+          <a-col :xs="24" :sm="12" :lg="8">
             <div class="qw-pool">
               <div class="qw-pool-head">
                 <span class="qw-pool-label">可用余额</span>
@@ -386,7 +386,7 @@
               <div class="qw-pool-sub">已用 {{ fmtQw(dumatePoints.used) }}</div>
             </div>
           </a-col>
-          <a-col :span="8">
+          <a-col :xs="24" :sm="12" :lg="8">
             <div class="qw-pool">
               <div class="qw-pool-head">
                 <span class="qw-pool-label">额度包</span>
@@ -395,7 +395,7 @@
               <div class="qw-pool-sub">订阅 + 增量包</div>
             </div>
           </a-col>
-          <a-col :span="8">
+          <a-col :xs="24" :sm="12" :lg="8">
             <div class="qw-pool">
               <div class="qw-pool-head">
                 <span class="qw-pool-label">今日消耗</span>
@@ -416,7 +416,7 @@
       </template>
     </a-card>
 
-    <a-card :bordered="false" class="mt-4">
+    <a-card :bordered="false">
       <div class="card-head-row">
         <div>
           <span class="section-title">模型映射</span>
@@ -477,17 +477,17 @@
       </a-table>
     </a-card>
 
-    <a-row :gutter="[16, 16]" class="mt-4">
-      <a-col :span="12">
+    <a-row :gutter="[16, 16]">
+      <a-col :xs="24" :sm="12" :lg="12">
         <a-card title="上游原生模型" :bordered="false">
           <div class="text-xs text-slate-500 mb-2">
-            上游直接认识的 ID，无需转换。上游**没有模型列表接口**，这三个是探测出来的；
+            上游直接认识的 ID，无需转换。上游<b>没有模型列表接口</b>，这三个是探测出来的；
             其余名字（glm-5.2 / glm-5.1 / glm-4.6 等）实测一律 404。
           </div>
           <a-tag v-for="m in upstreamModels" :key="m" color="green" class="mb-1">{{ dumateLabel(m) }}</a-tag>
         </a-card>
       </a-col>
-      <a-col :span="12">
+      <a-col :xs="24" :sm="12" :lg="12">
         <a-card title="对外暴露给客户端" :bordered="false">
           <div class="text-xs text-slate-500 mb-2">
             网关 /v1/models 返回的条目，Codex 与 Claude Code 从这里选模型。
@@ -498,12 +498,12 @@
                  看起来像独立模型，实际走的是 model-text -->
             <span v-if="dumateTarget(m)" class="opacity-70"> → {{ dumateTarget(m) }}</span>
           </a-tag>
-          <div class="text-xs text-slate-400 mt-2">默认回落模型：{{ map?.fallback }}</div>
+          <div class="text-xs text-slate-500 mt-2">默认回落模型：{{ map?.fallback }}</div>
         </a-card>
       </a-col>
     </a-row>
 
-    <a-card title="网关实际返回" :bordered="false" class="mt-4">
+    <a-card title="网关实际返回" :bordered="false">
       <div class="flex items-center justify-between mb-2">
         <span class="text-xs text-slate-500">直接读取网关的 /v1/models，确认改动已生效</span>
         <a-button size="small" :loading="loadingGateway" @click="loadGateway">刷新</a-button>
@@ -938,6 +938,11 @@ watch(() => channelStore.current, async () => {
   gap: 10px;
   margin-bottom: 14px;
 }
+@media (max-width: 640px) {
+  .qw-channel-row {
+    grid-template-columns: 1fr;
+  }
+}
 .qw-channel-cell {
   padding: 12px 16px;
   border: 1px solid var(--lab-border);
@@ -970,58 +975,6 @@ watch(() => channelStore.current, async () => {
 }
 .qw-model-usage {
   font-size: 13px;
-  color: var(--lab-text);
-}
-
-/* ---------- TRAE 模型表：倍率排名 ---------- */
-
-/* 位次徽标。前三名给强调色——「哪个最贵」是这张表的首要问题 */
-.rank-badge {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 22px;
-  height: 22px;
-  padding: 0 6px;
-  border-radius: 7px;
-  background: var(--lab-surface-3);
-  color: var(--lab-text-sub);
-  font-family: var(--lab-mono);
-  font-size: 11.5px;
-  font-variant-numeric: tabular-nums;
-}
-.rank-badge.rank-top {
-  background: var(--lab-primary-dim);
-  color: var(--lab-primary);
-  font-weight: 600;
-}
-
-/* 倍率条：长度表达相对高低，数字给出精确值——两者都要，
-   只有条读不出具体数值，只有数字则要逐行比较 */
-.rate-cell {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.rate-bar-wrap {
-  flex: 1;
-  min-width: 40px;
-  height: 6px;
-  border-radius: 3px;
-  background: var(--lab-surface-3);
-  overflow: hidden;
-}
-.rate-bar {
-  height: 100%;
-  border-radius: 3px;
-  transition: width 0.3s cubic-bezier(0.22, 1, 0.36, 1);
-}
-.rate-bar.rate-high { background: var(--lab-danger); }
-.rate-bar.rate-mid { background: var(--lab-warn); }
-.rate-bar.rate-low { background: var(--lab-ok); }
-.rate-num {
-  flex: none;
-  font-size: 12.5px;
   color: var(--lab-text);
 }
 </style>
