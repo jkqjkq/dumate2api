@@ -1,125 +1,111 @@
 快照指纹 sha256（stable/src 下 47 个 .js，按路径+内容计算）：
-d0223393293bd191dd83a47fc10990166956aae1427f00daa7971b6d664a4a29
+c7a3c0599590ee8e4f368d8d5550f5f1a3fab1d2c4c10c03bb5d83d9e14bb1c2
 
 指纹算法：
   对 stable/src 下所有 .js 文件，按相对路径排序（`/` 分隔），
   拼接 [相对路径 + LF + 文件内容]，以 UTF-8 编码后取 sha256。
-  本次已用该算法复算两遍，结果一致。
+  本次已复算两遍，结果一致。
 
-  **关于历史值的说明**：本文件早先记过 f7e7a810…、96a22d7c…、8548df35…
-  三个值，**均无法复现**。2026-10-03 同步时按上面这个算法对**旧快照内容**
-  实算，得到 395350d0… 而非记录的 8548df35…；又试了 6 种变体仍无匹配。
-  说明那三个值在写入时就与任何一致算法不符（不是编码/换行问题）。
-  本次起，值由上面算法实算得出，可核对。
+来源：main 分支提交 132e744（merge(dev)：流式 usage 帧与首字耗时埋点补齐）
+  本批改动同步时已合并进 main，快照文件随后以 chore(stable) 单独提交。
 
-来源：main 分支提交 49697a8
-  （本轮改动**同步时尚未提交**，故指纹先于提交号定稿；提交后回写此处。）
+文件数：47 → 47（无新增、无删除）。内容变更 14 个，+393 / −74。
 
-文件数变化：45 → 47。新增两个（`cosy.js`、`qwenwork/cosy-sign.js`），无删除。
+本次同步的改动（按影响面排序）：
 
-本次同步的改动（7 个文件，按影响面排序）：
+  server.js —— 两处：
+    (1) **流式 usage 帧在四个协议入口统一注入**。云端网关
+        dumate-svc.baidu.com 只在被显式要求时才在流尾补 usage 帧，而
+        stream_options.include_usage 此前只写在 handleAnthropicMessages，
+        于是网页凭证链路上「请求全 200、token 全记 0」。现补齐
+        handleOpenAIChat / handleOpenAIResponses / handleGoogleGenerateContent。
+        注入点必须在 `if (target.direct) return ...` **之后**——直连通道
+        （千问/TRAE/Qoder）的 buildBody 不认识该字段。
+    (2) **搭子凭证来源默认改为网页池**（router.dumateSource() 返回 web）。
+        桌面链路只在 DUMATE_DUMATE_SOURCE=auto 时作为备用参与。网页池
+        不可用时给出明确原因，不静默退回桌面凭证。余额游标丢失账号的问题
+        一并修掉（points-cursor）。
 
-  cosy.js（新增）—— **COSY 协议签名算法本体，千问与 Qoder 共用一份**。
-    抽出来的理由：两个产品是**同一套协议栈**——同一个 client_id
-    （e883ade2-e6e3-4d6d-adf7-f92ceff5fdcb）、同一个聊天路径
-    （/algo/api/v2/service/pro/sse/agent_chat_generation）、同一套 Encode=1
-    自定义 base64、连服务端公钥都是同一把。算法复制两份必然漂移，
-    而这里漂移的代价极高（下面 encode 那个 O(n²) 性能修复就是踩过一次的坑）。
-    含 encode / aesEncrypt / rsaEncrypt / md5hex / newSession /
-    buildPayloadB64 / signRequest / composeBearer / sortedJson。
+  reqlog.js —— markFirstToken 从 server.js 私有函数改为此处导出。
+    三个协议翻译器（Responses / Anthropic / Google）手里也有 res，此前拿不到
+    这个函数，导致 /v1/responses 与 /v1/messages 的流式请求一条
+    first_token_ms 都记不下来（实测 dumate /v1/responses 1295 条全为 0，
+    而直连通道 1987/1987 正常）。口径统一为「首个上游字节到达」，
+    不用翻译器自造的 response.created / message_start 计时。
 
-  qwenwork/cosy-sign.js（新增）—— **千问的纯本地签名，不再需要官方 wasm**。
-    原实现只有 wasm 一条路，理由是「本地自实现的编码会被服务端拒
-    （400 Invalid agent chat JSON body）」——那是 2026-09-23 的结论，
-    当时还没有 cosy.js（Qoder 通道 10-02 才接入，其算法与参考实现逐字节
-    比对过 22 项测试向量）。两个产品既然同协议栈，那份算法直接适用于千问，
-    差异只有 cosyVersion（1.1.52 vs 1.0.10）与几个客户端身份头。
-    实测：用本模块签名 → gateway.qwenwork.cn 返回 200、19 帧正常出流、
-    正文 "OK"、finish_reason=stop、usage 完整；工具调用也正常
-    （finish_reason=tool_calls，参数完整）。
-    **顺带解决两件事**：(1) 客户端卸载后通道不再直接死（wasm 是客户端
-    二进制资产，随卸载消失——用户 2026-10-14 卸载千问办公后即遇到）；
-    (2) 不再每请求 spawn 一个 Node 子进程跑 wasm（原实现用 execFileSync
-    **阻塞整个事件循环**几百毫秒，qwenwork/index.js 里专门为它设了
-    MAX_ATTEMPTS=3 上限）。本地签名是微秒级纯计算。
-    官方 wasm 保留为退路：`DUMATE_QWENWORK_USE_WASM=1`。
+  responses.js / google.js —— 翻译器的 upstreamRes.on('data') 首句调用
+    markFirstToken(res)，与透传分支同一口径。
 
-  qwenwork/bridge.js —— 签名路由：本地优先，wasm 可选。
-    `prepareInfer()` 接口不变（上层 qwenwork/index.js 零改动）；
-    新增 `useWasm()` / `signer()` 供 /health 与日志如实上报签名方式。
+  fallback-web.js —— 头注释重写：网页凭证**不缺**协议能力（它被包装成伪上游
+    响应后由四个处理器原样复用，responses / count_tokens / 前缀分流都照常），
+    真正没有 responses 的是 9084 那条独立链路 web-gateway.js。旧注释会让人
+    把两件事读混。
 
-  qwenwork/index.js —— `status()` 上报实际签名方式（新增 `signer` 字段）。
-    **本地签名模式下不再探测 wasm 文件**——它没有任何外部依赖，
-    探测只会让「没装客户端」被误报成通道故障。
+  upstream-router.js —— availability('dumate') 新增 web 分支：该通道可用性
+    即「网页池里有没有可用账号」。四个协议入口都走这个函数，一处覆盖全部。
 
-  server.js —— 三处：
-    (1) 千问启动日志与 /health 如实上报签名方式（原来是硬编码的 'ready'，
-        那是 wasm 单路径时代的写法）；
-    (2) **搭子凭证来源开关 `DUMATE_DUMATE_SOURCE=web`**：显式只用网页凭证，
-        跳过整个桌面链路（含启动那次约 3 秒的 PowerShell 探测）。
-        启动时间实测 3.1s → 0.1s。池子不可用时由路由层给出明确原因，
-        且**不静默退回桌面链路**（用户明确要求走 web，偷偷换凭证来源
-        等于瞒着他）。/health 的 dumate 段新增 `source`，`ready` 语义随模式变。
-    (3) 回落路径的流式转发修复（上一版已同步，此处一并记录）：
-        OpenAI 直通分支原先无条件 `upstreamRes.pipe(res)`，而回落返回的是
-        **伪上游响应**（EventEmitter，没有 pipe），抛未捕获的 TypeError
-        **打挂整个网关进程**。改为 canPipe 判断——真响应走 pipe（保留背压），
-        伪响应走事件转发并在 'end' 里自己收尾。
+  modelmap.js —— /v1/models 只列上游真实模型（model-text /
+    model-artifact-validate / glm-5）。claude-* 与 gpt-4o 是客户端协议名，
+    别名映射保留、仍可传，但不再出现在可选模型清单里（否则 cc-switch 会把
+    它们显示成独立模型）。新增 MODEL_NAMES / displayName()，中文名明确标注
+    为本地标注而非上游元信息。
 
-  upstream-router.js —— `availability('dumate')` 新增分支：web 模式下
-    这个通道的可用性就是「网页池里有没有可用账号」。放在这里而不是转发层：
-    四个协议入口都走这个函数，一处改动全覆盖，且能给出明确原因。
+  model-info.js + traework/models.js —— 上下文上限改为显示实测硬限，
+    不再拿压缩阈值当上限。
 
-  qoder/cosy.js —— 改为薄封装（算法转发自 `src/cosy.js`），只留 Qoder 特有
-    的身份字段、cosyVersion 与请求头。**导出面完全不变**，三个测试全过。
+  qoder/session.js + chat.js + index.js —— 从 context_config 取出全部上下文
+    档位（200K/400K/1M），默认按**最大档**下发 model_config.max_input_tokens；
+    模型名支持上游真实显示名。新增 cachedModels() 供热路径同步读取，
+    不额外等一次上游调用。
 
-  README.md 也一并更新（不在快照内，但同批发布）：四条通道表改为
-  「需要官方客户端」、新增千问办公通道小节、前置条件、环境变量、
-  已知边界（「上游不支持 function calling」限定为搭子上游、
-  「cookie 过期必须开客户端」补充网页凭证路径）、测试清单。
+  traework/constants.js —— 版本码动态生成，上游模型表不再需要手动跟进。
 
-  不在本快照内（纯管理端 / 前端 / 测试，网关不加载）：
-    src/admin/**、src/records.js、src/points-agg.js、src/web-gateway.js、
-    src/login-browser.js、web/**、README.md、
-    test/verify-qwenwork-local-sign.js、test/verify-dumate-source.js、
-    test/verify-fallback-stream-pipe.js 等。
+  traework/auth.js —— 新增 lastErrorAt（与 qwenwork/auth.js 同构），
+    在 patch() 里集中打时间戳；界面据此显示「N 分钟前」，避免把早已自愈的
+    瞬时错误读成当前故障。
 
-验证记录（2026-10-14，全部实测）：
+验证记录（2026-10-22，全部实测）：
 
   - **逐字节比对**：闭包 47 = 快照 47，内容全部一致；反向检查无多余文件
     （闭包由 src/server.js 出发递归解析相对 require 得出，无动态 require）
   - **node --check**：47 个文件全部通过
-  - **独立启动 · auto 模式**（临时端口 19099，DUMATE_AUTOSTART=off，
-    DUMATE_ADMIN_DATA=<repo>/data）：
-      /health → dumate ready=false + source=auto + fallback.available=true
-        （客户端已卸载，符合预期）、qwenwork ready=true + **wasm:"local"**、
-        traework ready=true、qoder ready=true + needsClient=false
-      未知前缀 `qwn/pro` → 400（前缀路由不静默回落）
-      8 条真实请求全 200：搭子 OpenAI 非流式 / OpenAI 流式 / Responses 流式 /
-        Anthropic 流式 / Google + 千问 flash（本地签名）+ TRAE + Qoder
-      进程存活，日志零 TypeError / Error
-  - **独立启动 · web 模式**（同上 + `DUMATE_DUMATE_SOURCE=web`）：
-      启动日志「· 搭子凭证来源：网页池（不探测桌面链路）」，启动耗时 0.1s
-      /health → dumate ready=true + source=web
-      搭子真实请求 200；请求日志「按 DUMATE_DUMATE_SOURCE=web 直接走网页凭证池」
-  - **离线回归**：新增 3 个测试全过（verify-qwenwork-local-sign 16/16、
-    verify-dumate-source 17/17、verify-fallback-stream-pipe 16/16），
-    既有 9 个测试文件（含 Qoder 签名 22 项向量、Encode 性能穷举比对）全通过
-  - **未启动 9080**：本次只更新快照文件，9080 保持停止状态
+  - **独立启动**（临时端口 19099，DUMATE_ADMIN_DATA=<repo>/data，
+    DUMATE_AUTOSTART=off）：
+      /health → dumate ready=true + source=web + fallback.available=true；
+        qwenwork ready=true + wasm:"local"；traework ready=true；qoder ready=true
+      6 条真实请求全 200：搭子 chat / responses / messages / google 四路流式、
+        千问 flash 直连流式、TRAE Work 非流式
+      未知前缀 `nope/x` → 400（前缀路由不静默回落）
+      埋点抽查：四条搭子流式全部 credential_source=web 且 first_token_ms /
+        input_tokens / output_tokens 非零——
+          chat       ft=1255  in=14  out=231
+          responses  ft=765   in=85  out=39
+          messages   ft=370   in=85  out=73
+          google     ft=331   in=32  out=86
+        千问直连 chat  ft=1451  in=63  out=43
+  - **未启动 9080**：本步骤只更新快照文件；发版启动在随后的步骤完成
 
-启动方式的重要说明（沿用）：
+  观察（既有行为，未纳入本次同步）：TRAE Work 非流式 /v1/messages 的 usage
+  仍记 0（上游非流式不回 usage 帧），流式路径正常。
+
+启动方式（沿用）：
   9080 必须按 start-stable.bat 启动（它设了 DUMATE_ADMIN_DATA=<repo>/data）。
   若手工启动且不设该变量，reqlog.js 的 ROOT 会解析到 stable/data/——
   那是个**空目录**，里面没有任何凭证，千问/TRAE/Qoder 通道将不可用，
   且 9083 管理端读的是 <repo>/data、看不到 9080 的流量。
 
 上一版快照来源：
-  49697a8（同批次，未提交）—— 回落流式 pipe 修复 + TRAE checkin 补漏同步，
-  指纹 a23a9946…
+  0927bfd（千问本地签名脱离客户端 + 搭子回落流式 pipe 修复 + 仪表盘降级容错），
+  指纹 d0223393…
 
 更早：
+  49697a8 —— 回落流式 pipe 修复 + TRAE checkin 补漏，指纹 a23a9946…
   0fe2167 feat: Anthropic 原生工具 + TRAE 播报修复 + Qoder 积分归因（2026-10-06），
   指纹 609ba739…
   ccf8e27 perf(qoder): cosy.encode 改 O(n)（2026-10-03），指纹 7225acd3…
   225e597 chore(stable): 同步快照到 23a62d0（流式失败收尾修复）
   578d8b0 → 9736b11（Qoder 通道接入），指纹 3662af33…
+
+关于历史指纹值的说明：本文件早先记过 f7e7a810… / 96a22d7c… / 8548df35…
+三个值均无法复现，与任何一致算法都不符（不是编码/换行问题）。
+自 2026-10-03 起，指纹一律按上面这个算法实算得出，可核对。

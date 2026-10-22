@@ -30,7 +30,24 @@ const EP_ENT_USAGE = '/trae/api/v2/pay/ide_user_ent_usage';
 const CLIENT_ID = 'en1oxy7wnw8j9n';           // SOLO stable
 const APP_ID = '6eefa01c-1036-4c7e-9ca5-d891f63bfcd8';
 const IDE_VERSION = '0.1.43';
-const IDE_VERSION_CODE = '20260716';
+// **上游按「最低版本门槛」下发模型表**：版本码 >= 门槛就回最新表，且不校验上限
+// （实测 20261020 / 20261231 / 20270101 / 20300101 / 20991231 返回的 50 个模型
+//  id 集合完全相同，md5 一致）。0.1.43 配的 20260716 低于门槛，只能拿到 42 个旧模型。
+//
+// 所以这里**用当天日期动态生成**，不抄某个客户端版本号：写死一个值意味着上游
+// 每次上新模型都得改代码，管理端的「刷新」按钮也就成了摆设（刷到的还是旧表）。
+// 只改这一个头就够——X-Ide-Version / X-App-Version 的字符串不影响下发
+// （0.1.43 字符串 + 新码 = 50 个）；X-App-Version-Code 与本值共用，实测无副作用。
+// 对话接口同样正常：glm-5.2 / deepseek-v4.1-flash 均 200 且带完整 usage。
+//
+// 排查时想固定某个版本，用 DUMATE_TRAEWORK_IDE_VERSION_CODE 覆盖。
+function todayVersionCode() {
+  const d = new Date();
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  return `${d.getFullYear()}${mm}${dd}`;
+}
+const IDE_VERSION_CODE = process.env.DUMATE_TRAEWORK_IDE_VERSION_CODE || todayVersionCode();
 const DEVICE_BRAND = '83DG';
 const OS_VERSION = 'Windows 11 Pro';
 // 对话必须带这个 function，否则上游不认（等同千问的 business 字段）

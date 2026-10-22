@@ -26,7 +26,7 @@ const SRC = {
 
 // 搭子：上游没有模型列表接口（/models、/model/list 实测 404），
 // 真实可用的名字来自探测（ARCHITECTURE.md 的实测结论 + model-map 的 upstream_models）
-const DUMATE_NOTE = '上游无模型列表接口，名字来自探测；真实可用的只有 model-text / model-artifact-validate / glm-5。';
+const DUMATE_NOTE = '上游无模型列表接口（/models 404、/model/list 400），ID 来自探测；上游只接受 model-text / model-artifact-validate / glm-5，其余名字一律 404。';
 // 上下文：DuMate 配置声明 192K，但 32K 级实测通过、128K 级 10 分钟未返回。
 // 给区间而不是单值——单值会让人以为 192K 可用。
 const DUMATE_CONTEXT = { min: 32768, max: 192000, note: '配置声明 192K；32K 级实测通过，128K 级 10 分钟未返回' };
@@ -53,10 +53,16 @@ function dumateRows() {
   const rows = [];
   // 暴露列表里的每个名字都列出来（含别名），因为它们都是客户端可传的
   for (const id of cfg.exposed) {
-    const target = cfg.aliases[id] || id;
+    // 目标映射：别名表里没配的名字**不是映射到自身**——网关的 mapModel
+    // 查不到就回落 fallback（默认 model-text）。早先这里写 `|| id`，
+    // 界面于是把 claude-3-5-sonnet / gpt-4o 显示成「别名 → 自身」，
+    // 与实际转发行为不符（它们实际走 model-text）。
+    const target = cfg.aliases[id] || (upstream.has(id) ? id : cfg.fallback);
     rows.push({
       id,
-      name: id,
+      // 可读名是**本地标注**（上游没有模型列表接口），来源单独标出来
+      name: modelmap.displayName(id),
+      nameSource: modelmap.MODEL_NAMES[id] ? 'config' : null,
       prefixed: id,
       channel: 'dumate',
       native: upstream.has(id),
@@ -72,7 +78,11 @@ function dumateRows() {
       maxTokensSource: 'config',
       capability: 'chat_model',
       multimodal: false,
-      note: DUMATE_NOTE,
+      // 上游没给模型列表，这里把「别名实际落到哪里」讲清楚——
+      // 比笼统的「无接口」更有用：用户能据此判断一个名字是不是真的换了模型
+      note: upstream.has(id)
+        ? DUMATE_NOTE
+        : `客户端名，网关按别名转到 ${target}（上游只认 model-text / model-artifact-validate / glm-5）`,
     });
   }
   return rows;
@@ -132,6 +142,14 @@ function qoderCachedModels() {
   return qoderModelsCache;
 }
 
+/** 上下文数值的紧凑写法：1000000 -> 1M，180000 -> 180K */
+const fmtCtx = (n) => {
+  const v = Number(n);
+  if (!Number.isFinite(v) || v <= 0) return '—';
+  if (v >= 1000000 && v % 1000000 === 0) return `${v / 1000000}M`;
+  return `${Math.round(v / 1000)}K`;
+};
+
 /**
  * Qoder 的行：上游下发，带倍率（price_factor）。
  *
@@ -168,7 +186,24 @@ async function qoderRows() {
       rateOriginal: typeof m.rateOriginal === 'number'
         ? m.rateOriginal
         : (typeof m.original_price_factor === 'number' ? m.original_price_factor : null),
+      // 上下文取**最大档**：上游 max_input_tokens 只是默认档（200K 档给 180K
+      // 可用输入），context_config 里同一模型还挂着 400K / 1M。网关已按最大档
+      // 下发（chat.buildBody），界面也要按同一口径显示，否则「能用的」和
+      // 「显示的」对不上。
       ctx: typeof m.contextWindow === 'number' ? m.contextWindow : (typeof m.max_input_tokens === 'number' ? m.max_input_tokens : null),
+      ctxMax: typeof m.maxInputTokens === 'number'
+        ? m.maxInputTokens
+        : (() => {
+          const cfg = m.context_config && typeof m.context_config === 'object' ? m.context_config : null;
+          if (!cfg) return null;
+          const t = Object.values(cfg).map((x) => Number(x && x.token_count)).filter((n) => Number.isFinite(n) && n > 0);
+          return t.length ? Math.max(...t) : null;
+        })(),
+      tiers: Array.isArray(m.contextTiers) ? m.contextTiers : (() => {
+        const cfg = m.context_config && typeof m.context_config === 'object' ? m.context_config : null;
+        if (!cfg) return [];
+        return Object.values(cfg).map((x) => Number(x && x.token_count)).filter((n) => Number.isFinite(n) && n > 0).sort((a, b) => a - b);
+      })(),
       reasoning: m.isReasoning === true || m.is_reasoning === true,
       multimodal: m.multimodal === true || m.is_vl === true,
       isFree: m.isFree === true || m.is_free === true,
@@ -180,7 +215,9 @@ async function qoderRows() {
   return items.map((m) => ({
     id: m.key,
     name: m.name || m.key,
-    prefixed: `qoder/${m.key}`,
+    // 调用前缀也用真实模型名：界面这列就是让人复制去 cc-switch 的，
+    // 给内部代号（qoder/gfmodel）等于让人去猜。解析器两种都认。
+    prefixed: `qoder/${m.name || m.key}`,
     channel: 'qoder',
     native: true,
     target: m.key,
@@ -188,10 +225,14 @@ async function qoderRows() {
     rate: typeof m.rate === 'number' ? m.rate : null,
     rateSource: typeof m.rate === 'number' ? 'upstream' : null,
     rateOriginal: typeof m.rateOriginal === 'number' ? m.rateOriginal : null,
-    contextWindow: typeof m.ctx === 'number' ? m.ctx : null,
+    contextWindow: typeof m.ctxMax === 'number' ? m.ctxMax : (typeof m.ctx === 'number' ? m.ctx : null),
     contextWindowMin: null,
-    contextSource: typeof m.ctx === 'number' ? 'upstream' : null,
-    contextNote: '',
+    contextSource: (typeof m.ctxMax === 'number' || typeof m.ctx === 'number') ? 'upstream' : null,
+    // 档位是上游真值（context_config），一并写出来：网页端让人选 200K/400K/1M，
+    // 网关默认按最大档请求，用户需要知道这件事发生了
+    contextNote: Array.isArray(m.tiers) && m.tiers.length > 1
+      ? `上游可选 ${m.tiers.map(fmtCtx).join(' / ')}，网关按最大档 ${fmtCtx(m.ctxMax)} 下发`
+      : '',
     // 输出上限：**上游的模型表没有这个字段**（实测字段表里只有
     // max_input_tokens）。这里给的是网关下发的预算下限（budget.js 的
     // QD_FLOOR），来源标 config——不拿上下文冒充输出上限，也不编一个值。
@@ -202,7 +243,10 @@ async function qoderRows() {
     // 免费档：上游 is_free，与 TRAE 的会员折扣是两回事，界面分开标
     isFree: !!m.isFree,
     // 便宜档标记：0.1 倍率的适合调试（省额度）
-    note: (typeof m.rate === 'number' && m.rate <= 0.1) ? '低倍率，适合开发调试' : '',
+    note: [
+      Array.isArray(m.tiers) && m.tiers.length > 1 ? `可选 ${m.tiers.map(fmtCtx).join(' / ')}` : '',
+      (typeof m.rate === 'number' && m.rate <= 0.1) ? '低倍率，适合开发调试' : '',
+    ].filter(Boolean).join('；'),
   }));
 }
 
@@ -229,9 +273,13 @@ async function traeworkRows({ visibleOnly = false, force = false } = {}) {
       memberDiscount: m.memberDiscount,
       discountMatched: m.discountMatched,
       contextWindow: m.contextWindow,
+      // 服务端实测硬限（models.js 的 MEASURED_HARD_CONTEXT）。null = 未测过，
+      // 界面不能拿 contextWindow 充数——上游那个值是客户端压缩阈值
+      contextWindowHard: m.contextWindowHard,
       contextWindowMin: null,
       contextSource: m.contextWindow != null ? 'upstream' : null,
-      contextNote: '',
+      contextNote: m.contextHardNote || '',
+      contextHardSource: m.contextWindowHard != null ? 'measured' : null,
       maxTokens: m.maxTokens,
       maxTokensSource: m.maxTokens != null ? 'upstream' : null,
       capability: m.capability,

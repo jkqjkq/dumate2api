@@ -77,6 +77,9 @@ function list() {
     lastCheckin: a.lastCheckin || null,
     // 读取时翻译：存量记录里的 `aborted` 之类也要看得懂（详见 errtext.js）
     lastError: explainError(a.lastError),
+    // lastError 的写入时刻（与 qwenwork/auth.js 同构）。界面据此显示「N 分钟前」，
+    // 没有它一条早已自愈的瞬时错误会被读成「当前故障」。无 lastError 时为 null。
+    lastErrorAt: a.lastErrorAt || null,
     deviceId: a.deviceId || '',
     // 只给尾部，便于人工核对是哪个账号
     refreshTail: a.refreshToken ? String(a.refreshToken).slice(-6) : '',
@@ -120,6 +123,12 @@ function patch(id, fields) {
   const data = load();
   const a = data.accounts.find((x) => x.id === Number(id));
   if (!a) return null;
+  // lastError 与 lastErrorAt 必须同步移动（与 qwenwork/auth.js 同构）：所有写
+  // lastError 的调用方都走这里，集中打时间戳比在每个调用点各写一次可靠——
+  // 漏一处就会出现「有时间戳的错误」和「没时间戳的错误」两种形状，界面无法统一判断新鲜度。
+  if (fields && fields.lastError !== undefined) {
+    fields.lastErrorAt = fields.lastError ? Date.now() : null;
+  }
   Object.assign(a, fields);
   save(data);
   return a;

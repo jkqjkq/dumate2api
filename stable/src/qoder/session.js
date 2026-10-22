@@ -98,7 +98,26 @@ async function fetchModels(account, { force = false } = {}) {
     // original_price_factor=0.1）。只给 rate 会被读成「完全不扣费」，所以两个都带，
     // 界面在 rate 为 0 时并列显示原价。
     rateOriginal: typeof m.original_price_factor === 'number' ? m.original_price_factor : null,
+    // 上下文档位。**上游的 max_input_tokens 只是「默认档」的可用输入**：
+    // 200K 档给 180000（扣 20K 输出预留），而 context_config 里同一模型
+    // 还挂着 400K / 1M 档。网页端让人选档位，API 侧则靠请求体的
+    // model_config.max_input_tokens 指定——所以这里把「最大档」取出来，
+    // 供 buildBody 下发。
     contextWindow: m.max_input_tokens || null,
+    contextTiers: (() => {
+      const cfg = m.context_config && typeof m.context_config === 'object' ? m.context_config : null;
+      if (!cfg) return [];
+      return Object.values(cfg)
+        .map((x) => Number(x && x.token_count))
+        .filter((n) => Number.isFinite(n) && n > 0)
+        .sort((a, b) => a - b);
+    })(),
+    // 不传档位时上游按默认档（200K/180K）。网关默认请求最大档，见 chat.buildBody
+    maxInputTokens: (() => {
+      const cfg = m.context_config && typeof m.context_config === 'object' ? m.context_config : null;
+      const tiers = cfg ? Object.values(cfg).map((x) => Number(x && x.token_count)).filter((n) => Number.isFinite(n) && n > 0) : [];
+      return tiers.length ? Math.max(...tiers) : (m.max_input_tokens || null);
+    })(),
     isDefault: m.is_default === true,
     isFree: m.is_free === true,
     isNew: m.is_new === true,
@@ -375,7 +394,17 @@ async function checkin(token, region, opts = {}) {
   };
 }
 
+/**
+ * 同步读模型缓存（不触发网络）。给 runOnce 取「该模型最大档的上下文」用——
+ * 那里在请求热路径上，不能再等一次 20s 的上游调用。缓存为空时返回 null，
+ * 调用方回落到默认档。
+ */
+function cachedModels(account) {
+  const hit = modelsCache.get(modelsCacheKey(account));
+  return hit && hit.data && Array.isArray(hit.data.models) ? hit.data.models : null;
+}
+
 module.exports = {
   request, bearerHeaders, exchange, ensureAccount, fetchUserInfo, fetchPlan,
-  fetchQuota, fetchModels, listCampaigns, claimCampaign, checkin, checkinStatus, TIMEOUT_MS,
+  fetchQuota, fetchModels, cachedModels, listCampaigns, claimCampaign, checkin, checkinStatus, TIMEOUT_MS,
 };

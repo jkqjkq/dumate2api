@@ -14,6 +14,7 @@
 
 const { resolveMaxTokens } = require('./budget');
 const modelmap = require('./modelmap');
+const { markFirstToken } = require('./reqlog');
 
 // 回落名由 modelmap 决定，不再在本模块另立一个常量——两处常量必然漂移
 const DEFAULT_MODEL = modelmap.DEFAULTS.fallback;
@@ -230,6 +231,8 @@ function translateStreamToGoogle(upstreamRes, res, originalModel, onDone) {
   };
 
   upstreamRes.on('data', (chunk) => {
+    // 首个上游字节到达即记首字（口径同 Responses / Anthropic 两个翻译器）。
+    markFirstToken(res);
     buffer += decoder.write(chunk);
     const lines = buffer.split('\n');
     buffer = lines.pop();
