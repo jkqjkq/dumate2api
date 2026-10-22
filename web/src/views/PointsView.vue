@@ -839,40 +839,6 @@
          「查一笔积分的来历」要在两页之间来回跳。
          账号管理页保留的是**操作台**（增删账号、跑任务、开轮询），
          记录是结果，不该堆在操作台上。 -->
-    <a-card title="签到日历" :bordered="false" class="mt-4">
-      <template #extra>
-        <span class="text-xs text-slate-400">已签日来自上游 sign_in_days，是权威数据</span>
-      </template>
-      <a-spin :spinning="calLoading">
-        <a-alert v-if="calError" type="error" show-icon :message="calError" class="mb-2" />
-        <a-empty v-else-if="!calendar?.accounts?.length" description="还没有账号" />
-        <div v-for="a in calendar?.accounts ?? []" :key="a.account_id" class="mb-4">
-          <div class="flex items-center justify-between mb-2">
-            <div>
-              <span class="font-medium">{{ a.name }}</span>
-              <a-tag :color="a.has_issued_today ? 'green' : 'orange'" class="ml-2">
-                {{ a.has_issued_today ? '今日已签' : '今日未签' }}
-              </a-tag>
-              <span class="text-xs text-slate-500 ml-2">
-                累计 {{ a.total_times ?? '—' }} 次 · 本月 {{ a.sign_in_days.length }} 天
-              </span>
-            </div>
-            <a-tag v-if="!a.ok" color="red">{{ a.error }}</a-tag>
-          </div>
-          <div class="flex flex-wrap gap-1">
-            <a-tag
-              v-for="d in monthDays(a)"
-              :key="d.day"
-              :color="d.signed ? 'green' : d.isToday ? 'blue' : 'default'"
-              :title="d.day"
-            >
-              {{ d.label }}
-            </a-tag>
-          </div>
-        </div>
-      </a-spin>
-    </a-card>
-
     <a-card title="操作流水" :bordered="false" class="mt-4">
       <template #extra>
         <a-space>
@@ -979,6 +945,9 @@
       </a-table>
     </a-card>
     </template>
+
+    <!-- 签到详情：按月份/年份查看。千问办公没有签到体系，不渲染。 -->
+    <CheckinDetailCard v-if="!isQw" />
   </div>
 </template>
 
@@ -989,6 +958,7 @@ import { BarChart } from 'echarts/charts'
 import { GridComponent, TooltipComponent, LegendComponent } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
 import PageHeader from '@/components/PageHeader.vue'
+import CheckinDetailCard from '@/components/CheckinDetailCard.vue'
 import client from '@/api/client'
 import { channelStore, isTraework, isQwenwork, isQoder } from '@/stores/channel'
 import { traeworkApi } from '@/api/traework'
@@ -998,7 +968,7 @@ import type { QwCredits, QwCreditRecord } from '@/api/qwenwork'
 import { qoderApi } from '@/api/qoder'
 import type { QoderCreditRow, QoderCreditRecord } from '@/api/qoder'
 import type { PointsData, PointsPackage, AllPointsData, AccountPoints } from '@/api/points'
-import type { RecordsData, CheckinCalendarData } from '@/api/records'
+import type { RecordsData } from '@/api/records'
 import { SERIES, INK, TOOLTIP_BASE, axisStyle, compactNum, exactNum, barSeries } from '@/utils/chartTheme'
 
 echarts.use([BarChart, GridComponent, TooltipComponent, LegendComponent, CanvasRenderer])
@@ -1224,13 +1194,10 @@ const poolText = (p: string) =>
 // 原来是一个独立的「任务记录」页，并入本页的理由见模板里的注释。
 // 数据是搭子网页端（dumate.baidu.com）的，与千问/TRAE 无关，所以只在搭子分支渲染。
 const ops = ref<RecordsData | null>(null)
-const calendar = ref<CheckinCalendarData | null>(null)
 const opLoading = ref(false)
-const calLoading = ref(false)
 // 拉取失败与「确实没有记录」必须分开：前者是故障，后者是正常空态。
 // 折成一个空态等于把一次失败断言成「确实没签到过」。
 const opError = ref('')
-const calError = ref('')
 const opType = ref('')
 const opAccount = ref<number | null>(null)
 const opDays = ref(30)
@@ -1278,20 +1245,6 @@ function opCheckinText(r?: string) {
     : r === 'failed' ? '签到失败' : '—'
 }
 
-// 本月逐日：已签来自上游 sign_in_days，今天单独标色
-function monthDays(a: { sign_in_days: string[] }) {
-  const signed = new Set(a.sign_in_days)
-  const now = new Date()
-  const key = (d: number) =>
-    `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`
-  const todayKey = key(now.getDate())
-  const out = []
-  for (let d = 1; d <= now.getDate(); d++) {
-    out.push({ day: key(d), label: String(d), signed: signed.has(key(d)), isToday: key(d) === todayKey })
-  }
-  return out
-}
-
 async function loadOps() {
   opLoading.value = true
   opError.value = ''
@@ -1333,21 +1286,6 @@ async function loadOpAccounts() {
       ...(data.accounts || []).map((a: any) => ({ label: a.name, value: a.id })),
     ]
   } catch (e) { /* 取不到就保持「全部账号」，不影响主列表 */ }
-}
-
-async function loadCalendar() {
-  calLoading.value = true
-  calError.value = ''
-  try {
-    const { data } = await client.get('/web-accounts/checkin-calendar')
-    calendar.value = data
-  } catch (e: any) {
-    // 同上：拉取失败与「没有账号」是两回事
-    calError.value = e?.response?.data?.error || e?.message || '签到日历加载失败'
-    calendar.value = null
-  } finally {
-    calLoading.value = false
-  }
 }
 
 async function loadQw() {
@@ -1582,7 +1520,6 @@ onMounted(() => {
     load()
     loadOps()
     loadOpAccounts()
-    loadCalendar()
   }
   window.addEventListener('resize', onResize)
 })
@@ -1596,7 +1533,6 @@ watch(() => channelStore.current, () => {
     load()
     loadOps()
     loadOpAccounts()
-    loadCalendar()
   }
 })
 

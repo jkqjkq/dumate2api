@@ -7,6 +7,7 @@
 const c = require('./constants');
 const { ugHeaders } = require('./headers');
 const authStore = require('./auth');
+const ledger = require('../checkin-ledger');
 
 /**
  * 签到/额度接口都要**设备指纹匹配**，所以每次请求前先把设备三件套补齐。
@@ -251,6 +252,10 @@ async function checkinAndSave(rawAuth, authStore) {
     const fields = { lastCheckin: auth.lastCheckin || null, lastError: '' };
     if (u.ok) fields.credits = u.remain;
     authStore.patch(auth.id, fields);
+    ledger.append({
+      channel: 'traework', account_id: auth.id, account: auth.nickname || auth.uid || '',
+      at: Date.now(), source: 'already',
+    });
     return { ok: true, already: true, credits: u.ok ? u.remain : null };
   }
   const before = await usage(auth);
@@ -267,10 +272,15 @@ async function checkinAndSave(rawAuth, authStore) {
   });
   const creditsBefore = before.ok ? before.remain : null;
   const credits = u.ok ? u.remain : null;
+  const gained = computeGained(creditsBefore, credits, cl.gained);
+  ledger.append({
+    channel: 'traework', account_id: auth.id, account: auth.nickname || auth.uid || '',
+    at: Date.now(), credits: gained, source: 'claim',
+  });
   return {
     ok: true,
     already: false,
-    gained: computeGained(creditsBefore, credits, cl.gained),
+    gained,
     creditsBefore,
     credits,
   };
