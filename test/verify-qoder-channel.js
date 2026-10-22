@@ -114,6 +114,40 @@ check('正常帧不误判为错误', () => {
   assert.strictEqual(chat.payloadError({ choices: [{ delta: { content: 'hi' } }] }), null);
 });
 
+// 2026-10-22：上游 provider 层失败时发的是**字符串 code**，且首字母小写。
+// 旧判据只认 /^[A-Z]/，这一帧被当正常数据转发 → 翻译器没有 choices 可读 →
+// 客户端拿到 200 + 空回答（实测 /v1/responses 只有 created/in_progress/completed）。
+check('payloadError 抓 provider_error（小写字符串 code）', () => {
+  const e = chat.payloadError({
+    code: 'provider_error', message: 'All backends failed',
+    request_id: 'x', type: 'provider_error',
+  });
+  assert.ok(e, '必须判定为错误');
+  assert.ok(e.message.includes('All backends failed'));
+});
+check('payloadError 抓 type=provider_error（无 code）', () => {
+  const e = chat.payloadError({ type: 'provider_error', message: 'All backends failed' });
+  assert.ok(e);
+});
+check('payloadError 抓 error 对象', () => {
+  const e = chat.payloadError({ error: { code: 503, message: 'unavailable' } });
+  assert.strictEqual(e.code, 503);
+});
+check('payloadError 仍认大写字符串 code', () => {
+  const e = chat.payloadError({ code: 'LoginExpired', message: 'login expired' });
+  assert.ok(e);
+});
+check('payloadError 不误伤 code=0 / 成功标记', () => {
+  assert.strictEqual(chat.payloadError({ code: 0, message: 'ok' }), null);
+  assert.strictEqual(chat.payloadError({ code: '0' }), null);
+  assert.strictEqual(chat.payloadError({ code: 'success' }), null);
+});
+check('envelopeStatus 抓非信封的纯错误体', () => {
+  const es = chat.envelopeStatus('{"code":"provider_error","message":"All backends failed","type":"provider_error"}');
+  assert.ok(es, '非 SSE 的错误体也要认');
+  assert.ok(es.message.includes('All backends failed'));
+});
+
 console.log('');
 console.log('== SSE 聚合（含 usage 里的 credits）==');
 const agg = chat.aggregate([
