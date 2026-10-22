@@ -6,6 +6,10 @@
 //   2. 上游 4xx/5xx 时 body 往往不是 SSE（没有 `data:` 行），流式路径一帧都收不到，
 //      旧实现当成功返回。
 //
+// **桩必须遵守真实 postStream 的契约**：无论有没有数据帧，流尾都会回调
+// `[DONE]`。第一版桩漏了它，于是测试通过而线上路径不通过——`[DONE]` 把
+// `sent` 置 true，`!sent` 兜底永远走不到。这是本文件最重要的回归点。
+//
 // 离线：打桩 chat.postStream / auth / session / credits，不需要账号与网络。
 const assert = require('assert');
 const auth = require('../src/qoder/auth');
@@ -20,6 +24,7 @@ const ACCOUNT = {
   machineId: 'mid', machineToken: 'mtok', machineType: '5',
   enabled: true,
 };
+const ACCOUNT2 = { ...ACCOUNT, id: 9902, uid: 'uid-test-2', nickname: '备用账号' };
 const MODELS = [{ key: 'gfmodel', name: 'GLM-5.3-Flash', maxInputTokens: 1000000 }];
 
 // ---- 打桩：只替换边界，签名与 body 构造仍走真实实现 ----
@@ -64,10 +69,11 @@ async function collect(fn) {
 
   console.log('');
   console.log('== HTTP 429 + 非 SSE 错误体 ==');
-  chat.postStream = async () => ({
-    status: 429, headers: {},
-    raw: '{"code":429,"message":"Too many requests"}',
-  });
+  chat.postStream = async (url, body, headers, onChunk) => {
+    // 真实 postStream 即使一帧 data 都没有，流尾也会补 [DONE]
+    onChunk('[DONE]');
+    return { status: 429, headers: {}, raw: '{"code":429,"message":"Too many requests"}' };
+  };
   r = await collect((cb) => qoder.send(PAYLOAD, cb, {}));
   check('HTTP 429 必须 reject', () => assert.ok(r.error, '应抛出错误，实际成功返回'));
   check('状态码透传 429', () => assert.strictEqual(r.error.statusCode, 429, String(r.error && r.error.statusCode)));
@@ -75,12 +81,16 @@ async function collect(fn) {
 
   console.log('');
   console.log('== 200 + 纯 provider_error 体（没有 data: 行）==');
-  chat.postStream = async () => ({
-    status: 200, headers: {},
-    raw: '{"code":"provider_error","message":"All backends failed","type":"provider_error"}',
-  });
+  chat.postStream = async (url, body, headers, onChunk) => {
+    onChunk('[DONE]');
+    return {
+      status: 200, headers: {},
+      raw: '{"code":"provider_error","message":"All backends failed","type":"provider_error"}',
+    };
+  };
   r = await collect((cb) => qoder.send(PAYLOAD, cb, {}));
-  check('200 错误体也要 reject', () => assert.ok(r.error, '应抛出错误，实际成功返回'));
+  check('200 错误体也要 reject（[DONE] 不算已吐帧）', () => assert.ok(r.error, '应抛出错误，实际成功返回'));
+  check('200 错误体：错误原因来自原始 body', () => assert.ok(/All backends failed/.test(r.error.message), r.error && r.error.message));
 
   console.log('');
   console.log('== 正常流不受影响 ==');
@@ -92,7 +102,53 @@ async function collect(fn) {
   r = await collect((cb) => qoder.send(PAYLOAD, cb, {}));
   check('正常流 resolve', () => assert.strictEqual(r.error, null, r.error && r.error.message));
   check('正文已转发', () => assert.ok(r.chunks.some((c) => c.includes('"content":"好"')), JSON.stringify(r.chunks)));
-  check('补发 [DONE]', () => assert.strictEqual(r.chunks[r.chunks.length - 1], '[DONE]'));
+  check('[DONE] 在正文之后补发，且只补一次', () => {
+    assert.strictEqual(r.chunks[r.chunks.length - 1], '[DONE]');
+    assert.strictEqual(r.chunks.filter((x) => x === '[DONE]').length, 1, JSON.stringify(r.chunks));
+  });
+
+  console.log('');
+  console.log('== 换号：首个账号 429，第二个成功 ==');
+  auth.findUsable = () => [ACCOUNT, ACCOUNT2];
+  session.ensureAccount = async (a) => a;
+  let calls = 0;
+  chat.postStream = async (url, body, headers, onChunk) => {
+    calls++;
+    if (calls === 1) {
+      onChunk('[DONE]');
+      return { status: 429, headers: {}, raw: '{"code":429,"message":"Too many requests"}' };
+    }
+    onChunk(JSON.stringify({ choices: [{ delta: { content: 'ok' } }] }));
+    onChunk('[DONE]');
+    return { status: 200, headers: {}, raw: '' };
+  };
+  r = await collect((cb) => qoder.send(PAYLOAD, cb, {}));
+  check('429 会换第二个账号', () => assert.strictEqual(calls, 2, 'calls=' + calls));
+  check('换号后成功', () => assert.strictEqual(r.error, null, r.error && r.error.message));
+  auth.findUsable = () => [ACCOUNT];
+  session.ensureAccount = async () => ACCOUNT;
+
+  console.log('');
+  console.log('== 换号：首个账号回 provider_error，第二个成功 ==');
+  auth.findUsable = () => [ACCOUNT, ACCOUNT2];
+  session.ensureAccount = async (a) => a;
+  let calls2 = 0;
+  chat.postStream = async (url, body, headers, onChunk) => {
+    calls2++;
+    if (calls2 === 1) {
+      onChunk(JSON.stringify({ code: 'provider_error', message: 'All backends failed', type: 'provider_error' }));
+      onChunk('[DONE]');
+      return { status: 200, headers: {}, raw: '' };
+    }
+    onChunk(JSON.stringify({ choices: [{ delta: { content: 'ok2' } }] }));
+    onChunk('[DONE]');
+    return { status: 200, headers: {}, raw: '' };
+  };
+  r = await collect((cb) => qoder.send(PAYLOAD, cb, {}));
+  check('provider_error 会换第二个账号', () => assert.strictEqual(calls2, 2, 'calls=' + calls2));
+  check('换号后成功（provider_error 场景）', () => assert.strictEqual(r.error, null, r.error && r.error.message));
+  auth.findUsable = () => [ACCOUNT];
+  session.ensureAccount = async () => ACCOUNT;
 
   console.log('');
   console.log('== 模型名解析（缓存为空时补拉）==');

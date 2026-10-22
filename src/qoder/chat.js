@@ -16,6 +16,7 @@ const crypto = require('crypto');
 const { StringDecoder } = require('string_decoder');
 const c = require('./constants');
 const cosy = require('./cosy');
+const { payloadError, envelopeStatus } = require('../upstream-errors');
 
 const TIMEOUT_MS = 600000;
 
@@ -202,94 +203,6 @@ function unwrap(raw) {
   return [s];
 }
 
-/**
- * 从内层 payload 判定是否错误。
- *
- * **字符串 code 也要认**（2026-10-22 修，静默空响应级）。上游 provider 层
- * 失败时发的是：
- *
- *   {"code":"provider_error","message":"All backends failed","type":"provider_error"}
- *
- * 旧判据只认 `/^[A-Z]/` 开头的字符串 code，而 `provider_error` 是小写——
- * 于是这帧被当成**正常数据**转发。下游三个翻译器都按 `choices` 取内容，
- * 这帧没有 choices，被直接跳过，流照常收尾 → 客户端拿到 **HTTP 200 + 空回答**
- * （实测 `/v1/responses` 只发 created/in_progress/completed 三个事件，
- * output 为空数组、usage 全 0）。不报错、不重试，是最难排查的形态。
- *
- * 判据收严的另一面也要防误伤：正常数据帧（chunk）没有 `code` / `type` 字段，
- * 所以只在**确实带错误信号**时返回错误——非数字字符串 code 必须同时有
- * message 或 type 才算。
- */
-function payloadError(obj) {
-  if (!obj || typeof obj !== 'object') return null;
-  const msgOf = (o) => String((o && (o.message || o.msg || o.error)) || '').trim();
-
-  const raw = obj.code;
-  const num = raw != null ? Number(raw) : null;
-  if (num && num >= 400) return { code: num, message: msgOf(obj) };
-
-  if (typeof raw === 'string' && raw.trim()) {
-    const s = raw.trim();
-    if (/^\d+$/.test(s)) {
-      const n = Number(s);
-      if (n >= 400) return { code: n, message: msgOf(obj) };
-    } else if (msgOf(obj) || obj.type || obj.error) {
-      // provider_error / LoginExpired / ...：小写也要认
-      const tail = msgOf(obj);
-      return { code: 500, message: tail ? `${s}: ${tail}` : s };
-    }
-  }
-
-  // 没有 code 但形状是错误：{"type":"provider_error","message":"..."} / {"error":{...}}
-  const type = String(obj.type || '');
-  if (type && (/_error$/i.test(type) || /^error$/i.test(type)) && (msgOf(obj) || obj.error)) {
-    return { code: 500, message: msgOf(obj) ? `${type}: ${msgOf(obj)}` : type };
-  }
-  if (obj.error && typeof obj.error === 'object') {
-    const inner = Number(obj.error.code);
-    return {
-      code: Number.isFinite(inner) && inner >= 400 ? inner : 500,
-      message: String(obj.error.message || obj.error.code || 'upstream error'),
-    };
-  }
-  return null;
-}
-
-/** 信封里的业务错误码（外层 HTTP 恒为 200，且可能带 data: 前缀） */
-function envelopeStatus(raw) {
-  const text = String(raw || '').trim();
-  if (!text) return null;
-  const candidates = [];
-  for (const line of text.split('\n')) {
-    const t = line.trim();
-    if (!t) continue;
-    const json = t.startsWith('data:') ? t.slice(5).trim() : t;
-    if (!json || json === '[DONE]') continue;
-    try { candidates.push(JSON.parse(json)); } catch (e) { /* 非 JSON 行 */ }
-  }
-  for (const outer of candidates) {
-    if (!outer || typeof outer !== 'object') continue;
-    const code = outer.statusCodeValue != null ? Number(outer.statusCodeValue) : null;
-    if (code && code >= 400) {
-      let message = '';
-      try {
-        const inner = typeof outer.body === 'string' ? JSON.parse(outer.body) : outer.body;
-        message = (inner && (inner.message || inner.error)) || '';
-      } catch (e) { message = String(outer.body || '').slice(0, 200); }
-      return { code, message };
-    }
-    // 非 SSE 的错误体（上游 4xx/5xx 时常见）没有信封，错误就在最外层
-    const outerErr = payloadError(outer);
-    if (outerErr) return outerErr;
-    try {
-      const inner = typeof outer.body === 'string' ? JSON.parse(outer.body) : outer.body;
-      const err = payloadError(inner);
-      if (err) return err;
-    } catch (e) { /* 内层不是 JSON */ }
-  }
-  return null;
-}
-
 // 首字节超时。上游被限流时会**接受连接然后一直不回**（实测 180s 后 abort），
 // 而 `timeout` 是 socket 空闲超时（600s），换号重试两次就是 20 分钟——
 // 客户端早就超时了，网关还在等。所以单独给「第一个字节」设一个更短的上限：
@@ -337,9 +250,20 @@ function post(url, body, headers) {
 }
 
 /** 流式：逐块回调内层 payload（含 [DONE]） */
-function postStream(url, body, headers, onChunk) {
+function postStream(url, body, headers, onChunk, opts = {}) {
   return new Promise((resolve, reject) => {
     const u = new URL(url);
+    // 一次只结算一次：中止（abort）会同时触发 req 的 'error' 与 res 的
+    // 'error'/'end'，没有这个守卫会把 promise 结算两遍（第二遍被静默忽略，
+    // 但状态可能已经错了）。
+    let settled = false;
+    let aborted = false;
+    let status = null;
+    let respHeaders = null;
+    let rawAll = '';
+    const settle = (fn, v) => { if (settled) return; settled = true; fn(v); };
+    const abortedResult = () => ({ status, headers: respHeaders, raw: rawAll, aborted: true });
+
     const req = https.request({
       hostname: u.hostname,
       path: u.pathname + u.search,
@@ -347,11 +271,12 @@ function postStream(url, body, headers, onChunk) {
       headers: { ...headers, Accept: 'text/event-stream', 'Content-Length': Buffer.byteLength(body) },
       timeout: TIMEOUT_MS,
     }, (res) => {
+      status = res.statusCode;
+      respHeaders = res.headers;
       let buf = '';
       // 原始字节留一份（有上限）：**非 SSE 的错误体**（上游 4xx/5xx 时常见）
       // 没有 `data:` 行，flushLine 会全部丢掉，上层就只剩一个 statusCode。
       // 留一份原文，runOnce 才能把上游的 message 如实报出来。
-      let rawAll = '';
       const RAW_CAP = 65536;
       // 必须用 StringDecoder：TCP chunk 不按字符边界切，逐块 toString 会把
       // 跨 chunk 的汉字截成 U+FFFD（流式输出里随机出现「�」）
@@ -365,6 +290,7 @@ function postStream(url, body, headers, onChunk) {
       };
       res.on('data', (chunk) => {
         clearFb();
+        if (aborted) return;
         const text = dec.write(chunk);
         buf += text;
         if (rawAll.length < RAW_CAP) rawAll += text;
@@ -377,19 +303,39 @@ function postStream(url, body, headers, onChunk) {
       });
       res.on('end', () => {
         clearFb();
+        if (aborted) { settle(resolve, abortedResult()); return; }
         buf += dec.end();
         // 收尾：最后一帧常不带换行；且上游不发 [DONE]，要自己补
         flushLine(buf);
         onChunk('[DONE]');
-        resolve({ status: res.statusCode, headers: res.headers, raw: rawAll });
+        settle(resolve, { status, headers: respHeaders, raw: rawAll });
       });
-      res.on('error', (e) => { clearFb(); reject(e); });
+      res.on('error', (e) => {
+        clearFb();
+        if (aborted) settle(resolve, abortedResult()); else settle(reject, e);
+      });
     });
     // 与 post 同理：从请求写出时开始计时，覆盖「连响应头都不给」的挂起
     let clearFb = () => {};
     clearFb = armFirstByte(req);
-    req.on('error', (e) => { clearFb(); reject(e); });
+    req.on('error', (e) => {
+      clearFb();
+      if (aborted) settle(resolve, abortedResult()); else settle(reject, e);
+    });
     req.on('timeout', () => { req.destroy(new Error('qoder upstream timeout')); });
+    // 调用方主动中止（例如识别到上游错误帧）：立即断流，不再等上游自己关。
+    // Qoder 零额度时是**挂起**而不是报错，不主动断就要等 socket 空闲超时
+    // （600s），客户端早已超时。中止时**resolve 而不是 reject**：调用方手里
+    // 已经有 firstErr，reject 会把它盖成一个无信息的网络错误。
+    if (opts.signal) {
+      const onAbort = () => {
+        aborted = true;
+        clearFb();
+        try { req.destroy(); } catch (e) { /* 已结束 */ }
+      };
+      if (opts.signal.aborted) onAbort();
+      else opts.signal.addEventListener('abort', onAbort, { once: true });
+    }
     req.write(body);
     req.end();
   });

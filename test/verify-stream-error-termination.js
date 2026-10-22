@@ -31,6 +31,8 @@
 const path = require('path');
 const http = require('http');
 const Module = require('module');
+const fs = require('fs');
+const os = require('os');
 
 const ROOT = path.resolve(__dirname, '..');
 const PORT = 19077;
@@ -40,6 +42,9 @@ const qoderPath = require.resolve(path.join(ROOT, 'src/qoder'));
 const fakeQoder = {
   status: () => ({ ready: true, needsClient: false, accounts: 1, error: '' }),
   warmup: () => ({ ready: true }),
+  // server.js 的启动块调的是 warmupModels（warmup 已删）。桩缺了它时
+  // 启动块会走 catch 被吞掉，测试仍报全绿——新代码路径完全没被覆盖。
+  warmupModels: async () => ({ ok: true, models: [] }),
   listModels: async () => ['qfmodel'],
   listModelEntries: async () => [{ id: 'qoder/qfmodel', name: 'Q', contextWindow: 180000 }],
   pickAccount: () => ({ id: 1 }),
@@ -91,7 +96,9 @@ require.cache[qoderPath].exports = fakeQoder;
 process.env.DUMATE2API_PORT = String(PORT);
 process.env.DUMATE2API_HOST = '127.0.0.1';
 process.env.DUMATE_AUTOSTART = 'off';
-process.env.DUMATE_ADMIN_DATA = path.join(ROOT, 'data');
+// 埋点写到临时目录：既隔离真实请求日志（开发实例可能同时在写），
+// 也让下面的断言能只看本次运行的几行。
+process.env.DUMATE_ADMIN_DATA = fs.mkdtempSync(path.join(os.tmpdir(), 'dumate-reqlog-'));
 require(path.join(ROOT, 'src/server.js'));
 
 // ---- 3. 断言 ----
@@ -182,6 +189,25 @@ function assert(name, cond, detail) {
     assert('openai: 流以 [DONE] 收尾',
       r3.text.includes('[DONE]'), '缺 [DONE]');
   }
+
+  // --- 埋点：错误必须落盘，且状态码是上游真实值 ---
+  // 翻译器会在 emit('error') 里**同步** finish(502)，旧实现让外层再传的
+  // extra 变成 no-op —— 所有直连通道的失败都记成 502 且 err 为空。
+  const logFile = path.join(process.env.DUMATE_ADMIN_DATA, 'requests.jsonl');
+  const rows = fs.existsSync(logFile)
+    ? fs.readFileSync(logFile, 'utf8').split('\n').filter(Boolean)
+      .map((l) => { try { return JSON.parse(l); } catch (e) { return null; } })
+      .filter(Boolean)
+    : [];
+  const lastOf = (p) => rows.filter((x) => x.path === p).pop();
+  const rp = lastOf('/v1/responses');
+  const am = lastOf('/v1/messages');
+  const oc = lastOf('/v1/chat/completions');
+  assert('埋点 responses: 状态码还原成上游真实值 402', rp && rp.status === 402, rp ? 'status=' + rp.status : '没有埋点行');
+  assert('埋点 responses: 带 error 文本', rp && /quota exhausted/.test(String(rp.error || '')), rp ? JSON.stringify(rp.error) : '');
+  assert('埋点 messages: 状态码还原成上游真实值 402', am && am.status === 402, am ? 'status=' + am.status : '没有埋点行');
+  assert('埋点 messages: 带 error 文本', am && /quota exhausted/.test(String(am.error || '')), am ? JSON.stringify(am.error) : '');
+  assert('埋点 openai: 带 error 文本', oc && /quota exhausted/.test(String(oc.error || '')), oc ? JSON.stringify(oc.error) : '');
 
   const pass = results.filter((x) => x.ok).length;
   console.log(`\n${pass}/${results.length} 通过`);

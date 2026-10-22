@@ -216,7 +216,16 @@ async function handleDirectChannel(req, res, payload, route, ctx) {
     const done = (usage, status, extra) => {
       if (logged) return;
       logged = true;
-      logRequest(req, res, startedAt, info, status || 200, usage || null, extra);
+      // 流式失败时翻译器会**同步**在它的 error 处理里 finish(502)：那次 done
+      // 先到并把 logged 置位，外层再传 extra 就永远被丢掉（logRequest 按
+      // res._logged 去重）。所以错误先挂到 req 上，让**第一次** done 就能带上。
+      let merged = extra;
+      if (req._streamError && !(extra && extra.error)) merged = { ...(extra || {}), error: req._streamError };
+      let finalStatus = status || 200;
+      // 翻译器的 error 路径硬编码 502；真实状态码（如 402）要还原回来，
+      // 否则埋点里所有直连通道的失败都是 502，看不出是额度还是上游挂了。
+      if (req._streamError && req._streamErrorStatus && finalStatus === 502) finalStatus = req._streamErrorStatus;
+      logRequest(req, res, startedAt, info, finalStatus, usage || null, merged);
     };
 
     // OpenAI 路径专用的延迟响应头。翻译器分支各自会 writeHead，只有
@@ -296,6 +305,10 @@ async function handleDirectChannel(req, res, payload, route, ctx) {
         // （发成 200 空响应），等想回 4xx JSON 时头已发出、改不回来了。
         try { shim.unpipe(res); } catch (e2) { /* 未 pipe */ }
         const status = e.statusCode || 502;
+        // 先挂到 req 上：翻译器会在下面的 emit('error') 里**同步**收尾并调用
+        // done，那时再传 extra 已经晚了（见 done 的注释）。
+        req._streamError = e.message;
+        req._streamErrorStatus = status;
         // 已经吐过帧了：不能改状态码，也不能直接 res.end()——那会让客户端
         // 收到一个**没有终结事件的流**。Codex 对此报
         // `stream disconnected before completion: stream closed before response.completed`
@@ -1670,40 +1683,52 @@ async function start() {
   // TRAE Work 通道：同样进程内直连，凭证自持（不依赖 TRAE 客户端）。
   // 这里预热**模型表**：/v1/models 与 upstream-router 都是同步取列表，
   // 不预热就只能拿到静态兜底里的那一个模型。失败不阻断启动。
-  try {
-    const twmod = require('./traework');
-    const st = twmod.status();
-    if (st.ready) {
-      twmod.warmupModels().then((m) => {
-        if (m && m.ok) log(`✓ TRAE Work 模型表就绪（${m.models.length} 个模型）`);
-        else log(`⚠ TRAE Work 模型表拉取失败（回落静态表）: ${(m && m.error) || 'unknown'}`);
-      });
-      log(`✓ TRAE Work 通道就绪（账号 ${st.accounts} 个）`);
-    } else {
-      log(`· TRAE Work 通道未就绪：${st.error}`);
+  // **与 /v1/models 的 DUMATE_TRAEWORK_AUTOSTART 判定保持一致**：关闭的通道
+  // 不该在启动时打网络、也不该在日志里报「就绪」（2026-10-22 修）。
+  if ((process.env.DUMATE_TRAEWORK_AUTOSTART || 'auto') !== 'off') {
+    try {
+      const twmod = require('./traework');
+      const st = twmod.status();
+      if (st.ready) {
+        twmod.warmupModels().then((m) => {
+          if (m && m.ok) log(`✓ TRAE Work 模型表就绪（${m.models.length} 个模型）`);
+          else log(`⚠ TRAE Work 模型表拉取失败（回落静态表）: ${(m && m.error) || 'unknown'}`);
+        });
+        log(`✓ TRAE Work 通道就绪（账号 ${st.accounts} 个）`);
+      } else {
+        log(`· TRAE Work 通道未就绪：${st.error}`);
+      }
+    } catch (e) {
+      log('⚠ TRAE Work 通道不可用（搭子链路不受影响）:', e.message);
     }
-  } catch (e) {
-    log('⚠ TRAE Work 通道不可用（搭子链路不受影响）:', e.message);
+  } else {
+    log('· TRAE Work 通道已关闭（DUMATE_TRAEWORK_AUTOSTART=off）');
   }
 
   // Qoder 通道：签名纯本地，不需要任何客户端。同样要预热**模型表**——
   // resolveModelKey 靠它把显示名（GLM-5.3-Flash）映射成上游 key（gfmodel）。
-  // 漏了这段（2026-10-22 修）时网关进程里的缓存恒为空，客户端写显示名
-  // 会被原样当 key 发出去，上游回 provider_error，用户拿到 200 + 空回答。
-  try {
-    const qd = require('./qoder');
-    const st = qd.status();
-    if (st.ready) {
-      qd.warmupModels().then((m) => {
-        if (m && m.ok) log(`✓ Qoder 模型表就绪（${m.models.length} 个模型）`);
-        else log(`⚠ Qoder 模型表拉取失败（显示名将无法解析，只能用内部 key）: ${(m && m.error) || 'unknown'}`);
-      });
-      log(`✓ Qoder 通道就绪（账号 ${st.accounts} 个）`);
-    } else {
-      log(`· Qoder 通道未就绪：${st.error}`);
+  // 漏了预热时网关进程里的缓存恒为空，客户端写显示名会被原样当 key 发出去，
+  // 上游回 provider_error，用户拿到 200 + 空回答。
+  // **与 /v1/models 的 DUMATE_QODER_AUTOSTART 判定保持一致**：关闭的通道
+  // 不该在启动时打网络、也不该在日志里报「就绪」（2026-10-22 修）。
+  if ((process.env.DUMATE_QODER_AUTOSTART || 'auto') !== 'off') {
+    try {
+      const qd = require('./qoder');
+      const st = qd.status();
+      if (st.ready) {
+        qd.warmupModels().then((m) => {
+          if (m && m.ok) log(`✓ Qoder 模型表就绪（${m.models.length} 个模型）`);
+          else log(`⚠ Qoder 模型表拉取失败（显示名将无法解析，只能用内部 key）: ${(m && m.error) || 'unknown'}`);
+        });
+        log(`✓ Qoder 通道就绪（账号 ${st.accounts} 个）`);
+      } else {
+        log(`· Qoder 通道未就绪：${st.error}`);
+      }
+    } catch (e) {
+      log('⚠ Qoder 通道不可用（搭子链路不受影响）:', e.message);
     }
-  } catch (e) {
-    log('⚠ Qoder 通道不可用（搭子链路不受影响）:', e.message);
+  } else {
+    log('· Qoder 通道已关闭（DUMATE_QODER_AUTOSTART=off）');
   }
 
   server.listen(PROXY_PORT, PROXY_HOST, () => {
