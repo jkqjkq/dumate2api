@@ -24,6 +24,7 @@ const { routes: keysRoutes } = require('./routes/keys');
 const { routes: ccswitchRoutes } = require('./routes/ccswitch');
 const { routes: accountRoutes } = require('./routes/account');
 const { routes: webAccountsRoutes } = require('./routes/accounts');
+const { routes: checkinRoutes } = require('./routes/checkin');
 const autotask = require('./routes/autotask');
 const taskScheduler = require('../task-scheduler');
 
@@ -119,6 +120,7 @@ router.mount(PREFIX + '/keys', keysRoutes);
 router.mount(PREFIX + '/cc-switch', ccswitchRoutes);
 router.mount(PREFIX + '/account', accountRoutes);
 router.mount(PREFIX + '/web-accounts', webAccountsRoutes);
+router.mount(PREFIX + '/checkin', checkinRoutes);
 router.mount(PREFIX + '/auto-checkin', autotask.routes);
 
 const server = http.createServer((req, res) => {

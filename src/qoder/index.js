@@ -15,6 +15,7 @@ const authStore = require('./auth');
 const session = require('./session');
 const constants = require('./constants');
 const { normalizeError } = require('../errtext');
+const ledger = require('../checkin-ledger');
 
 /**
  * 预热**模型表**：runOnce 从同步缓存里取「该模型的最大上下文档位」（1M），
@@ -456,6 +457,14 @@ async function checkinAndSave(account) {
     const auth = require('./auth');
     if (got) auth.patch(a.id, { lastCheckin: Date.now() });
   } catch (e) { /* 落盘失败不影响本次签到结果 */ }
+  // 签到账本：某天某账号签到了（按月/按年的签到详情用它）。
+  // 今天已领过（一个活动都不可领）也算「这天签过」，如实记 already。
+  if (got || r.alreadyChecked) {
+    ledger.append({
+      channel: 'qoder', account_id: a.id, account: a.nickname || a.uid || '',
+      at: Date.now(), credits: got ? r.gained : null, source: got ? 'claim' : 'already',
+    });
+  }
   return r;
 }
 

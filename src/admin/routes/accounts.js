@@ -7,6 +7,7 @@ const webPool = require('../../web-pool');
 const taskRunner = require('../../task-runner');
 const taskScheduler = require('../../task-scheduler');
 const records = require('../../records');
+const ledger = require('../../checkin-ledger');
 const pointsAgg = require('../../points-agg');
 const { sendJSON } = require('../router');
 
@@ -232,6 +233,12 @@ async function doCheckin(account) {
       total_points: info.total_points,
       points_delta: null, points_before: cur, points_after: cur,
     });
+    // 签到账本：某天某账号签到了（按月/按年的签到详情用它）。
+    // 与 activity.jsonl 不同，这里只记「签成了」，且按天幂等。
+    ledger.append({
+      channel: 'dumate', account_id: account.id, account: accounts.displayName(account),
+      at: Date.now(), source: 'already',
+    });
     return ret;
   }
 
@@ -263,6 +270,12 @@ async function doCheckin(account) {
     points_after: pd.after,
     error: res.error || '',
   });
+  if (res.ok) {
+    ledger.append({
+      channel: 'dumate', account_id: account.id, account: accounts.displayName(account),
+      at: Date.now(), credits: pd.delta, source: 'claim',
+    });
+  }
   return {
     id: account.id, name: accounts.displayName(account), ok: res.ok, error: res.error, info,
     points_delta: pd.delta, points_before: pd.before, points_after: pd.after,
