@@ -1,92 +1,69 @@
 快照指纹 sha256（stable/src 下 47 个 .js，按路径+内容计算）：
-c7a3c0599590ee8e4f368d8d5550f5f1a3fab1d2c4c10c03bb5d83d9e14bb1c2
+dc89567a0c7b8817c68609ea80d77a9ebf6486960b725c19619a2be3ee667880
 
 指纹算法：
   对 stable/src 下所有 .js 文件，按相对路径排序（`/` 分隔），
   拼接 [相对路径 + LF + 文件内容]，以 UTF-8 编码后取 sha256。
-  本次已复算两遍，结果一致。
+  本次已用该算法实算，可复核。
 
-来源：main 分支提交 132e744（merge(dev)：流式 usage 帧与首字耗时埋点补齐）
-  本批改动同步时已合并进 main，快照文件随后以 chore(stable) 单独提交。
+来源：main 分支合并提交 6007f0d（merge(dev)：Qoder 上游失败不再静默空回答）
+  快照文件随后以 chore(stable) 单独提交。
 
-文件数：47 → 47（无新增、无删除）。内容变更 14 个，+393 / −74。
+文件数：47 → 47（无新增、无删除）。内容变更 3 个，+245 / −32。
 
 本次同步的改动（按影响面排序）：
 
-  server.js —— 两处：
-    (1) **流式 usage 帧在四个协议入口统一注入**。云端网关
-        dumate-svc.baidu.com 只在被显式要求时才在流尾补 usage 帧，而
-        stream_options.include_usage 此前只写在 handleAnthropicMessages，
-        于是网页凭证链路上「请求全 200、token 全记 0」。现补齐
-        handleOpenAIChat / handleOpenAIResponses / handleGoogleGenerateContent。
-        注入点必须在 `if (target.direct) return ...` **之后**——直连通道
-        （千问/TRAE/Qoder）的 buildBody 不认识该字段。
-    (2) **搭子凭证来源默认改为网页池**（router.dumateSource() 返回 web）。
-        桌面链路只在 DUMATE_DUMATE_SOURCE=auto 时作为备用参与。网页池
-        不可用时给出明确原因，不静默退回桌面凭证。余额游标丢失账号的问题
-        一并修掉（points-cursor）。
+  qoder/chat.js —— 上游错误必须被认出来，不能再当正常数据转发。
+    (1) payloadError 判据收严。上游 provider 层失败发的是
+        {"code":"provider_error","message":"All backends failed","type":"provider_error"}
+        ——字符串 code 且**首字母小写**，旧判据 /^[A-Z]/ 漏掉，整帧被当正常
+        数据转发；翻译器取不到 choices → 客户端拿到 HTTP 200 + 空回答
+        （实测 /v1/responses 只发 created/in_progress/completed，output 为空）。
+        现在认小写字符串 code、type=*_error、error 对象；同时不误伤
+        code=0 / 'success' 这类成功标记。
+    (2) envelopeStatus 兜住**非信封的纯错误体**（上游 4xx/5xx 时常见）。
+    (3) 首字节超时 DUMATE_QODER_FIRST_BYTE_MS（默认 60s）：上游被限流时
+        会接受连接却不回（实测 180s 才 abort），而 600s 空闲超时会把客户端
+        拖到早已超时之后。计时从请求写出开始，覆盖「连响应头都不给」的挂起。
+    (4) postStream 保留最多 64KB 原始字节，错误时才能把上游 message 如实报出。
 
-  reqlog.js —— markFirstToken 从 server.js 私有函数改为此处导出。
-    三个协议翻译器（Responses / Anthropic / Google）手里也有 res，此前拿不到
-    这个函数，导致 /v1/responses 与 /v1/messages 的流式请求一条
-    first_token_ms 都记不下来（实测 dumate /v1/responses 1295 条全为 0，
-    而直连通道 1987/1987 正常）。口径统一为「首个上游字节到达」，
-    不用翻译器自造的 response.created / message_start 计时。
+  qoder/index.js —— 模型名解析与错误上报。
+    (1) **warmupModels()** 预热**每个可用账号**的模型表（缓存按区域+账号
+        隔离，只预热主账号会让换号后解析不出模型名）。
+    (2) **resolveModelWithFetch()**：热路径上缓存认不出时补拉一次模型表，
+        失败退避 60s。此前是纯同步读缓存，缓存为空就把显示名原样当 key
+        发给上游 → provider_error → 空回答。
+    (3) runOnce 按状态码判 HTTP 错误（流式与非流式两条路径），并从原始 body
+        取上游 message；200 但非 SSE 的纯错误体也兜一次信封解析。
+    (4) onModel 回调上报**实际发给上游的 key**（埋点 mapped_model），
+        名字有没有解析成功不再在日志里不可见。
+    (5) 全账号失败时带上每个账号的失败原因；状态码 0（网络层失败）映射为 502。
 
-  responses.js / google.js —— 翻译器的 upstreamRes.on('data') 首句调用
-    markFirstToken(res)，与透传分支同一口径。
-
-  fallback-web.js —— 头注释重写：网页凭证**不缺**协议能力（它被包装成伪上游
-    响应后由四个处理器原样复用，responses / count_tokens / 前缀分流都照常），
-    真正没有 responses 的是 9084 那条独立链路 web-gateway.js。旧注释会让人
-    把两件事读混。
-
-  upstream-router.js —— availability('dumate') 新增 web 分支：该通道可用性
-    即「网页池里有没有可用账号」。四个协议入口都走这个函数，一处覆盖全部。
-
-  modelmap.js —— /v1/models 只列上游真实模型（model-text /
-    model-artifact-validate / glm-5）。claude-* 与 gpt-4o 是客户端协议名，
-    别名映射保留、仍可传，但不再出现在可选模型清单里（否则 cc-switch 会把
-    它们显示成独立模型）。新增 MODEL_NAMES / displayName()，中文名明确标注
-    为本地标注而非上游元信息。
-
-  model-info.js + traework/models.js —— 上下文上限改为显示实测硬限，
-    不再拿压缩阈值当上限。
-
-  qoder/session.js + chat.js + index.js —— 从 context_config 取出全部上下文
-    档位（200K/400K/1M），默认按**最大档**下发 model_config.max_input_tokens；
-    模型名支持上游真实显示名。新增 cachedModels() 供热路径同步读取，
-    不额外等一次上游调用。
-
-  traework/constants.js —— 版本码动态生成，上游模型表不再需要手动跟进。
-
-  traework/auth.js —— 新增 lastErrorAt（与 qwenwork/auth.js 同构），
-    在 patch() 里集中打时间戳；界面据此显示「N 分钟前」，避免把早已自愈的
-    瞬时错误读成当前故障。
+  server.js —— 三处：
+    (1) **补上 Qoder 模型表预热调用点**。此前 server.js 只给千问和 TRAE 写了
+        预热块，Qoder 的 warmup 从没被调用过，网关进程里缓存恒为空。
+    (2) handleDirectChannel 新增 onModel 回调，把实际模型 key 写进埋点。
+    (3) 直连通道的错误统一走 done 回调（单独再调 logRequest 会被去重丢掉）。
 
 验证记录（2026-10-22，全部实测）：
 
-  - **逐字节比对**：闭包 47 = 快照 47，内容全部一致；反向检查无多余文件
-    （闭包由 src/server.js 出发递归解析相对 require 得出，无动态 require）
+  - **逐字节比对**：闭包 47 = 快照 47，内容全部一致（本批只改 3 个文件）；
+    反向检查无多余文件（闭包由 src/server.js 出发递归解析相对 require 得出）
   - **node --check**：47 个文件全部通过
   - **独立启动**（临时端口 19099，DUMATE_ADMIN_DATA=<repo>/data，
     DUMATE_AUTOSTART=off）：
+      启动日志新增「✓ Qoder 模型表就绪（11 个模型）」——预热路径实测生效
       /health → dumate ready=true + source=web + fallback.available=true；
-        qwenwork ready=true + wasm:"local"；traework ready=true；qoder ready=true
-      6 条真实请求全 200：搭子 chat / responses / messages / google 四路流式、
-        千问 flash 直连流式、TRAE Work 非流式
-      未知前缀 `nope/x` → 400（前缀路由不静默回落）
-      埋点抽查：四条搭子流式全部 credential_source=web 且 first_token_ms /
-        input_tokens / output_tokens 非零——
-          chat       ft=1255  in=14  out=231
-          responses  ft=765   in=85  out=39
-          messages   ft=370   in=85  out=73
-          google     ft=331   in=32  out=86
-        千问直连 chat  ft=1451  in=63  out=43
-  - **未启动 9080**：本步骤只更新快照文件；发版启动在随后的步骤完成
-
-  观察（既有行为，未纳入本次同步）：TRAE Work 非流式 /v1/messages 的 usage
-  仍记 0（上游非流式不回 usage 帧），流式路径正常。
+        qwenwork ready=true + wasm:"local"；traework ready=true；
+        qoder ready=true + needsClient=false
+      真实请求：`qoder/GLM-5.3-Flash`（**显示名**，0.1 档）→ 200 + 正文 "OK"、
+        usage 完整（credits 0.3131）——显示名解析链路实测通过
+      （不存在的模型名上游会自行兜底成正常回答，无法在线构造 provider_error；
+        该形态由离线测试覆盖）
+  - **离线回归**：test/verify-qoder-channel.js（含新增 6 项判据）、
+    test/verify-qoder-error-surface.js（provider_error 帧 / 429 非 SSE 体 /
+    200 纯错误体 / 正常流不受影响 / 缓存为空补拉与 onModel 上报）全部通过
+  - **未启动 9080**：本次只更新快照文件，9080 保持停止状态
 
 启动方式（沿用）：
   9080 必须按 start-stable.bat 启动（它设了 DUMATE_ADMIN_DATA=<repo>/data）。
@@ -95,13 +72,15 @@ c7a3c0599590ee8e4f368d8d5550f5f1a3fab1d2c4c10c03bb5d83d9e14bb1c2
   且 9083 管理端读的是 <repo>/data、看不到 9080 的流量。
 
 上一版快照来源：
-  0927bfd（千问本地签名脱离客户端 + 搭子回落流式 pipe 修复 + 仪表盘降级容错），
-  指纹 d0223393…
+  132e744（merge(dev)：流式 usage 帧与首字耗时埋点补齐 + 默认网页凭证），
+  指纹 c7a3c059…
 
 更早：
+  0927bfd —— 千问本地签名脱离客户端 + 搭子回落流式 pipe 修复 + 仪表盘降级容错，
+    指纹 d0223393…
   49697a8 —— 回落流式 pipe 修复 + TRAE checkin 补漏，指纹 a23a9946…
   0fe2167 feat: Anthropic 原生工具 + TRAE 播报修复 + Qoder 积分归因（2026-10-06），
-  指纹 609ba739…
+    指纹 609ba739…
   ccf8e27 perf(qoder): cosy.encode 改 O(n)（2026-10-03），指纹 7225acd3…
   225e597 chore(stable): 同步快照到 23a62d0（流式失败收尾修复）
   578d8b0 → 9736b11（Qoder 通道接入），指纹 3662af33…

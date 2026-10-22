@@ -22,13 +22,35 @@ const { normalizeError } = require('../errtext');
  * 但**模型表要预热**：runOnce 从同步缓存里取「该模型的最大上下文档位」
  * （1M），缓存为空时只能回落默认档 200K。这里异步拉一次、不阻塞启动——
  * 与 TRAE 的 warmupModels 同一思路。
+ *
+ * **每个可用账号都要预热**（2026-10-22 修）：模型表缓存按「区域 + 账号」
+ * 隔离（见 session.modelsCacheKey），只预热主账号时，换号重试落到第二个
+ * 账号后 `cachedModels` 为空，模型名就解析不出来。
+ * 调用点原先**根本不存在**——server.js 只给千问和 TRAE 写了预热块，
+ * Qoder 的 warmup 从没被调用过，于是网关进程里的模型表缓存恒为空：
+ * 客户端写显示名（`qoder/GLM-5.3-Flash`）时被原样当 key 发出去，
+ * 上游返回 `provider_error` → 空回答。
  */
 function warmup() {
-  try {
-    const a = authStore.preferred();
-    if (a) session.fetchModels(a).catch(() => null);
-  } catch (e) { /* 预热失败不影响启动 */ }
+  warmupModels().catch(() => null);
   return status();
+}
+
+/**
+ * 拉一遍所有可用账号的模型表（异步，给启动日志用）。
+ * 返回最后一个账号的结果 `{ ok, models, error }`——部分账号失败时，
+ * 只要有一个成功就算可用（另一个账号会在请求时走补拉）。
+ */
+async function warmupModels() {
+  const accounts = authStore.findUsable();
+  if (!accounts.length) return { ok: false, error: '尚未添加 Qoder 账号', models: [] };
+  let last = { ok: false, error: 'unknown', models: [] };
+  for (const a of accounts) {
+    const r = await session.fetchModels(a).catch((e) => ({ ok: false, error: e.message, models: [] }));
+    if (r && r.ok && r.models && r.models.length) last = r;
+    else if (!last.ok) last = r || last;
+  }
+  return last;
 }
 
 function status() {
@@ -78,6 +100,43 @@ function markFailure(account, msg) {
   catch (e) { /* 记不下不影响主流程 */ }
 }
 
+// 模型表补拉的退避窗口：失败后这段时间内不再试，避免每个请求都白等一次
+// 20s 超时（模型表接口的 TIMEOUT_MS）。成功则清掉。
+const MODEL_FETCH_BACKOFF_MS = 60000;
+const modelFetchFailedAt = new Map();
+
+/**
+ * 解析模型名；缓存里认不出来时补拉一次模型表再解析。
+ *
+ * 返回 `{ key, models }`。补拉失败就沿用现有缓存（可能为空）原样透传——
+ * 让上游自己报错，比静默回落到别的模型好。
+ *
+ * 为什么不能只靠启动预热：模型表缓存按「区域 + 账号」隔离，换号重试会落到
+ * 另一个账号，那份缓存可能是空的；启动时上游抖动也会让预热失败且永不重试。
+ */
+async function resolveModelWithFetch(auth, rawName) {
+  const cached = session.cachedModels(auth) || [];
+  const key = chat.resolveModelKey(rawName, cached);
+  const bare = String(rawName || '').trim().replace(/^qoder\//i, '');
+  const known = (list) => list.some((m) => m && (
+    m.key === bare || String(m.name || '').toLowerCase() === bare.toLowerCase()
+  ));
+  // 已经解析出来了（别名 / 内部 key / 显示名命中），不需要再拉
+  if (cached.length && (key !== bare || known(cached))) return { key, models: cached };
+
+  const ck = `${constants.normalizeRegion(auth.region)}:${auth.uid || auth.id}`;
+  if (Date.now() - (modelFetchFailedAt.get(ck) || 0) < MODEL_FETCH_BACKOFF_MS) {
+    return { key, models: cached };
+  }
+  const r = await session.fetchModels(auth).catch(() => null);
+  if (r && r.ok && r.models && r.models.length) {
+    modelFetchFailedAt.delete(ck);
+    return { key: chat.resolveModelKey(rawName, r.models), models: r.models };
+  }
+  modelFetchFailedAt.set(ck, Date.now());
+  return { key, models: cached };
+}
+
 /**
  * 用指定账号跑一次请求。
  *
@@ -89,12 +148,26 @@ async function runOnce(account, payload, onChunk, opts, meter) {
   const region = constants.normalizeRegion(auth.region);
   const ep = constants.endpointsOf(region);
   // 上下文取该模型的**最大档**（模型表 context_config 的 1M/400K/200K）。
-  // 缓存没预热时回落到默认档（buildBody 的 200000）——这里在热路径上，
-  // 不能为了一个数字再等一次上游请求。DUMATE_QODER_CONTEXT=default 可整体退回默认档。
-  const cachedModels = session.cachedModels(auth) || [];
+  // 缓存没预热时回落到默认档（buildBody 的 200000）。DUMATE_QODER_CONTEXT=default
+  // 可整体退回默认档。
+  //
   // 模型名解析要拿模型表：调用方写 `qoder/GLM-5.3-Flash`（真实名）或
-  // `qoder/gfmodel`（内部 key）都要认，前者是给人看的
-  const modelKey = chat.resolveModelKey(payload && payload.model, cachedModels);
+  // `qoder/gfmodel`（内部 key）都要认，前者是给人看的。
+  //
+  // **缓存为空时必须补拉一次**（2026-10-22 修）：以前这里是纯同步读缓存，
+  // 缓存为空就把显示名原样当 key 发给上游——上游认不出，回
+  // `provider_error: All backends failed`，客户端收到 200 + 空回答。
+  // 启动预热解决不了换号落到另一个账号的情况（缓存按账号隔离），
+  // 所以热路径上留一次带退避的兜底拉取。
+  const resolved = await resolveModelWithFetch(auth, payload && payload.model);
+  const cachedModels = resolved.models;
+  const modelKey = resolved.key;
+  // 把**实际发给上游的 key** 报给埋点。不报的话 `mapped_model` 只记录调用方
+  // 写的名字，显示名有没有解析成功在日志里看不出来——这次的空回答问题
+  // 恰恰就是「名字没解析」却完全不可见。
+  if (opts && typeof opts.onModel === 'function') {
+    try { opts.onModel(modelKey); } catch (e) { /* 上报失败不影响请求 */ }
+  }
   const modelMeta = cachedModels.find((m) => m.key === modelKey);
   const ctxMax = process.env.DUMATE_QODER_CONTEXT === 'default' ? null : (modelMeta && modelMeta.maxInputTokens);
   const bodyJson = chat.buildBody(modelKey, payload, { maxInputTokens: ctxMax });
@@ -153,6 +226,30 @@ async function runOnce(account, payload, onChunk, opts, meter) {
         err.sent = sent;
         throw err;
       }
+      // HTTP 层错误：上游 4xx/5xx 时 body 往往不是 SSE（没有 `data:` 行），
+      // 上面一帧都收不到，旧实现就当成功返回 → 客户端 200 + 空响应。
+      // 这里按状态码判，并从原始 body 里取上游的 message 如实报出。
+      if (res.status >= 400) {
+        const es = chat.envelopeStatus(res.raw);
+        const detail = (es && es.message)
+          || String(res.raw || '').replace(/\s+/g, ' ').trim().slice(0, 200)
+          || 'upstream error';
+        const err = new Error(`qoder ${res.status}: ${detail}`);
+        err.statusCode = res.status;
+        err.sent = sent;
+        throw err;
+      }
+      // 200 但不是 SSE：上游偶尔用 200 回一个纯错误体（provider_error 就是
+      // 这种形状）。一帧都没转发出去时再兜一次信封解析。
+      if (!sent) {
+        const es = chat.envelopeStatus(res.raw);
+        if (es && es.code >= 400) {
+          const err = new Error(`qoder ${es.code}: ${es.message}`);
+          err.statusCode = es.code;
+          err.sent = false;
+          throw err;
+        }
+      }
       meter.settle(peakCredits);
       return res;
     }
@@ -161,6 +258,12 @@ async function runOnce(account, payload, onChunk, opts, meter) {
     if (es && es.code >= 400) {
       const err = new Error(`qoder ${es.code}: ${es.message}`);
       err.statusCode = es.code;
+      throw err;
+    }
+    // 与流式路径同理：非 SSE 的 HTTP 错误体也要认，否则会聚合成一个空回答
+    if (res.status >= 400) {
+      const err = new Error(`qoder ${res.status}: ${String(res.raw || '').replace(/\s+/g, ' ').trim().slice(0, 200) || 'upstream error'}`);
+      err.statusCode = res.status;
       throw err;
     }
     const payloads = [];
@@ -238,7 +341,7 @@ async function send(payload, onChunk, opts = {}) {
     } catch (e) {
       const code = Number(e.statusCode) || 0;
       markFailure(account, e.message);
-      errors.push({ account: account.nickname || account.uid || account.id, status: code || '-', error: e.message });
+      errors.push({ account: account.nickname || account.uid || account.id, status: code || '网络错误', error: e.message });
       if (e.sent) throw e; // 流式已吐帧，不能再换号
       if (!retryable(code, e.message)) throw e;
       const rest = nextAccount(tried);
@@ -247,7 +350,15 @@ async function send(payload, onChunk, opts = {}) {
     }
   }
 
-  const err = new Error(`Qoder 所有账号均失败：${errors.map((x) => `${x.account}(${x.status})`).join('；')}`);
+  // 带上每个账号的失败原因：只给状态码时，`(500)` / `(网络错误)` 无法区分
+  // 「上游限流」「provider 挂了」「凭证失效」——排障只能去翻日志。
+  const brief = (x) => {
+    const m = String(x.error || '').replace(/\s+/g, ' ').trim();
+    return `${x.account}(${x.status}${m ? ': ' + m.slice(0, 120) : ''})`;
+  };
+  const err = new Error(`Qoder 所有账号均失败：${errors.map(brief).join('；')}`);
+  // 状态码 0 = 网络层失败（连接被拒/中断/首字节超时）。映射成 502 让客户端
+  // 知道是上游不可用，而不是把 0 原样回出去（0 会被某些客户端当成「无错误」）。
   err.statusCode = Number(errors[errors.length - 1].status) || 502;
   throw err;
 }
@@ -340,7 +451,7 @@ function quota(account) {
 }
 
 module.exports = {
-  warmup, status, send, listModels, listModelEntries, pickAccount, checkin, quota,
+  warmup, warmupModels, status, send, listModels, listModelEntries, pickAccount, checkin, quota,
   chatCompletion: (p, opts) => send(p, undefined, opts),
   chatCompletionStream: (p, cb, opts) => send(p, cb, opts),
 };
