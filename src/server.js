@@ -161,11 +161,14 @@ async function handleDirectChannel(req, res, payload, route, ctx) {
   // 多账号轮询下（TRAE）只有 provider 知道选中的是哪一个——
   // 在埋点处猜一个必然会在轮询时记错。
   const onAccount = (name) => { if (name) req._upstreamAccount = String(name); };
+  // provider 解析出**实际发给上游的模型 key** 后回调（目前只有 Qoder 报）。
+  // `route.model` 只是去掉前缀的调用方写法，显示名有没有解析成功看不出来。
+  const onModel = (name) => { if (name) req._mappedModel = String(name); };
 
   try {
     if (!wantStream) {
       // traework 的 send 第二参是 onChunk；不传即为非流式聚合
-      const result = await provider.send(payload, undefined, { reqId, onAccount });
+      const result = await provider.send(payload, undefined, { reqId, onAccount, onModel });
       const out = kind === 'openai' ? result : result;
       if (kind === 'anthropic') {
         const anth = openAIToAnthropic(out, payload.model);
@@ -274,7 +277,7 @@ async function handleDirectChannel(req, res, payload, route, ctx) {
           seen += `data: ${inner}\n`;
           if (seen.length > TAIL) seen = seen.slice(-TAIL);
           shim.write(`data: ${inner}\n\n`);
-        }, { reqId, onAccount });
+        }, { reqId, onAccount, onModel });
         // traework 的 provider 回调不发 [DONE]（事件流用 event:done 收尾，
         // 已在 readStream 里吃掉），所以这里补一个再关流。
         // **顺序关键**：先补 [DONE]、再 end——直接 end 会让翻译器在
@@ -309,8 +312,10 @@ async function handleDirectChannel(req, res, payload, route, ctx) {
         if (!res.headersSent) {
           // 首帧前就失败：回正经的 4xx JSON，客户端能看懂
           try { shim.end(); } catch (e2) { /* 已结束 */ }
-          done(null, status);
-          logRequest(req, res, startedAt, info, status, null, { error: e.message });
+          // **extra 必须交给 done**：done 内部才调 logRequest，而 logRequest
+          // 按 res._logged 去重——先 done 再单独调一次带 error 的 logRequest
+          // 会被静默丢掉，于是所有直连通道的错误在埋点里都是 err 为空。
+          done(null, status, { error: e.message });
           try {
             sendJSON(res, status, { error: { message: e.message, type: 'api_error' } });
           } catch (e2) { /* 已结束 */ }
@@ -341,8 +346,8 @@ async function handleDirectChannel(req, res, payload, route, ctx) {
           try { shim.end(); } catch (e2) { /* 已结束 */ }
           try { if (!res.writableEnded) res.end(); } catch (e2) { /* 已结束 */ }
         }
-        done(null, status);
-        logRequest(req, res, startedAt, info, status, null, { error: e.message });
+        // 同上一分支：错误必须交给 done，单独再调 logRequest 会被去重丢掉
+        done(null, status, { error: e.message });
       }
     })();
   } catch (e) {
@@ -1679,6 +1684,26 @@ async function start() {
     }
   } catch (e) {
     log('⚠ TRAE Work 通道不可用（搭子链路不受影响）:', e.message);
+  }
+
+  // Qoder 通道：签名纯本地，不需要任何客户端。同样要预热**模型表**——
+  // resolveModelKey 靠它把显示名（GLM-5.3-Flash）映射成上游 key（gfmodel）。
+  // 漏了这段（2026-10-22 修）时网关进程里的缓存恒为空，客户端写显示名
+  // 会被原样当 key 发出去，上游回 provider_error，用户拿到 200 + 空回答。
+  try {
+    const qd = require('./qoder');
+    const st = qd.status();
+    if (st.ready) {
+      qd.warmupModels().then((m) => {
+        if (m && m.ok) log(`✓ Qoder 模型表就绪（${m.models.length} 个模型）`);
+        else log(`⚠ Qoder 模型表拉取失败（显示名将无法解析，只能用内部 key）: ${(m && m.error) || 'unknown'}`);
+      });
+      log(`✓ Qoder 通道就绪（账号 ${st.accounts} 个）`);
+    } else {
+      log(`· Qoder 通道未就绪：${st.error}`);
+    }
+  } catch (e) {
+    log('⚠ Qoder 通道不可用（搭子链路不受影响）:', e.message);
   }
 
   server.listen(PROXY_PORT, PROXY_HOST, () => {

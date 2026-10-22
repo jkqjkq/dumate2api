@@ -202,15 +202,55 @@ function unwrap(raw) {
   return [s];
 }
 
-/** 从内层 payload 判定是否错误 */
+/**
+ * 从内层 payload 判定是否错误。
+ *
+ * **字符串 code 也要认**（2026-10-22 修，静默空响应级）。上游 provider 层
+ * 失败时发的是：
+ *
+ *   {"code":"provider_error","message":"All backends failed","type":"provider_error"}
+ *
+ * 旧判据只认 `/^[A-Z]/` 开头的字符串 code，而 `provider_error` 是小写——
+ * 于是这帧被当成**正常数据**转发。下游三个翻译器都按 `choices` 取内容，
+ * 这帧没有 choices，被直接跳过，流照常收尾 → 客户端拿到 **HTTP 200 + 空回答**
+ * （实测 `/v1/responses` 只发 created/in_progress/completed 三个事件，
+ * output 为空数组、usage 全 0）。不报错、不重试，是最难排查的形态。
+ *
+ * 判据收严的另一面也要防误伤：正常数据帧（chunk）没有 `code` / `type` 字段，
+ * 所以只在**确实带错误信号**时返回错误——非数字字符串 code 必须同时有
+ * message 或 type 才算。
+ */
 function payloadError(obj) {
   if (!obj || typeof obj !== 'object') return null;
-  const code = obj.code != null ? Number(obj.code) : null;
-  if (code && code >= 400) {
-    return { code, message: String(obj.message || obj.error || '') };
+  const msgOf = (o) => String((o && (o.message || o.msg || o.error)) || '').trim();
+
+  const raw = obj.code;
+  const num = raw != null ? Number(raw) : null;
+  if (num && num >= 400) return { code: num, message: msgOf(obj) };
+
+  if (typeof raw === 'string' && raw.trim()) {
+    const s = raw.trim();
+    if (/^\d+$/.test(s)) {
+      const n = Number(s);
+      if (n >= 400) return { code: n, message: msgOf(obj) };
+    } else if (msgOf(obj) || obj.type || obj.error) {
+      // provider_error / LoginExpired / ...：小写也要认
+      const tail = msgOf(obj);
+      return { code: 500, message: tail ? `${s}: ${tail}` : s };
+    }
   }
-  if (typeof obj.code === 'string' && /^[A-Z]/.test(obj.code) && obj.message) {
-    return { code: 500, message: `${obj.code}: ${obj.message}` };
+
+  // 没有 code 但形状是错误：{"type":"provider_error","message":"..."} / {"error":{...}}
+  const type = String(obj.type || '');
+  if (type && (/_error$/i.test(type) || /^error$/i.test(type)) && (msgOf(obj) || obj.error)) {
+    return { code: 500, message: msgOf(obj) ? `${type}: ${msgOf(obj)}` : type };
+  }
+  if (obj.error && typeof obj.error === 'object') {
+    const inner = Number(obj.error.code);
+    return {
+      code: Number.isFinite(inner) && inner >= 400 ? inner : 500,
+      message: String(obj.error.message || obj.error.code || 'upstream error'),
+    };
   }
   return null;
 }
@@ -238,6 +278,9 @@ function envelopeStatus(raw) {
       } catch (e) { message = String(outer.body || '').slice(0, 200); }
       return { code, message };
     }
+    // 非 SSE 的错误体（上游 4xx/5xx 时常见）没有信封，错误就在最外层
+    const outerErr = payloadError(outer);
+    if (outerErr) return outerErr;
     try {
       const inner = typeof outer.body === 'string' ? JSON.parse(outer.body) : outer.body;
       const err = payloadError(inner);
@@ -245,6 +288,24 @@ function envelopeStatus(raw) {
     } catch (e) { /* 内层不是 JSON */ }
   }
   return null;
+}
+
+// 首字节超时。上游被限流时会**接受连接然后一直不回**（实测 180s 后 abort），
+// 而 `timeout` 是 socket 空闲超时（600s），换号重试两次就是 20 分钟——
+// 客户端早就超时了，网关还在等。所以单独给「第一个字节」设一个更短的上限：
+// 到点主动断，交给上层换号或如实报错。
+// 正常请求的首字实测在 0.5~2.5s，60s 留了两个数量级的余量；
+// 大上下文确实慢时用 DUMATE_QODER_FIRST_BYTE_MS 放宽（上限参考上游自己的 180s）。
+const FIRST_BYTE_MS = parseInt(process.env.DUMATE_QODER_FIRST_BYTE_MS || '60000', 10);
+
+/** 给请求挂一个「首字节」计时器；返回 clear()，收到第一块数据后调用 */
+function armFirstByte(req) {
+  if (!(FIRST_BYTE_MS > 0)) return () => {};
+  const timer = setTimeout(() => {
+    req.destroy(new Error(`qoder upstream first-byte timeout (${FIRST_BYTE_MS}ms)`));
+  }, FIRST_BYTE_MS);
+  if (typeof timer.unref === 'function') timer.unref();
+  return () => clearTimeout(timer);
 }
 
 /** 发一次推理请求，返回 { status, headers, raw } */
@@ -260,11 +321,15 @@ function post(url, body, headers) {
     }, (res) => {
       let buf = '';
       const dec = new StringDecoder('utf8');
-      res.on('data', (x) => { buf += dec.write(x); });
-      res.on('end', () => { buf += dec.end(); resolve({ status: res.statusCode, headers: res.headers, raw: buf }); });
-      res.on('error', reject);
+      res.on('data', (x) => { clearFb(); buf += dec.write(x); });
+      res.on('end', () => { clearFb(); buf += dec.end(); resolve({ status: res.statusCode, headers: res.headers, raw: buf }); });
+      res.on('error', (e) => { clearFb(); reject(e); });
     });
-    req.on('error', reject);
+    // 计时器**从请求写出时开始**，不是从响应头开始：上游被限流时可能连响应头
+    // 都不给，那种情况下 socket 空闲超时（600s）才会兜底，而客户端早就断了。
+    let clearFb = () => {};
+    clearFb = armFirstByte(req);
+    req.on('error', (e) => { clearFb(); reject(e); });
     req.on('timeout', () => { req.destroy(new Error('qoder upstream timeout')); });
     req.write(body);
     req.end();
@@ -283,6 +348,11 @@ function postStream(url, body, headers, onChunk) {
       timeout: TIMEOUT_MS,
     }, (res) => {
       let buf = '';
+      // 原始字节留一份（有上限）：**非 SSE 的错误体**（上游 4xx/5xx 时常见）
+      // 没有 `data:` 行，flushLine 会全部丢掉，上层就只剩一个 statusCode。
+      // 留一份原文，runOnce 才能把上游的 message 如实报出来。
+      let rawAll = '';
+      const RAW_CAP = 65536;
       // 必须用 StringDecoder：TCP chunk 不按字符边界切，逐块 toString 会把
       // 跨 chunk 的汉字截成 U+FFFD（流式输出里随机出现「�」）
       const dec = new StringDecoder('utf8');
@@ -294,7 +364,10 @@ function postStream(url, body, headers, onChunk) {
         for (const inner of unwrap(raw)) onChunk(inner);
       };
       res.on('data', (chunk) => {
-        buf += dec.write(chunk);
+        clearFb();
+        const text = dec.write(chunk);
+        buf += text;
+        if (rawAll.length < RAW_CAP) rawAll += text;
         let idx;
         while ((idx = buf.indexOf('\n')) >= 0) {
           const line = buf.slice(0, idx);
@@ -303,15 +376,19 @@ function postStream(url, body, headers, onChunk) {
         }
       });
       res.on('end', () => {
+        clearFb();
         buf += dec.end();
         // 收尾：最后一帧常不带换行；且上游不发 [DONE]，要自己补
         flushLine(buf);
         onChunk('[DONE]');
-        resolve({ status: res.statusCode, headers: res.headers });
+        resolve({ status: res.statusCode, headers: res.headers, raw: rawAll });
       });
-      res.on('error', reject);
+      res.on('error', (e) => { clearFb(); reject(e); });
     });
-    req.on('error', reject);
+    // 与 post 同理：从请求写出时开始计时，覆盖「连响应头都不给」的挂起
+    let clearFb = () => {};
+    clearFb = armFirstByte(req);
+    req.on('error', (e) => { clearFb(); reject(e); });
     req.on('timeout', () => { req.destroy(new Error('qoder upstream timeout')); });
     req.write(body);
     req.end();
