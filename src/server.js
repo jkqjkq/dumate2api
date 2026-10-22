@@ -19,6 +19,9 @@ function resolveBudget(target, requested) {
   return resolveMaxTokens(requested);
 }
 const reqlog = require('./reqlog');
+// 首字标记归 reqlog 统一实现：三个协议翻译器（Responses / Anthropic / Google）
+// 也在 reqlog 之外调用它，两处各写一份必然漂移。
+const markFirstToken = reqlog.markFirstToken;
 const pointsCursor = require('./points-cursor');
 const modelmap = require('./modelmap');
 const keysvc = require('./keys');
@@ -617,12 +620,6 @@ function logRequest(req, res, startedAt, info, status, usage, extra) {
   }
 }
 
-// 标记首字时刻。多次调用只记第一次——流式响应会持续吐字节，
-// 我们要的是「第一个」，不是最后一个。
-function markFirstToken(res) {
-  if (!res._firstTokenAt) res._firstTokenAt = Date.now();
-}
-
 // ==================== OpenAI Compatible Endpoints ====================
 
 async function handleOpenAIModels(req, res) {
@@ -763,6 +760,12 @@ async function handleOpenAIChat(req, res) {
     return await handleDirectChannel(req, res, reqBody, route, { startedAt, info, kind: 'openai' });
   }
 
+  // 云端网关（dumate-svc.baidu.com）只在被显式要求时才在流尾补一个 usage 帧；
+  // 8980 桌面后端默认就发，所以缺了这行的症状只出现在网页凭证链路上——
+  // 请求全部 200，token 全记 0。**必须放在 target.direct 之后**：直连通道的
+  // buildBody 不认识这个字段。
+  if (reqBody.stream) reqBody.stream_options = { include_usage: true };
+
   const outBody = JSON.stringify(reqBody);
 
   const upstreamReq = forwardWithFallback(target, '/chat/completions', 'POST', {}, outBody, req, (upstreamRes) => {
@@ -859,8 +862,11 @@ async function handleOpenAIChat(req, res) {
   });
 }
 
-// Rough token estimate. DuMate exposes no tokenizer, so bytes/4 is a
+// Rough token estimate. DuMate exposes no tokenizer, so chars/4 is a
 // deliberately conservative stand-in that keeps Claude Code happy.
+// String.length 是 UTF-16 码元数，**不是字节数**：一个汉字算 1，UTF-8 下它
+// 占 3 字节。所以这是「字符数/4」；中文按真分词约 1 字 1 token，估算值会
+// 偏小约 4 倍——只够给客户端做预算参考，不能当计费依据。
 function estimateTokens(value) {
   if (value == null) return 0;
   if (typeof value === 'string') return Math.ceil(value.length / 4);
@@ -953,6 +959,8 @@ async function handleGoogleGenerateContent(req, res, isStream, pathModel) {
     openaiReq.stream = isStream;
     return await handleDirectChannel(req, res, openaiReq, route, { startedAt, info, kind: 'google' });
   }
+  // 同 handleOpenAIChat：云端只在被显式要求时回流 usage 帧。
+  if (isStream) openaiReq.stream_options = { include_usage: true };
   const outBody = JSON.stringify(openaiReq);
   forwardWithFallback(target, '/chat/completions', 'POST', {}, outBody, req, (upstreamRes) => {
     if (upstreamRes.fakeResponse) {
@@ -1049,6 +1057,8 @@ async function handleOpenAIResponses(req, res) {
     openaiReq.stream = isStream;
     return await handleDirectChannel(req, res, openaiReq, route, { startedAt, info, kind: 'responses' });
   }
+  // 同 handleOpenAIChat：云端只在被显式要求时回流 usage 帧。
+  if (isStream) openaiReq.stream_options = { include_usage: true };
   const outBody = JSON.stringify(openaiReq);
   forwardWithFallback(target, '/chat/completions', 'POST', {}, outBody, req, (upstreamRes) => {
     if (upstreamRes.fakeResponse) {
@@ -1215,6 +1225,8 @@ function translateStreamToAnthropic(upstreamRes, res, originalModel, onDone) {
   const toolBuf = new Map(); // tool_call index -> { id, name, args }
 
   upstreamRes.on('data', (chunk) => {
+    // 首个上游字节到达即记首字（口径同另外两个翻译器）。
+    markFirstToken(res);
     buffer += decoder.write(chunk);
     const lines = buffer.split('\n');
     buffer = lines.pop(); // keep incomplete line

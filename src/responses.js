@@ -18,6 +18,8 @@
 // 注意：本模块**不做**模型映射与预算兜底——两者都要按通道决定，
 // 由 server.js 在 router.resolve 之后处理（见 responsesToOpenAI 的注释）。
 
+const { markFirstToken } = require('./reqlog');
+
 // ---------- 请求侧 ----------
 
 function textFromContent(content) {
@@ -352,6 +354,10 @@ function translateStreamToResponses(upstreamRes, res, model, onDone) {
   };
 
   upstreamRes.on('data', (chunk) => {
+    // 首个上游字节到达即记首字。必须在这里而不是 send() 里：response.created
+    // 是本函数**自己**造的事件，紧接着就发出去了，拿它算首字等于只量了
+    // 上游的排队时间以外的部分。要的是「上游开始回话」这一刻。
+    markFirstToken(res);
     buffer += decoder.write(chunk);
     const lines = buffer.split('\n');
     buffer = lines.pop();

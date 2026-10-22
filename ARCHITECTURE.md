@@ -247,10 +247,17 @@ message_stop
 上游会在末尾补一个 `choices: []` + `usage` 的块。代理捕获后填进 `message_delta`。
 实测真上游**确实支持**该参数（返回真实的 84/22 等），不是靠估算。
 
+这条要求对**四个协议入口都成立**，且只在网页凭证链路上是必需的：
+云端网关 `dumate-svc.baidu.com` 不主动发 usage 帧，8980 桌面后端默认就发。
+漏注入的症状是「请求全部 200，token 全记 0」——不报错，只是埋点里全是零。
+注入点必须落在 `if (target.direct) return ...` **之后**：直连通道
+（千问/TRAE/Qoder）的 `buildBody` 不认识这个字段。
+
 ### 4.5 `count_tokens`
 
 Claude Code 会先调这个端点做上下文预算。DuMate 没暴露分词器，
-所以用 `字节数 / 4` 估算：
+所以用 `字符数 / 4` 估算（`String.length` 是 UTF-16 码元数，**不是字节数**：
+100 个汉字与 100 个 ASCII 都算 25 token，实测一致）：
 
 ```js
 function estimateTokens(value) { ... Math.ceil(value.length / 4) ... }
@@ -418,6 +425,6 @@ const child = spawn(exe, args, { env, cwd: ..., stdio: 'ignore', windowsHide: tr
 2. **不支持工具调用 / 图像** —— 上游无此能力，降级为文本占位。
 3. **思考强度不可调** —— 模型没有这个旋钮，只能靠提示词。
 4. **超长上下文很慢** —— 128K 级单请求实测超 10 分钟未返回，建议单次控制在 32K 内。
-5. **`count_tokens` 是估算** —— 字节数/4，非精确分词。
+5. **`count_tokens` 是估算** —— 字符数/4，非精确分词。
 6. **仅 Windows** —— 依赖 PowerShell / CIM / 注册表路径。
 7. **`/v1/models` 是静态列表** —— 不查询上游（上游也无 `/models` 路由，实测 404）。

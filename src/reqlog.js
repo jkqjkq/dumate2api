@@ -132,4 +132,19 @@ function read(opts = {}) {
   return { rows, total };
 }
 
-module.exports = { record, read, pickUsage, usageFromSSE, describeRequest, clientIP, newReqId, LOG_DIR };
+// 标记首字时刻。多次调用只记第一次——流式响应会持续吐字节，
+// 我们要的是「第一个」，不是最后一个。
+//
+// 放在这里而不是留在 server.js：三个协议翻译器（Responses / Anthropic /
+// Google）手里也有 res，它们必须和透传分支用**同一个**口径。此前这个函数
+// 只在 server.js 内部可见，翻译器只能干看着——于是 /v1/responses 与
+// /v1/messages 的流式请求一条 first_token_ms 都记不下来（实测 dumate
+// /v1/responses 1295 条全为 0，而直连通道 1987/1987 正常）。
+function markFirstToken(res) {
+  if (res && !res._firstTokenAt) res._firstTokenAt = Date.now();
+}
+
+module.exports = {
+  record, read, pickUsage, usageFromSSE, describeRequest, clientIP, newReqId,
+  markFirstToken, LOG_DIR,
+};

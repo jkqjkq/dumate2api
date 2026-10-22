@@ -106,7 +106,14 @@ function check(name, cond, extra) {
   r = await req('GET', '/health');
   check('health 200', r.status === 200, r.body);
   const h = JSON.parse(r.body);
-  check('health reports upstream', h.upstream_port === 8980 || h.upstream_port === 52890, r.body);
+  // 凭证来源默认是 web 时没有本地端口（upstream_port 恒为 null），
+  // 断言必须跟着认这个形状——原来只认 8980/52890，tier B 之后必然假失败。
+  check(
+    'health reports upstream',
+    h.upstream_port === 8980 || h.upstream_port === 52890
+      || (h.channels && h.channels.dumate && h.channels.dumate.source === 'web'),
+    r.body,
+  );
 
   console.log('\n==== ' + pass + ' passed, ' + fail + ' failed ====');
   process.exit(fail ? 1 : 0);
