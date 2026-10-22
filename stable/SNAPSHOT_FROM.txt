@@ -1,81 +1,50 @@
-快照指纹 sha256（stable/src 下 48 个 .js，按路径+内容计算）：
-8a4ce3234668f15e129f0d60f7b8f9027fb1c8208182dbcc30a1c690845a8f4c
+快照指纹 sha256（stable/src 下 49 个 .js，按路径+内容计算）：
+7c931419dfbabf2104bbeaa01440f7981222a9cbb7f7b8351ef88e1c6014ef98
 
 指纹算法：
   对 stable/src 下所有 .js 文件，按相对路径排序（`/` 分隔），
   拼接 [相对路径 + LF + 文件内容]，以 UTF-8 编码后取 sha256。
   本次已用该算法实算，可复核。
 
-来源：main 分支合并提交 41863ef（merge(dev)：code review 修复）
+来源：main 分支合并提交 60ad161（merge(dev)：签到详情按月/按年查看）
   快照文件随后以 chore(stable) 单独提交。
 
-文件数：47 → 48（新增 upstream-errors.js，无删除）。内容变更 5 个，+262 / −216。
+文件数：48 → 49（新增 checkin-ledger.js，无删除）。内容变更 2 个，+20 / −1。
 
 本次同步的改动（按影响面排序）：
 
-  upstream-errors.js（新增）—— **千问与 Qoder 共用的上游错误识别**。
-    两个产品是同一套 COSY 协议栈，错误形状也一致。判据复制两份必然漂移：
-    2026-10-22 修 Qoder 的 `provider_error`（小写字符串 code）时，千问那份
-    还是旧的 `/^[A-Z]/` 判据——同类「HTTP 200 + 空回答」在另一条通道上
-    继续存在。含 payloadError / envelopeStatus：
-      - 数字 code >= 400
-      - 字符串 code：纯数字按数字判；其他非空串只要带 message / type 就认
-      - `error` 对象**先于** `type` 判（否则 `{type:'error',error:{...}}` 会被
-        字符串化成 `[object Object]`，脏串还会写进账号 lastError 显示在界面上）
-      - 非信封的裸错误体（上游 4xx/5xx 常见）也在 envelopeStatus 里兜住
-      - `code:0` / `code:'success'` 这类成功标记明确不认
+  checkin-ledger.js（新增）—— **统一签到账本**（data/checkin-ledger.jsonl）。
+    三条通道的签到历史可得性完全不同：搭子上游 sign_in_days 只给当月、
+    TRAE 上游完全没有历史、Qoder 只有积分批次（一次签到可能领多个活动）。
+    所以「某天某账号签到了」单独记一份，按 channel + 账号 + 日期幂等。
+    **只从功能上线时开始有数据，不编造历史**——管理端接口会返回覆盖起点。
+    日期用**本地时区**（不能用 toISOString，UTC+8 凌晨会被算成前一天）。
 
-  qoder/chat.js —— 三处：
-    (1) payloadError / envelopeStatus 改为 require 共享实现；
-    (2) **postStream 支持 AbortSignal**：识别到错误帧后立即断流。Qoder 零额度
-        时是**挂起**而不是报错，不主动断就要等 socket 空闲超时（600s），
-        客户端早已超时；中止时 resolve（带 aborted 标记）而不是 reject，
-        避免把调用方手里的 firstErr 盖成无信息的网络错误；
-    (3) 单次结算守卫：abort 会同时触发 req 与 res 的 error/end。
+  qoder/index.js —— checkinAndSave 成功后写签到账本（claim / already 两种来源）。
+    写失败不影响签到本身。
 
-  qoder/index.js —— 四处：
-    (1) **`[DONE]` 是哨兵、不是上游数据帧**。旧实现把它也算成「已吐帧」，
-        于是 `200 + 纯错误体` 的 `!sent` 兜底永远走不到（修复对它要修的场景
-        仍然无效），4xx 时 `err.sent` 恒 true → 429 不换号。现在哨兵延后到
-        状态检查之后再转发，`sent` 只由真实数据帧置位；
-    (2) 识别到错误帧即 `ac.abort()` 上游；
-    (3) resolveModelWithFetch 加 **in-flight 去重**（冷缓存 + 并发请求时各拉
-        一次模型表 = 各等一次 20s）；
-    (4) 删除死代码 warmup()（无调用方，server.js 直接调 warmupModels）。
+  traework/checkin.js —— checkinAndSave 的两条成功路径都写签到账本
+    （已签记 already，领取记 claim 并带实际到账差值）。
 
-  qwenwork/chat.js + qwenwork/index.js —— 两处：
-    (1) 错误识别改 require 共享实现（补上旧判据漏掉的小写字符串 code 与
-        非信封错误体）；
-    (2) 流式路径同样修哨兵语义——它复制了同一段逻辑，同样会被 `[DONE]`
-        误置 sent。
-
-  server.js —— 三处：
-    (1) **翻译器路径的错误埋点**：翻译器在 emit('error') 里**同步**
-        finish(502)，外层再传 extra 是 no-op（logRequest 按 _logged 去重）。
-        错误改挂到 req 上，让第一次 done 就能带上；翻译器硬编码的 502
-        还原成上游真实状态码。实测 `/v1/responses`、`/v1/messages` 的埋点
-        从 `{status:502}` 变为 `{status:402, error:"qoder 402: quota exhausted"}`；
-    (2) 启动块尊重 `DUMATE_QODER_AUTOSTART=off` / `DUMATE_TRAEWORK_AUTOSTART=off`
-        （/v1/models 早就按它跳过，启动块此前没跟：关闭的通道仍会打网络、
-        仍报「就绪」）；
-    (3) 直连通道的错误统一走 done。
+  不在本快照内（纯管理端 / 前端 / 测试，网关不加载）：
+    src/admin/routes/checkin.js（签到详情接口）、
+    web/src/components/CheckinDetailCard.vue、web/src/api/checkin.ts、
+    web/src/views/PointsView.vue、test/verify-checkin-detail.js。
 
 验证记录（2026-10-22，全部实测）：
 
-  - **逐字节比对**：闭包 48 = 快照 48，内容全部一致；反向检查无多余文件
-    （闭包由 src/server.js 出发递归解析相对 require 得出，无动态 require）
-  - **node --check**：48 个文件全部通过
+  - **逐字节比对**：闭包 49 = 快照 49，内容全部一致；反向检查无多余文件
+  - **node --check**：49 个文件全部通过
   - **独立启动**（临时端口 19099，DUMATE_ADMIN_DATA=<repo>/data，
     DUMATE_AUTOSTART=off）：
-      /health → 四条通道 ready；qoder ready=true + needsClient=false
-      启动日志「✓ Qoder 模型表就绪（11 个模型）」「✓ TRAE Work 模型表就绪（50 个）」
-      `/v1/responses` 流式（qoder/GLM-5.3-Flash）正常收尾 response.completed
-  - **离线回归**：19 个离线测试全过，其中
-      verify-stream-error-termination **16/16**（新增两条埋点断言：status=402、
-        error 落盘；fakeQoder 补 warmupModels；埋点改写临时目录以隔离真实日志）
-      verify-qoder-error-surface 全过（桩补齐真实 postStream 的 `[DONE]` 契约，
-        新增 429 / provider_error 换号断言）
-      verify-qoder-channel 全过（新增 error 对象优先于 type 的判据）
+      /health → 四条通道 ready；Qoder 模型表 11 个、TRAE 50 个
+      进程存活，日志零 Error
+  - **离线回归**：22 个离线测试全过，其中新增
+      verify-checkin-detail（22 项：账本按天幂等、本地日期、搭子四类来源合并、
+      失败签到不计入、Qoder 领取批次与跨年过滤、TRAE lastCheckin、
+      覆盖范围、千问办公 400）
+  - **管理端**（临时端口 19093）：/api/admin/checkin/detail 已挂载
+    （无会话 401、未知子路径 404），web/dist 正常服务
   - **未启动 9080**：本次只更新快照文件，9080 保持停止状态
 
 启动方式（沿用）：
@@ -85,9 +54,11 @@
   且 9083 管理端读的是 <repo>/data、看不到 9080 的流量。
 
 上一版快照来源：
-  6007f0d（merge(dev)：Qoder 错误面 + 模型表预热），指纹 dc89567a…
+  41863ef（merge(dev)：code review 修复——错误帧识别 / 上游中止 / 错误埋点），
+  指纹 8a4ce323…
 
 更早：
+  6007f0d（merge(dev)：Qoder 错误面 + 模型表预热），指纹 dc89567a…
   132e744（merge(dev)：流式 usage 帧与首字耗时埋点补齐 + 默认网页凭证），
     指纹 c7a3c059…
   0927bfd —— 千问本地签名脱离客户端 + 搭子回落流式 pipe 修复 + 仪表盘降级容错，
