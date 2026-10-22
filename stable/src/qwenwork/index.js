@@ -132,16 +132,24 @@ async function runOnce(account, payload, onChunk, opts) {
   try {
     if (onChunk) {
       let firstErr = null;
-      let sent = false; // 是否已向下游发过帧——发了就不能再换账号了
+      // sent 只表示**真实数据帧**已转发——发了就不能再换账号了。
+      // [DONE] 是哨兵、不是上游数据帧：把它也算成「已吐帧」会让
+      // 「一帧数据都没有」的错误场景被误判成已开始输出（错误被吞、换号被挡）。
+      let sent = false;
+      let doneSeen = false;
       const res = await chat.postStream(built.url, built.body, built.headers, (inner) => {
         // 错误帧**不能**转给下游：一旦写进 SSE，客户端会把它当数据帧收下，
         // 而 HTTP 头早已发出（恒 200），改不成 4xx 了。
         // 所以先判错、判出错误就吞掉不转发，最后统一抛出去让上层回 4xx。
         if (firstErr) return;
-        try {
-          const err = chat.payloadError(JSON.parse(inner));
+        // 哨兵延后到状态检查之后再转发，避免「先发 200 + [DONE] 再抛错」
+        if (inner === '[DONE]') { doneSeen = true; return; }
+        let parsed = null;
+        try { parsed = JSON.parse(inner); } catch (e) { /* 非 JSON 帧照原样转发 */ }
+        if (parsed) {
+          const err = chat.payloadError(parsed);
           if (err) { firstErr = err; return; }
-        } catch (e) { /* 正常数据帧不是错误结构 */ }
+        }
         sent = true;
         onChunk(inner);
       });
@@ -149,10 +157,11 @@ async function runOnce(account, payload, onChunk, opts) {
       if (firstErr) {
         const err = new Error(`qwenwork ${firstErr.code}: ${firstErr.message}`);
         err.statusCode = firstErr.code;
-        // 已经吐过帧的流不能再换账号重来——客户端收到了半截输出
+        // 已经吐过真实数据帧的流不能再换账号重来——客户端收到了半截输出
         err.sent = sent;
         throw err;
       }
+      if (doneSeen) onChunk('[DONE]');
       return res;
     }
     const res = await chat.post(built.url, built.body, built.headers);

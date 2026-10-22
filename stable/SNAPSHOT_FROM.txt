@@ -1,68 +1,81 @@
-快照指纹 sha256（stable/src 下 47 个 .js，按路径+内容计算）：
-dc89567a0c7b8817c68609ea80d77a9ebf6486960b725c19619a2be3ee667880
+快照指纹 sha256（stable/src 下 48 个 .js，按路径+内容计算）：
+8a4ce3234668f15e129f0d60f7b8f9027fb1c8208182dbcc30a1c690845a8f4c
 
 指纹算法：
   对 stable/src 下所有 .js 文件，按相对路径排序（`/` 分隔），
   拼接 [相对路径 + LF + 文件内容]，以 UTF-8 编码后取 sha256。
   本次已用该算法实算，可复核。
 
-来源：main 分支合并提交 6007f0d（merge(dev)：Qoder 上游失败不再静默空回答）
+来源：main 分支合并提交 41863ef（merge(dev)：code review 修复）
   快照文件随后以 chore(stable) 单独提交。
 
-文件数：47 → 47（无新增、无删除）。内容变更 3 个，+245 / −32。
+文件数：47 → 48（新增 upstream-errors.js，无删除）。内容变更 5 个，+262 / −216。
 
 本次同步的改动（按影响面排序）：
 
-  qoder/chat.js —— 上游错误必须被认出来，不能再当正常数据转发。
-    (1) payloadError 判据收严。上游 provider 层失败发的是
-        {"code":"provider_error","message":"All backends failed","type":"provider_error"}
-        ——字符串 code 且**首字母小写**，旧判据 /^[A-Z]/ 漏掉，整帧被当正常
-        数据转发；翻译器取不到 choices → 客户端拿到 HTTP 200 + 空回答
-        （实测 /v1/responses 只发 created/in_progress/completed，output 为空）。
-        现在认小写字符串 code、type=*_error、error 对象；同时不误伤
-        code=0 / 'success' 这类成功标记。
-    (2) envelopeStatus 兜住**非信封的纯错误体**（上游 4xx/5xx 时常见）。
-    (3) 首字节超时 DUMATE_QODER_FIRST_BYTE_MS（默认 60s）：上游被限流时
-        会接受连接却不回（实测 180s 才 abort），而 600s 空闲超时会把客户端
-        拖到早已超时之后。计时从请求写出开始，覆盖「连响应头都不给」的挂起。
-    (4) postStream 保留最多 64KB 原始字节，错误时才能把上游 message 如实报出。
+  upstream-errors.js（新增）—— **千问与 Qoder 共用的上游错误识别**。
+    两个产品是同一套 COSY 协议栈，错误形状也一致。判据复制两份必然漂移：
+    2026-10-22 修 Qoder 的 `provider_error`（小写字符串 code）时，千问那份
+    还是旧的 `/^[A-Z]/` 判据——同类「HTTP 200 + 空回答」在另一条通道上
+    继续存在。含 payloadError / envelopeStatus：
+      - 数字 code >= 400
+      - 字符串 code：纯数字按数字判；其他非空串只要带 message / type 就认
+      - `error` 对象**先于** `type` 判（否则 `{type:'error',error:{...}}` 会被
+        字符串化成 `[object Object]`，脏串还会写进账号 lastError 显示在界面上）
+      - 非信封的裸错误体（上游 4xx/5xx 常见）也在 envelopeStatus 里兜住
+      - `code:0` / `code:'success'` 这类成功标记明确不认
 
-  qoder/index.js —— 模型名解析与错误上报。
-    (1) **warmupModels()** 预热**每个可用账号**的模型表（缓存按区域+账号
-        隔离，只预热主账号会让换号后解析不出模型名）。
-    (2) **resolveModelWithFetch()**：热路径上缓存认不出时补拉一次模型表，
-        失败退避 60s。此前是纯同步读缓存，缓存为空就把显示名原样当 key
-        发给上游 → provider_error → 空回答。
-    (3) runOnce 按状态码判 HTTP 错误（流式与非流式两条路径），并从原始 body
-        取上游 message；200 但非 SSE 的纯错误体也兜一次信封解析。
-    (4) onModel 回调上报**实际发给上游的 key**（埋点 mapped_model），
-        名字有没有解析成功不再在日志里不可见。
-    (5) 全账号失败时带上每个账号的失败原因；状态码 0（网络层失败）映射为 502。
+  qoder/chat.js —— 三处：
+    (1) payloadError / envelopeStatus 改为 require 共享实现；
+    (2) **postStream 支持 AbortSignal**：识别到错误帧后立即断流。Qoder 零额度
+        时是**挂起**而不是报错，不主动断就要等 socket 空闲超时（600s），
+        客户端早已超时；中止时 resolve（带 aborted 标记）而不是 reject，
+        避免把调用方手里的 firstErr 盖成无信息的网络错误；
+    (3) 单次结算守卫：abort 会同时触发 req 与 res 的 error/end。
+
+  qoder/index.js —— 四处：
+    (1) **`[DONE]` 是哨兵、不是上游数据帧**。旧实现把它也算成「已吐帧」，
+        于是 `200 + 纯错误体` 的 `!sent` 兜底永远走不到（修复对它要修的场景
+        仍然无效），4xx 时 `err.sent` 恒 true → 429 不换号。现在哨兵延后到
+        状态检查之后再转发，`sent` 只由真实数据帧置位；
+    (2) 识别到错误帧即 `ac.abort()` 上游；
+    (3) resolveModelWithFetch 加 **in-flight 去重**（冷缓存 + 并发请求时各拉
+        一次模型表 = 各等一次 20s）；
+    (4) 删除死代码 warmup()（无调用方，server.js 直接调 warmupModels）。
+
+  qwenwork/chat.js + qwenwork/index.js —— 两处：
+    (1) 错误识别改 require 共享实现（补上旧判据漏掉的小写字符串 code 与
+        非信封错误体）；
+    (2) 流式路径同样修哨兵语义——它复制了同一段逻辑，同样会被 `[DONE]`
+        误置 sent。
 
   server.js —— 三处：
-    (1) **补上 Qoder 模型表预热调用点**。此前 server.js 只给千问和 TRAE 写了
-        预热块，Qoder 的 warmup 从没被调用过，网关进程里缓存恒为空。
-    (2) handleDirectChannel 新增 onModel 回调，把实际模型 key 写进埋点。
-    (3) 直连通道的错误统一走 done 回调（单独再调 logRequest 会被去重丢掉）。
+    (1) **翻译器路径的错误埋点**：翻译器在 emit('error') 里**同步**
+        finish(502)，外层再传 extra 是 no-op（logRequest 按 _logged 去重）。
+        错误改挂到 req 上，让第一次 done 就能带上；翻译器硬编码的 502
+        还原成上游真实状态码。实测 `/v1/responses`、`/v1/messages` 的埋点
+        从 `{status:502}` 变为 `{status:402, error:"qoder 402: quota exhausted"}`；
+    (2) 启动块尊重 `DUMATE_QODER_AUTOSTART=off` / `DUMATE_TRAEWORK_AUTOSTART=off`
+        （/v1/models 早就按它跳过，启动块此前没跟：关闭的通道仍会打网络、
+        仍报「就绪」）；
+    (3) 直连通道的错误统一走 done。
 
 验证记录（2026-10-22，全部实测）：
 
-  - **逐字节比对**：闭包 47 = 快照 47，内容全部一致（本批只改 3 个文件）；
-    反向检查无多余文件（闭包由 src/server.js 出发递归解析相对 require 得出）
-  - **node --check**：47 个文件全部通过
+  - **逐字节比对**：闭包 48 = 快照 48，内容全部一致；反向检查无多余文件
+    （闭包由 src/server.js 出发递归解析相对 require 得出，无动态 require）
+  - **node --check**：48 个文件全部通过
   - **独立启动**（临时端口 19099，DUMATE_ADMIN_DATA=<repo>/data，
     DUMATE_AUTOSTART=off）：
-      启动日志新增「✓ Qoder 模型表就绪（11 个模型）」——预热路径实测生效
-      /health → dumate ready=true + source=web + fallback.available=true；
-        qwenwork ready=true + wasm:"local"；traework ready=true；
-        qoder ready=true + needsClient=false
-      真实请求：`qoder/GLM-5.3-Flash`（**显示名**，0.1 档）→ 200 + 正文 "OK"、
-        usage 完整（credits 0.3131）——显示名解析链路实测通过
-      （不存在的模型名上游会自行兜底成正常回答，无法在线构造 provider_error；
-        该形态由离线测试覆盖）
-  - **离线回归**：test/verify-qoder-channel.js（含新增 6 项判据）、
-    test/verify-qoder-error-surface.js（provider_error 帧 / 429 非 SSE 体 /
-    200 纯错误体 / 正常流不受影响 / 缓存为空补拉与 onModel 上报）全部通过
+      /health → 四条通道 ready；qoder ready=true + needsClient=false
+      启动日志「✓ Qoder 模型表就绪（11 个模型）」「✓ TRAE Work 模型表就绪（50 个）」
+      `/v1/responses` 流式（qoder/GLM-5.3-Flash）正常收尾 response.completed
+  - **离线回归**：19 个离线测试全过，其中
+      verify-stream-error-termination **16/16**（新增两条埋点断言：status=402、
+        error 落盘；fakeQoder 补 warmupModels；埋点改写临时目录以隔离真实日志）
+      verify-qoder-error-surface 全过（桩补齐真实 postStream 的 `[DONE]` 契约，
+        新增 429 / provider_error 换号断言）
+      verify-qoder-channel 全过（新增 error 对象优先于 type 的判据）
   - **未启动 9080**：本次只更新快照文件，9080 保持停止状态
 
 启动方式（沿用）：
@@ -72,10 +85,11 @@ dc89567a0c7b8817c68609ea80d77a9ebf6486960b725c19619a2be3ee667880
   且 9083 管理端读的是 <repo>/data、看不到 9080 的流量。
 
 上一版快照来源：
-  132e744（merge(dev)：流式 usage 帧与首字耗时埋点补齐 + 默认网页凭证），
-  指纹 c7a3c059…
+  6007f0d（merge(dev)：Qoder 错误面 + 模型表预热），指纹 dc89567a…
 
 更早：
+  132e744（merge(dev)：流式 usage 帧与首字耗时埋点补齐 + 默认网页凭证），
+    指纹 c7a3c059…
   0927bfd —— 千问本地签名脱离客户端 + 搭子回落流式 pipe 修复 + 仪表盘降级容错，
     指纹 d0223393…
   49697a8 —— 回落流式 pipe 修复 + TRAE checkin 补漏，指纹 a23a9946…
