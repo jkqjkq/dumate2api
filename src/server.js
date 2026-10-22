@@ -19,6 +19,9 @@ function resolveBudget(target, requested) {
   return resolveMaxTokens(requested);
 }
 const reqlog = require('./reqlog');
+// 首字标记归 reqlog 统一实现：三个协议翻译器（Responses / Anthropic / Google）
+// 也在 reqlog 之外调用它，两处各写一份必然漂移。
+const markFirstToken = reqlog.markFirstToken;
 const pointsCursor = require('./points-cursor');
 const modelmap = require('./modelmap');
 const keysvc = require('./keys');
@@ -413,11 +416,16 @@ function forwardToUpstream(portOrTarget, path, method, headers, body, callback) 
 /**
  * 与 forwardToUpstream 同签名，但桌面链路不可用时自动回落到网页凭证池。
  *
- * 只在**搭子通道**用（调用点自己判断 target.id）。为什么只回落、不整体切到
- * 网页凭证：桌面链路有三个网页链路没有的能力——`responses`（Codex CLI 0.155+
- * 只认它）、`count_tokens`、三通道前缀分流。整体切过去等于把这些一起丢掉。
- * 而桌面凭证唯一的硬伤是「同一时刻只有一份登录态、过期必须开客户端重登」，
- * 那正好是回落能补的。
+ * 只在**搭子通道**用（调用点自己判断 target.id）。
+ *
+ * **网页链路不是「缩水版」。** 早先这里写着「桌面链路独有 responses /
+ * count_tokens / 前缀分流」，那是错的：回落把网页池包成伪上游响应，四个协议
+ * 处理器原样复用，`responses`、`count_tokens`、前缀分流在网页链路上全部可用
+ * （2026-10-14 实测）。真正缺 `responses` 的是 9084 那个独立网关
+ * （`web-gateway.js`），两者别混为一谈。
+ *
+ * 凭证来源默认就是网页池（`router.dumateSource()`），桌面链路要显式
+ * `DUMATE_DUMATE_SOURCE=auto` 才参与；本函数的回落分支于是成了那条路上的兜底。
  *
  * 回落时机严格限定为「还没交给回调」：后端连不上（fakeResponse）或回了
  * 4xx/5xx（凭证过期时后端以错误码回应）。一旦回调拿到响应开始写下游，
@@ -447,17 +455,15 @@ function forwardWithFallback(portOrTarget, path, method, headers, body, clientRe
     let parsed;
     try { parsed = JSON.parse(body); } catch (e) { return false; }
     log(why === 'forced'
-      ? '按 DUMATE_DUMATE_SOURCE=web 直接走网页凭证池'
+      ? '搭子凭证来源：网页池（桌面链路不参与），直接走网页凭证'
       : '桌面链路不可用，回落到网页凭证池');
     useWebFallback(parsed);
     return true;
   };
 
-  // 显式只用网页凭证：**跳过整个桌面链路**（含端口探测与 PowerShell 查询）。
-  // 客户端卸载后回落虽能兜住，但每个请求都要先探一遍桌面端口再失败——
-  // 设了这个开关就没有那笔开销，凭证来源也从「兜底」变成「主链路」。
+  // 只用网页凭证（**默认**）：跳过整个桌面链路（含端口探测与 PowerShell 查询）。
   // 池子可不可用由路由层（router.availability）先判，那里会给出明确原因。
-  if (isDumate && process.env.DUMATE_DUMATE_SOURCE === 'web') {
+  if (isDumate && router.dumateSource() === 'web') {
     if (tryWebFallback('forced')) return null;
     // 竞态：availability 通过之后池子变空。如实报 502，**不静默退回桌面链路**
     // ——用户明确要求走 web，偷偷换凭证来源等于瞒着他。
@@ -469,15 +475,15 @@ function forwardWithFallback(portOrTarget, path, method, headers, body, clientRe
   // 启动或直接退出，ensureUpstream() 于是抛错——这条分支让那种情况也能走到
   // 回落，而不是在调用点先抛错。
   //
-  // **注意：默认配置下这条分支走不到。** upstream-router 给 dumate 的
-  // defaultPort 是 8980，且 portOf() 保证返回有效数字，所以 t.port 恒有值。
+  // **注意：这条分支走不到。** 网页来源在上面已经直接返回；桌面来源
+  // （DUMATE_DUMATE_SOURCE=auto）下，upstream-router 给 dumate 的 defaultPort
+  // 是 8980 且 portOf() 保证返回有效数字，所以 t.port 恒有值。
   // 真实的失败路径是下面的 startForward(t)：连一次本地 8980 →
   // ECONNREFUSED（回环连接，毫秒级）→ 回调里 tryWebFallback()。
   // 也就是说「客户端没装」**不会**给每个请求带来探测开销，不必给失败结果加
   // 缓存——2026-10-14 实测确认（打桩 discovery 计数：客户端缺失时连发 5 个
   // 请求，discoverPort 一次都没被调用）。真正的探测开销只在**启动时**那一次
-  // discoverPort（要跑 PowerShell 查询，实测约 3 秒），已由
-  // DUMATE_DUMATE_SOURCE=web 跳过。
+  // discoverPort（要跑 PowerShell 查询，实测约 3 秒），而它只在 auto 模式下跑。
   if (isDumate && t && !t.port) {
     ensureUpstream().then(
       (port) => { t.port = port; startForward(t); },
@@ -599,16 +605,19 @@ function logRequest(req, res, startedAt, info, status, usage, extra) {
   // 搭子余额的差值被贴到直连通道的日志行上——界面上表现为 TRAE 请求
   // 显示 +1099.19 这种既不是它消耗、也无法解释的数字。
   const ch = req._channel || 'dumate';
+  // 账号取自**权威来源**：`req._upstreamAccount` 由通道在选中账号时回填
+  // （网页池多账号轮询下只有它知道实际用了哪个），`extra.account` 是翻译器
+  // 回调带回来的，两条都要认。
+  //
+  // 这里曾经只读 `extra.account`，而网页回落只写 `req._upstreamAccount`，
+  // 于是每条网页请求都拿空账号去走 `balanceDesktop()`：白跑一次 PowerShell
+  // 探测（实测 1.3~2s），且游标一条都落不下来——`points_delta` 在全部
+  // `dumate/web` 行上都是空的。别改回去。
+  const cursorAccount = req._upstreamAccount || (extra && extra.account) || '';
   if (ch === 'dumate' && status && status < 500
-      && (u.input || u.output || (extra && extra.account))) {
-    pointsCursor.capture(ts, (extra && extra.account) || '');
+      && (u.input || u.output || cursorAccount)) {
+    pointsCursor.capture(ts, cursorAccount);
   }
-}
-
-// 标记首字时刻。多次调用只记第一次——流式响应会持续吐字节，
-// 我们要的是「第一个」，不是最后一个。
-function markFirstToken(res) {
-  if (!res._firstTokenAt) res._firstTokenAt = Date.now();
 }
 
 // ==================== OpenAI Compatible Endpoints ====================
@@ -751,6 +760,12 @@ async function handleOpenAIChat(req, res) {
     return await handleDirectChannel(req, res, reqBody, route, { startedAt, info, kind: 'openai' });
   }
 
+  // 云端网关（dumate-svc.baidu.com）只在被显式要求时才在流尾补一个 usage 帧；
+  // 8980 桌面后端默认就发，所以缺了这行的症状只出现在网页凭证链路上——
+  // 请求全部 200，token 全记 0。**必须放在 target.direct 之后**：直连通道的
+  // buildBody 不认识这个字段。
+  if (reqBody.stream) reqBody.stream_options = { include_usage: true };
+
   const outBody = JSON.stringify(reqBody);
 
   const upstreamReq = forwardWithFallback(target, '/chat/completions', 'POST', {}, outBody, req, (upstreamRes) => {
@@ -847,8 +862,11 @@ async function handleOpenAIChat(req, res) {
   });
 }
 
-// Rough token estimate. DuMate exposes no tokenizer, so bytes/4 is a
+// Rough token estimate. DuMate exposes no tokenizer, so chars/4 is a
 // deliberately conservative stand-in that keeps Claude Code happy.
+// String.length 是 UTF-16 码元数，**不是字节数**：一个汉字算 1，UTF-8 下它
+// 占 3 字节。所以这是「字符数/4」；中文按真分词约 1 字 1 token，估算值会
+// 偏小约 4 倍——只够给客户端做预算参考，不能当计费依据。
 function estimateTokens(value) {
   if (value == null) return 0;
   if (typeof value === 'string') return Math.ceil(value.length / 4);
@@ -941,6 +959,8 @@ async function handleGoogleGenerateContent(req, res, isStream, pathModel) {
     openaiReq.stream = isStream;
     return await handleDirectChannel(req, res, openaiReq, route, { startedAt, info, kind: 'google' });
   }
+  // 同 handleOpenAIChat：云端只在被显式要求时回流 usage 帧。
+  if (isStream) openaiReq.stream_options = { include_usage: true };
   const outBody = JSON.stringify(openaiReq);
   forwardWithFallback(target, '/chat/completions', 'POST', {}, outBody, req, (upstreamRes) => {
     if (upstreamRes.fakeResponse) {
@@ -1037,6 +1057,8 @@ async function handleOpenAIResponses(req, res) {
     openaiReq.stream = isStream;
     return await handleDirectChannel(req, res, openaiReq, route, { startedAt, info, kind: 'responses' });
   }
+  // 同 handleOpenAIChat：云端只在被显式要求时回流 usage 帧。
+  if (isStream) openaiReq.stream_options = { include_usage: true };
   const outBody = JSON.stringify(openaiReq);
   forwardWithFallback(target, '/chat/completions', 'POST', {}, outBody, req, (upstreamRes) => {
     if (upstreamRes.fakeResponse) {
@@ -1203,6 +1225,8 @@ function translateStreamToAnthropic(upstreamRes, res, originalModel, onDone) {
   const toolBuf = new Map(); // tool_call index -> { id, name, args }
 
   upstreamRes.on('data', (chunk) => {
+    // 首个上游字节到达即记首字（口径同另外两个翻译器）。
+    markFirstToken(res);
     buffer += decoder.write(chunk);
     const lines = buffer.split('\n');
     buffer = lines.pop(); // keep incomplete line
@@ -1416,9 +1440,9 @@ const server = http.createServer(async (req, res) => {
             let fb = { available: false, enabled: false };
             try { fb = { available: webFallback.available(), enabled: webFallback.enabled() }; }
             catch (e) { /* 池子读不到就按不可用报，别让 health 自己抛错 */ }
-            // 凭证来源：auto = 桌面优先、不可用时回落；web = 显式只用网页池
-            // （DUMATE_DUMATE_SOURCE=web，此时桌面链路根本不参与）
-            const source = process.env.DUMATE_DUMATE_SOURCE === 'web' ? 'web' : 'auto';
+            // 凭证来源：web = 只用网页池（**默认**，桌面链路根本不参与）；
+            // auto = 桌面优先、不可用时回落（DUMATE_DUMATE_SOURCE=auto）
+            const source = router.dumateSource();
             return {
               port: upstreamPort,
               // ready 的语义是「这个通道现在能不能跑」：
@@ -1578,10 +1602,14 @@ async function start() {
   log('Starting dumate2api...');
   log(`Proxy will listen on ${PROXY_HOST}:${PROXY_PORT}`);
 
-  // 显式只用网页凭证时跳过初始发现——桌面链路根本不参与，
+  // 只用网页凭证（默认）时跳过初始发现——桌面链路根本不参与，
   // 这次探测（要跑 PowerShell 查询，实测约 3 秒）纯属浪费启动时间。
-  if (process.env.DUMATE_DUMATE_SOURCE === 'web') {
-    log('· 搭子凭证来源：网页池（DUMATE_DUMATE_SOURCE=web，不探测桌面链路）');
+  const sourceEnv = String(process.env.DUMATE_DUMATE_SOURCE || '').trim();
+  if (sourceEnv && !['web', 'auto', 'desktop'].includes(sourceEnv.toLowerCase())) {
+    log(`⚠ DUMATE_DUMATE_SOURCE="${sourceEnv}" 无法识别，按默认（web）处理；可选值 web / auto / desktop`);
+  }
+  if (router.dumateSource() === 'web') {
+    log('· 搭子凭证来源：网页池（默认，不探测桌面链路；设 DUMATE_DUMATE_SOURCE=auto 可启用桌面链路）');
   } else {
     try {
       const port = await discoverPort();

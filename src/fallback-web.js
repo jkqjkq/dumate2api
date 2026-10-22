@@ -1,16 +1,23 @@
 // src/fallback-web.js - 搭子通道的网页凭证回落
 //
-// 背景：搭子有两条凭证链路，能力互补但各自有硬伤：
+// 背景：搭子有两套凭证来源，只差在凭证本身，协议能力不分家：
 //   桌面凭证（auth.json → dumate-main-server.exe 8980）
-//     优点：链路短、长期登录态、支持 responses / count_tokens / 三通道分流
+//     优点：链路短、长期登录态
 //     硬伤：**同一时刻只有一份登录态，且过期后必须打开客户端重登一次**
 //   网页凭证（data/web-accounts.json → 直连 dumate-svc.baidu.com）
 //     优点：可多账号、token 自动续（约 1 小时一换）
-//     硬伤：9084 那条链路没有 responses（Codex 用不了）、没有三通道分流
+//     硬伤：上游是云网关，少两处默认行为——usage 帧要显式请求
+//           （stream_options.include_usage，已在 server.js 注入），
+//           且不支持图片/工具调用的桌面扩展字段
 //
-// 所以不整体切换（那会丢掉 Codex 支持），只做**回落**：正常走桌面凭证，
-// 只有在它不可用时才把请求交给网页池。这样既保住桌面链路的能力，
-// 又解决「客户端登录态过期就得开客户端」这个唯一痛点。
+// 注意主语：网页凭证**不**缺协议能力。它被包装成伪上游响应后交给
+// server.js 的四个协议处理器原样复用，所以 responses / count_tokens /
+// 三通道前缀分流在网页凭证下全部照常可用。真正没有 responses 的是
+// **9084 那条独立链路**（web-gateway.js），与这里的回落无关——
+// 别把两件事读混。
+//
+// 默认来源现在是 `web`（router.dumateSource()），桌面链路只在
+// DUMATE_DUMATE_SOURCE=auto 时参与，作为回落的**备用**而非主路。
 //
 // 实现方式：把网页池包装成一个**伪上游响应**（EventEmitter + statusCode +
 // headers），交给现有四个协议处理器原样复用。不重写翻译层——那三套 SSE

@@ -23,7 +23,7 @@ Claude Code ──── Anthropic ────────┼──→ dumate2a
 
 - **三协议网关** —— OpenAI / Anthropic（含原生工具）/ Google，外加 Responses 适配层（Codex CLI 0.155+ 只认它）
 - **四通道前缀分流** —— 靠模型名前缀显式路由，未知前缀直接 400，不静默回落
-- **凭证自持，零客户端依赖** —— 千问 / TRAE / Qoder 三条通道 OAuth 自取凭证、签名纯本地算法，**不需要装任何官方客户端**；搭子也能只用网页凭证（`DUMATE_DUMATE_SOURCE=web`）
+- **凭证自持，零客户端依赖** —— 千问 / TRAE / Qoder 三条通道 OAuth 自取凭证、签名纯本地算法，**不需要装任何官方客户端**；搭子默认也只走网页凭证，**装不装客户端都不影响使用**
 - **零第三方依赖** —— 网关本体只用 Node 内置模块
 - **网页控制台** —— 仪表盘、模型管理、积分明细、用量统计、请求日志、聊天测试台
 - **积分自动化** —— 签到幂等可定时；抽奖消耗不可逆，只留手动
@@ -50,7 +50,7 @@ curl http://127.0.0.1:9080/v1/chat/completions \
 
 | 通道 | 上游 | 凭证 | 需要官方客户端 |
 |---|---|---|---|
-| **百度搭子**（DuMate） | 本地 :8980（千帆 GLM） | 桌面登录态 / 网页 cookie | 默认是；`DUMATE_DUMATE_SOURCE=web` 后可**完全不用** |
+| **百度搭子**（DuMate） | 本地 :8980（千帆 GLM） | 网页 cookie（默认）/ 桌面登录态 | **否**（默认走网页凭证；`DUMATE_DUMATE_SOURCE=auto` 才用桌面链路） |
 | **千问办公**（QwenWork） | 云端网关，进程内直连 | 自持（OAuth Device Flow） | **否**（签名纯本地） |
 | **TRAE Work** | 云端网关，进程内直连 | 自持（OAuth） | 否 |
 | **Qoder** | 云端网关，进程内直连 | 自持（OAuth Device Flow） | **否**（签名纯本地） |
@@ -67,7 +67,7 @@ curl http://127.0.0.1:9080/v1/chat/completions \
 
 > 千问办公与 Qoder 是**同一套 COSY 协议**（同一个 `client_id`、同一把服务端公钥），共用 `src/cosy.js` 一份纯本地签名实现，都不需要官方 wasm。千问做重创作用 `pro`（`flash` 会播报进度就收尾）；Qoder 零额度时聊天会挂起，**签到是通道可用的前提**，且倍率差 14 倍、调试用 0.1 档（`gfmodel` 等）。通道细节与实测数据见 [CLAUDE.md](CLAUDE.md)。
 
-**搭子有两条凭证链路，能力一致**：桌面凭证（需装客户端）与网页凭证（浏览器 cookie）。桌面凭证不可用时**自动回落到网页池**，四条协议（含 `responses`）在回落路径上都实测可用；想彻底不要客户端就设 `DUMATE_DUMATE_SOURCE=web`。
+**搭子有两条凭证链路，能力一致**：桌面凭证（需装客户端）与网页凭证（浏览器 cookie）。**默认用网页凭证**，桌面链路不再参与——四条协议（含 `responses`）在网页链路上都实测可用，且首字 p50 826ms 比桌面链路的 1570ms 快近一倍。想用桌面链路（例如网页接口被风控时）设 `DUMATE_DUMATE_SOURCE=auto`，它会在桌面不可用时自动回落到网页池。
 
 ## 客户端配置
 
@@ -127,7 +127,7 @@ DUMATE_ADMIN_GATEWAY_PORT=9082 npm run admin   # 开发实例要带这个变量
 |---|---|---|
 | `DUMATE2API_PORT` / `_HOST` | `9080` / `127.0.0.1` | 网关监听 |
 | `DUMATE_REQUIRE_KEY` | 关闭 | 设 `1` 才校验 API Key。**对外暴露必须打开** |
-| `DUMATE_DUMATE_SOURCE` | `auto` | 设 `web` = 搭子只用网页凭证，**不需要装客户端** |
+| `DUMATE_DUMATE_SOURCE` | `web` | 搭子凭证来源。默认 `web` = 只用网页凭证，**不需要装客户端**；设 `auto`（别名 `desktop`）= 桌面优先、不可用回落网页池 |
 | `DUMATE_ADMIN_GATEWAY_PORT` | `9080` | 管理端读哪个网关；开发实例设 `9082` |
 | `DUMATE_QWENWORK_AUTOSTART` / `DUMATE_TRAEWORK_AUTOSTART` | `auto` | 设 `off` 关闭对应通道 |
 | `DUMATE_AUTO_CHECKIN_HOUR` / `_MINUTE` | `9` / `17` | 每日自动签到（**两个都要设**） |

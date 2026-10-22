@@ -336,18 +336,26 @@ provider config 自带顶层 `model_context_window = 200000` +
 桌面凭证唯一的硬伤是「同一时刻只有一份登录态、过期必须开客户端重登」，
 回落正好补上。两边是同一个账号，不会造成额度混用。
 
-**要彻底不要客户端**：设 `DUMATE_DUMATE_SOURCE=web`——凭证来源从「兜底」
-变成「主链路」，跳过启动时那次 `discoverPort`（PowerShell 查询，实测约 3 秒），
-且池子不可用时由路由层（`router.availability`）给出明确原因而不是笼统的 502。
+**默认就是「不要客户端」（2026-10-22 改）**：`DUMATE_DUMATE_SOURCE` 未设时
+凭证来源是 `web`——桌面链路完全不参与，跳过启动那次 `discoverPort`（PowerShell
+查询，实测约 3 秒），池子不可用时由路由层（`router.availability`）给出明确原因
+而不是笼统的 502。依据是实测而非偏好：客户端卸载后桌面链路必然失败
+（`auth.json` 不存在），`auto` 只是让它先探测再撞 ECONNREFUSED 才回落；而
+网页链路首字 p50 **826ms**，比桌面链路的 **1570ms** 快近一倍（少了本地 Go 中转
+那一跳），长尾差距更大（p90 2819ms vs 12569ms）。桌面链路保留为显式退路：
+`DUMATE_DUMATE_SOURCE=auto`（别名 `desktop`）恢复「桌面优先、不可用回落」。
+它唯一的独占价值是「凭证明文不进网关进程」，留着是为了网页接口被风控时还有
+一条路。无法识别的取值按默认（web）处理并在启动日志告警，**不静默当 auto**。
 
 **一个容易误判的点（2026-10-14 实测）**：客户端没装时，回落路径上**每个请求
 并不会跑探测链**。`upstream-router` 给 dumate 的 `defaultPort` 是 8980 且
 `portOf()` 保证返回有效数字，所以 `target.port` 恒有值，`forwardWithFallback`
-里 `!t.port` 那条分支（会调 `ensureUpstream` → `discoverPort`）**默认走不到**。
+里 `!t.port` 那条分支（会调 `ensureUpstream` → `discoverPort`）**走不到**
+（默认 `web` 模式下更早就在来源分支返回了；`auto` 模式下它同样走不到）。
 真实路径是 `startForward` → 连一次本地 8980 → ECONNREFUSED（回环，毫秒级）
 → 回调里 `tryWebFallback()`。所以**不需要给探测失败加缓存**——曾经加过一版
 静默窗口，打桩 discovery 计数实测（连发 5 个请求，`discoverPort` 一次都没被
-调用）证明是死代码，已移除。真正的探测开销只在启动那一次。
+调用）证明是死代码，已移除。真正的探测开销只在启动那一次，且只有 `auto` 模式会跑。
 
 回落把网页池包装成**伪上游响应**（EventEmitter + statusCode + headers），
 四个协议处理器原样复用——**不要为它重写翻译层**，那三套 SSE 状态机是踩了
@@ -558,7 +566,7 @@ Claude Code ── Anthropic ───────┼──→ 网关 :9080 ─�
 | `POST /v1/chat/completions` | **最小干预透传**：只改 `model` 和 `max_tokens`，响应不重打包 |
 | `POST /v1/responses` 或 `/responses` | 全量翻译（Responses ↔ Chat），Codex CLI 0.155+ 只认 `wire_api="responses"` |
 | `POST /v1/messages` 或 `/messages` 或 `/api/v1/messages` | 全量翻译 Anthropic ↔ OpenAI |
-| `POST .../count_tokens` | `字节数/4` 估算，仅供客户端算上下文预算 |
+| `POST .../count_tokens` | `字符数/4` 估算（`String.length`，汉字与 ASCII 同等计 1），仅供客户端算上下文预算 |
 | `GET/POST /v1beta/models/...` | Google Generative Language 翻译 |
 
 **裸路径 `/messages` 必须保留**：Claude Code 打的是不带 `/v1` 的路径，只认带前缀的版本会直接 404。
@@ -644,7 +652,13 @@ Claude Code ── Anthropic ───────┼──→ 网关 :9080 ─�
 
 **`req_id` 是埋点与异步采集的唯一关联键。** `logRequest` 生成（或复用 `req._reqId`），写进埋点；千问的积分归因也带同一个值。归因要等 1.5s 结算，`ts` 必然晚于埋点——靠时间戳配对会让同一秒内的两条请求互相串账。`handleDirectChannel` 在进入时就把 `req_id` 定下来并传给 provider，就是这个原因。请求日志按 `indexByReqId()` 把积分明细附到行上。
 
-**千问流式请求在 OpenAI 路径上必须自己补埋点。** 翻译器分支（Anthropic/Responses/Google）各自在 `done` 回调里记，只有 OpenAI 分支没有翻译器——漏了就一条都不记。补埋点时扫 usage 要注意：`provider.send` 回调给的是解信封后的裸 JSON，拼进 `seen` 时必须补上 `data: ` 前缀，否则 `usageFromSSE`（按 `data:` 行扫描）扫不到，token 恒为 0；`first_token_ms` 也要在这里 `markFirstToken`。
+**流式请求必须显式要 usage 帧，且注入点必须在 `target.direct` 之后。** 云端网关 `dumate-svc.baidu.com` 只在 body 带 `stream_options: {include_usage: true}` 时才在流尾补一个 `choices: []` + `usage` 的块；8980 桌面后端默认就发。所以漏注入的症状是「请求全部 200、token 全记 0」，且**只在网页凭证链路上暴露**（实测网页凭证 `/v1/responses` 流式 134/134 条 output_tokens 为 0）。四个协议入口（`handleOpenAIChat` / `handleOpenAIResponses` / `handleGoogleGenerateContent` / `handleAnthropicMessages`）都要注入，一个都不能省。位置要求：**必须放在 `if (target.direct) return ...` 之后**——千问/TRAE/Qoder 的 `buildBody` 不认识这个字段，提前注入等于给它塞脏数据。
+
+**`first_token_ms` 由 `reqlog.markFirstToken` 统一实现，四个协议入口都要调。** 它原先私有在 `server.js` 里，只有透传分支和直连通道调得到，三个翻译器（`translateStreamToResponses` / `translateStreamToAnthropic` / `translateStreamToGoogle`）拿不到——于是 `/v1/responses` 与 `/v1/messages` 的流式请求一条首字都记不下来（实测 dumate `/v1/responses` 1295 条全为 null，而直连通道 1987/1987 正常；这是长期缺口，与凭证来源无关）。现在函数归 `reqlog` 导出，三个翻译器在 `upstreamRes.on('data')` 的第一行调用它。**口径是「上游第一个字节到达」，不是「我们写出第一个 SSE 事件」**——后者会把翻译器自己造的事件（如 Responses 的 `response.created`）也算进去，量出来的只是本地耗时。
+
+**千问（直连通道）的 OpenAI 路径要自己补埋点。** 翻译器分支各自在 `done` 回调里记，只有 OpenAI 分支没有翻译器——漏了就一条都不记。补埋点时扫 usage 要注意：`provider.send` 回调给的是解信封后的裸 JSON，拼进 `seen` 时必须补上 `data: ` 前缀，否则 `usageFromSSE`（按 `data:` 行扫描）扫不到，token 恒为 0。
+
+**`count_tokens` 是字符数/4，不是字节数/4。** `estimateTokens` 用的是 `String.length`，即 UTF-16 码元数：100 个汉字和 100 个 ASCII 都算出 29 token（实测一致）。中文按真分词约 1 字 1 token，所以这个估算在中文场景下偏小约 4 倍——只够给客户端做上下文预算，不能当计费依据。文档里写「字节数/4」的地方都是错的。
 
 **测试断言校验「形状」而非字面值。** 早期断言写死 mock 的固定返回（"Hello world"、token 11/7），接真上游时一批失败。现在只断言「非空」「大于 0」这类形状，mock 和真上游都能过。新增断言请沿用这个原则。
 
@@ -682,7 +696,7 @@ Claude Code ── Anthropic ───────┼──→ 网关 :9080 ─�
 | `DUMATE_TRAEWORK_MODELS_CACHE_MS` | `300000` | TRAE 模型表缓存时长（5 分钟）。模型表只在登录/刷新时变，不必每次打上游 |
 | `DUMATE_TRAEWORK_REPAIR_RETRY` | `1` | 「播报即收尾」的重试次数上限。`0` 关闭整个修复（见上文 TRAE 段落） |
 | `DUMATE_TRAEWORK_HOLD_CAP` | `600` | 正文缓冲门的阈值（字符）。超过就转直发，避免长回答被扣住等判定 |
-| `DUMATE_DUMATE_SOURCE` | 未设（`auto`） | 设 `web` = 搭子**只用网页凭证**：跳过桌面链路（含启动那次约 3 秒的探测），凭证来源从「兜底」变「主链路」。池子不可用时路由层直接拒绝并说明原因，不静默退回桌面链路 |
+| `DUMATE_DUMATE_SOURCE` | 未设（`web`） | 搭子凭证来源。未设 = **只用网页凭证**（桌面链路不参与，跳过启动那次约 3 秒的探测；池子不可用时路由层直接拒绝并说明原因，不静默退回桌面链路）。设 `auto`（别名 `desktop`）= 桌面优先、不可用时回落网页池。**无法识别的值按 `web` 处理并在启动日志告警** |
 | `DUMATE_WEB_FALLBACK` | 未设（开启） | 设 `0` 关闭「桌面凭证不可用时回落到网页池」（见上文回落机制）。关闭后桌面凭证失效即请求全失败 |
 | `DUMATE_POINTS_METER` | 未设（开启） | 设 `0` 关闭搭子的余额游标采集（`points-cursor.js`）。关闭后请求日志不再有逐条消耗 |
 | `DUMATE_LAG_MONITOR` | 未设（开启） | 设 `0` 关闭事件循环卡顿监控（`startLagMonitor`）。开启时同步代码卡顿超阈值会打日志 |
