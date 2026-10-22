@@ -15,6 +15,7 @@ const https = require('https');
 const crypto = require('crypto');
 const constants = require('./constants');
 const bridge = require('./bridge');
+const { payloadError, envelopeStatus } = require('../upstream-errors');
 
 const TIMEOUT_MS = 600000;
 
@@ -220,66 +221,6 @@ function unwrap(raw) {
   const s = String(inner).trim();
   if (!s || s === '[DONE]' || s === '{}' || s === 'null') return [];
   return [s];
-}
-
-/**
- * 从内层 payload 判定是否是错误。
- *
- * 千问的错误有两种落地形态，都实测过：
- *   - 信封层：{statusCodeValue: 403, statusCode: "Forbidden", body: "{\"code\":\"403\",...}"}
- *   - 内层层：{"code":"403","message":"Model is not available for this user"}
- * 流式路径拿到的是**剥过信封的内层**，所以不能只看 statusCodeValue。
- *
- * 不判这个的后果是静默失败：上游报 403，客户端却收到 200 + 空 content +
- * finish_reason=stop，看起来像「模型不想回答」，实际是调用被拒。
- */
-function payloadError(obj) {
-  if (!obj || typeof obj !== 'object') return null;
-  const code = obj.code != null ? Number(obj.code) : null;
-  if (code && code >= 400) {
-    return { code, message: String(obj.message || obj.error || '') };
-  }
-  // 有些错误把 code 放在 status 里（如 "Forbidden"），或只有 message
-  if (typeof obj.code === 'string' && /^[A-Z]/.test(obj.code) && obj.message) {
-    return { code: 500, message: `${obj.code}: ${obj.message}` };
-  }
-  return null;
-}
-
-/** 信封里的业务错误码（外层 HTTP 恒为 200，且可能带 data: 前缀） */
-function envelopeStatus(raw) {
-  const text = String(raw || '').trim();
-  if (!text) return null;
-  // 响应体是一行行 `data:<json>`（不是裸 JSON）。早期版本直接 JSON.parse
-  // 整段，前缀让解析必然失败、异常被吞成 null，于是**所有信封错误都被
-  // 静默成成功**。这里逐行剥前缀。
-  const candidates = [];
-  for (const line of text.split('\n')) {
-    const t = line.trim();
-    if (!t) continue;
-    const json = t.startsWith('data:') ? t.slice(5).trim() : t;
-    if (!json || json === '[DONE]') continue;
-    try { candidates.push(JSON.parse(json)); } catch (e) { /* 非 JSON 行 */ }
-  }
-  for (const outer of candidates) {
-    if (!outer || typeof outer !== 'object') continue;
-    const code = outer.statusCodeValue != null ? Number(outer.statusCodeValue) : null;
-    if (code && code >= 400) {
-      let message = '';
-      try {
-        const inner = typeof outer.body === 'string' ? JSON.parse(outer.body) : outer.body;
-        message = (inner && (inner.message || inner.error)) || '';
-      } catch (e) { message = String(outer.body || '').slice(0, 200); }
-      return { code, message };
-    }
-    // 也检查内层（信封 statusCodeValue 为 200 但内层带 code 的情况）
-    try {
-      const inner = typeof outer.body === 'string' ? JSON.parse(outer.body) : outer.body;
-      const err = payloadError(inner);
-      if (err) return err;
-    } catch (e) { /* 内层不是 JSON */ }
-  }
-  return null;
 }
 
 /** 发一次推理请求，返回 { status, headers, raw } */

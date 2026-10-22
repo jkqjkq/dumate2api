@@ -17,29 +17,17 @@ const constants = require('./constants');
 const { normalizeError } = require('../errtext');
 
 /**
- * 预热：Qoder 无 wasm 依赖，不需要客户端。
+ * 预热**模型表**：runOnce 从同步缓存里取「该模型的最大上下文档位」（1M），
+ * 缓存为空时只能回落默认档 200K。这里异步拉一次、不阻塞启动——与 TRAE 的
+ * warmupModels 同一思路。
  *
- * 但**模型表要预热**：runOnce 从同步缓存里取「该模型的最大上下文档位」
- * （1M），缓存为空时只能回落默认档 200K。这里异步拉一次、不阻塞启动——
- * 与 TRAE 的 warmupModels 同一思路。
- *
- * **每个可用账号都要预热**（2026-10-22 修）：模型表缓存按「区域 + 账号」
- * 隔离（见 session.modelsCacheKey），只预热主账号时，换号重试落到第二个
- * 账号后 `cachedModels` 为空，模型名就解析不出来。
+ * **每个可用账号都要预热**：模型表缓存按「区域 + 账号」隔离
+ * （见 session.modelsCacheKey），只预热主账号时，换号重试落到第二个账号后
+ * cachedModels 为空，模型名就解析不出来。
  * 调用点原先**根本不存在**——server.js 只给千问和 TRAE 写了预热块，
- * Qoder 的 warmup 从没被调用过，于是网关进程里的模型表缓存恒为空：
- * 客户端写显示名（`qoder/GLM-5.3-Flash`）时被原样当 key 发出去，
- * 上游返回 `provider_error` → 空回答。
- */
-function warmup() {
-  warmupModels().catch(() => null);
-  return status();
-}
-
-/**
- * 拉一遍所有可用账号的模型表（异步，给启动日志用）。
- * 返回最后一个账号的结果 `{ ok, models, error }`——部分账号失败时，
- * 只要有一个成功就算可用（另一个账号会在请求时走补拉）。
+ * Qoder 的预热从没被调用过，于是网关进程里的模型表缓存恒为空：
+ * 客户端写显示名（qoder/GLM-5.3-Flash）时被原样当 key 发出去，
+ * 上游返回 provider_error → 空回答。
  */
 async function warmupModels() {
   const accounts = authStore.findUsable();
@@ -104,6 +92,9 @@ function markFailure(account, msg) {
 // 20s 超时（模型表接口的 TIMEOUT_MS）。成功则清掉。
 const MODEL_FETCH_BACKOFF_MS = 60000;
 const modelFetchFailedAt = new Map();
+// 同一账号的补拉共用一次 in-flight 请求：冷缓存 + 并发请求时，
+// 各拉一次就是各等一次 20s。
+const modelFetchInflight = new Map();
 
 /**
  * 解析模型名；缓存里认不出来时补拉一次模型表再解析。
@@ -128,7 +119,13 @@ async function resolveModelWithFetch(auth, rawName) {
   if (Date.now() - (modelFetchFailedAt.get(ck) || 0) < MODEL_FETCH_BACKOFF_MS) {
     return { key, models: cached };
   }
-  const r = await session.fetchModels(auth).catch(() => null);
+  let inflight = modelFetchInflight.get(ck);
+  if (!inflight) {
+    inflight = session.fetchModels(auth).catch(() => null);
+    modelFetchInflight.set(ck, inflight);
+    inflight.then(() => { if (modelFetchInflight.get(ck) === inflight) modelFetchInflight.delete(ck); });
+  }
+  const r = await inflight;
   if (r && r.ok && r.models && r.models.length) {
     modelFetchFailedAt.delete(ck);
     return { key: chat.resolveModelKey(rawName, r.models), models: r.models };
@@ -208,18 +205,32 @@ async function runOnce(account, payload, onChunk, opts, meter) {
   try {
     if (onChunk) {
       let firstErr = null;
+      // `sent` 只表示**真实数据帧**已转发给下游。`[DONE]` 是哨兵、不是上游
+      // 数据帧——旧实现把它也算成「已吐帧」，于是 HTTP 429 / 200+纯错误体
+      // 这类「一帧数据都没有」的情况被误判成已开始输出：错误被吞、换号被挡。
       let sent = false;
+      let doneSeen = false;
+      // 识别到错误帧就立刻中止上游：Qoder 零额度时是**挂起**而不是报错，
+      // 不主动断就要等 socket 空闲超时（600s），客户端早已超时。
+      const ac = new AbortController();
       const res = await chat.postStream(ep.ChatStreamURL, encBody, headers, (inner) => {
         if (firstErr) return;
-        try {
-          const parsed = JSON.parse(inner);
+        // 哨兵延后到状态检查之后再转发，避免「先发 200 + [DONE] 再抛错」
+        if (inner === '[DONE]') { doneSeen = true; return; }
+        let parsed = null;
+        try { parsed = JSON.parse(inner); } catch (e) { /* 非 JSON 帧照原样转发 */ }
+        if (parsed) {
           const err = chat.payloadError(parsed);
-          if (err) { firstErr = err; return; }
+          if (err) {
+            firstErr = err;
+            try { ac.abort(); } catch (e) { /* 已结束 */ }
+            return;
+          }
           noteCredits(parsed);
-        } catch (e) { /* 正常数据帧 */ }
+        }
         sent = true;
         onChunk(inner);
-      });
+      }, { signal: ac.signal });
       if (firstErr) {
         const err = new Error(`qoder ${firstErr.code}: ${firstErr.message}`);
         err.statusCode = firstErr.code;
@@ -240,7 +251,8 @@ async function runOnce(account, payload, onChunk, opts, meter) {
         throw err;
       }
       // 200 但不是 SSE：上游偶尔用 200 回一个纯错误体（provider_error 就是
-      // 这种形状）。一帧都没转发出去时再兜一次信封解析。
+      // 这种形状）。**判据是「一帧真实数据都没转发」**，不是「没收到
+      // [DONE]」——后者恒为假（postStream 总会补一个）。
       if (!sent) {
         const es = chat.envelopeStatus(res.raw);
         if (es && es.code >= 400) {
@@ -250,6 +262,8 @@ async function runOnce(account, payload, onChunk, opts, meter) {
           throw err;
         }
       }
+      // 正常收尾：哨兵在这里补发，保证「先有内容、再有结束标记」
+      if (doneSeen) onChunk('[DONE]');
       meter.settle(peakCredits);
       return res;
     }
@@ -451,7 +465,7 @@ function quota(account) {
 }
 
 module.exports = {
-  warmup, warmupModels, status, send, listModels, listModelEntries, pickAccount, checkin, quota,
+  warmupModels, status, send, listModels, listModelEntries, pickAccount, checkin, quota,
   chatCompletion: (p, opts) => send(p, undefined, opts),
   chatCompletionStream: (p, cb, opts) => send(p, cb, opts),
 };

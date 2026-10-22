@@ -129,6 +129,13 @@ check('payloadError 抓 type=provider_error（无 code）', () => {
   const e = chat.payloadError({ type: 'provider_error', message: 'All backends failed' });
   assert.ok(e);
 });
+check('payloadError 的 error 对象优先于 type（不产出 [object Object]）', () => {
+  const e = chat.payloadError({ type: 'error', error: { code: 503, message: 'All backends failed' } });
+  assert.ok(e, '必须判定为错误');
+  assert.strictEqual(e.code, 503);
+  assert.ok(e.message.includes('All backends failed'), e.message);
+  assert.ok(!e.message.includes('[object Object]'), e.message);
+});
 check('payloadError 抓 error 对象', () => {
   const e = chat.payloadError({ error: { code: 503, message: 'unavailable' } });
   assert.strictEqual(e.code, 503);
