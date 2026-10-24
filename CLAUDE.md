@@ -89,6 +89,19 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 **Qoder 的 usage 直接返回 credits 消耗**（三条直连通道里唯一如此）：
 `usage.credits = price_factor × tokens/1000`，比千问（读余额差）和 TRAE（读 usage_summary）都干净。
 
+**上游限流排队会「先响应后沉默」，读空闲超时负责掐断（2026-10-24 修）。**
+限流形态（信封 `code 10605` + `subCode RESOURCE_LIMIT` + `serviceAvailable:false`）实测有两种：
+一是直接回错误信封（有信息量）；二是**请求被排队挂起——连接不关、也不出数据，
+最后由中间层在 ~360s 处掐断，客户端只拿到无信息的 `aborted`**。首字节超时挡不住第二种
+（上游可能先给响应头甚至一帧，然后沉默）。`src/qoder/chat.js` 的 `armReadIdle` 挂一个
+读空闲计时器（`DUMATE_QODER_READ_IDLE_MS`，默认 120000，`0` 关闭）：**每块数据到达都重置**，
+沉默满时限就 `req.destroy` 主动断开，交上层换号或报错。正常推理的 SSE 持续出帧、不会被误杀；
+全零字节仍由首字节超时（`DUMATE_QODER_FIRST_BYTE_MS`，默认 60000）兜底——**读空闲必须大于
+首字节，否则两计时器抢跑**。错误串由 `errtext.js` 翻译成「上游排队挂起，长时间无数据」。
+注意 `chat.js` 在模块加载时读一次环境变量就定死。离线验证：
+`node test/verify-qoder-read-idle.js`（5 项：沉默被掐、正常流不误杀、全零走首字节、
+postStream 同语义、`0` 关闭）。
+
 **`cosy.encode` 是同步的，它一慢就「假死」整个网关（2026-10-03 修，性能级）。**
 自定义 base64 编码在 `runOnce` 里**直接同步调用**，所以它的耗时会**阻塞事件循环**：
 期间 `/health` 不响应、其他通道的请求全部排队、进程 CPU 跑满却**不崩也不打日志**。
@@ -696,6 +709,8 @@ Claude Code ── Anthropic ───────┼──→ 网关 :9080 ─�
 | `DUMATE_TRAEWORK_MODELS_CACHE_MS` | `300000` | TRAE 模型表缓存时长（5 分钟）。模型表只在登录/刷新时变，不必每次打上游 |
 | `DUMATE_TRAEWORK_REPAIR_RETRY` | `1` | 「播报即收尾」的重试次数上限。`0` 关闭整个修复（见上文 TRAE 段落） |
 | `DUMATE_TRAEWORK_HOLD_CAP` | `600` | 正文缓冲门的阈值（字符）。超过就转直发，避免长回答被扣住等判定 |
+| `DUMATE_QODER_FIRST_BYTE_MS` | `60000` | Qoder 上游**首字节**超时（ms），挡「连响应头都不给」的挂起。`0` 关闭 |
+| `DUMATE_QODER_READ_IDLE_MS` | `120000` | Qoder 上游**读空闲**超时（ms），每块数据重置，挡「先响应后沉默」的限流排队（见上文）。**必须大于首字节超时**，否则两计时器抢跑。`0` 关闭 |
 | `DUMATE_DUMATE_SOURCE` | 未设（`web`） | 搭子凭证来源。未设 = **只用网页凭证**（桌面链路不参与，跳过启动那次约 3 秒的探测；池子不可用时路由层直接拒绝并说明原因，不静默退回桌面链路）。设 `auto`（别名 `desktop`）= 桌面优先、不可用时回落网页池。**无法识别的值按 `web` 处理并在启动日志告警** |
 | `DUMATE_WEB_FALLBACK` | 未设（开启） | 设 `0` 关闭「桌面凭证不可用时回落到网页池」（见上文回落机制）。关闭后桌面凭证失效即请求全失败 |
 | `DUMATE_POINTS_METER` | 未设（开启） | 设 `0` 关闭搭子的余额游标采集（`points-cursor.js`）。关闭后请求日志不再有逐条消耗 |

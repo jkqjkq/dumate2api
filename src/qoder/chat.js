@@ -221,6 +221,30 @@ function armFirstByte(req) {
   return () => clearTimeout(timer);
 }
 
+// 读空闲超时。首字节超时挡不住另一种限流形态（2026-10-23~24 实测）：上游**先
+// 发响应头甚至一帧数据**，然后长时间沉默——排队期间连接挂着不关闭，最后由
+// 中间层在 ~360s 处掐断，客户端只能拿到无信息的 `aborted`（详见 errtext.js）。
+// 正常推理的 SSE 持续出帧、每次到达都会重置计时器，所以这个上限只杀「沉默」；
+// 上游限流排队（RESOURCE_LIMIT + isQueued）最多沉默 READ_IDLE_MS 就被主动断开，
+// 交给上层换号或如实报错，客户端不用陪跑到被掐。
+// DUMATE_QODER_READ_IDLE_MS 可调，0 关闭。必须大于首字节超时，否则两计时器抢跑。
+const READ_IDLE_MS = parseInt(process.env.DUMATE_QODER_READ_IDLE_MS || '120000', 10);
+
+/** 给请求挂一个「读空闲」计时器；note() 在每块数据到达时重置，clear() 收尾调用 */
+function armReadIdle(req) {
+  if (!(READ_IDLE_MS > 0)) return { note: () => {}, clear: () => {} };
+  let timer = null;
+  const arm = () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      req.destroy(new Error(`qoder upstream read idle (${READ_IDLE_MS}ms)`));
+    }, READ_IDLE_MS);
+    if (timer.unref) timer.unref();
+  };
+  arm();
+  return { note: arm, clear: () => clearTimeout(timer) };
+}
+
 /** 发一次推理请求，返回 { status, headers, raw } */
 function post(url, body, headers) {
   return new Promise((resolve, reject) => {
@@ -234,15 +258,16 @@ function post(url, body, headers) {
     }, (res) => {
       let buf = '';
       const dec = new StringDecoder('utf8');
-      res.on('data', (x) => { clearFb(); buf += dec.write(x); });
-      res.on('end', () => { clearFb(); buf += dec.end(); resolve({ status: res.statusCode, headers: res.headers, raw: buf }); });
-      res.on('error', (e) => { clearFb(); reject(e); });
+      res.on('data', (x) => { clearFb(); idle.note(); buf += dec.write(x); });
+      res.on('end', () => { clearFb(); idle.clear(); buf += dec.end(); resolve({ status: res.statusCode, headers: res.headers, raw: buf }); });
+      res.on('error', (e) => { clearFb(); idle.clear(); reject(e); });
     });
     // 计时器**从请求写出时开始**，不是从响应头开始：上游被限流时可能连响应头
     // 都不给，那种情况下 socket 空闲超时（600s）才会兜底，而客户端早就断了。
     let clearFb = () => {};
     clearFb = armFirstByte(req);
-    req.on('error', (e) => { clearFb(); reject(e); });
+    const idle = armReadIdle(req);
+    req.on('error', (e) => { clearFb(); idle.clear(); reject(e); });
     req.on('timeout', () => { req.destroy(new Error('qoder upstream timeout')); });
     req.write(body);
     req.end();
@@ -290,6 +315,7 @@ function postStream(url, body, headers, onChunk, opts = {}) {
       };
       res.on('data', (chunk) => {
         clearFb();
+        idle.note();
         if (aborted) return;
         const text = dec.write(chunk);
         buf += text;
@@ -303,6 +329,7 @@ function postStream(url, body, headers, onChunk, opts = {}) {
       });
       res.on('end', () => {
         clearFb();
+        idle.clear();
         if (aborted) { settle(resolve, abortedResult()); return; }
         buf += dec.end();
         // 收尾：最后一帧常不带换行；且上游不发 [DONE]，要自己补
@@ -312,14 +339,17 @@ function postStream(url, body, headers, onChunk, opts = {}) {
       });
       res.on('error', (e) => {
         clearFb();
+        idle.clear();
         if (aborted) settle(resolve, abortedResult()); else settle(reject, e);
       });
     });
     // 与 post 同理：从请求写出时开始计时，覆盖「连响应头都不给」的挂起
     let clearFb = () => {};
     clearFb = armFirstByte(req);
+    const idle = armReadIdle(req);
     req.on('error', (e) => {
       clearFb();
+      idle.clear();
       if (aborted) settle(resolve, abortedResult()); else settle(reject, e);
     });
     req.on('timeout', () => { req.destroy(new Error('qoder upstream timeout')); });
@@ -331,6 +361,7 @@ function postStream(url, body, headers, onChunk, opts = {}) {
       const onAbort = () => {
         aborted = true;
         clearFb();
+        idle.clear();
         try { req.destroy(); } catch (e) { /* 已结束 */ }
       };
       if (opts.signal.aborted) onAbort();

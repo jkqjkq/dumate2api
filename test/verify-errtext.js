@@ -60,6 +60,21 @@ check('裸 timeout → 响应超时', () => {
   assert.strictEqual(explainError('timeout'), '响应超时（timeout）');
 });
 
+// ---- 2.5 Qoder 限流信封与读空闲（2026-10-23~24 实测）----
+check('RESOURCE_LIMIT 限流信封 → 上游限流中（服务级过载），保留原串', () => {
+  const s = 'qoder 403: {"code":"10605","subCode":"RESOURCE_LIMIT","serviceAvailable":false,"isQueued":true,"queueType":"p3","retryAfterSeconds":30}';
+  const r = explainError(s);
+  assert.ok(r.startsWith('上游限流中（服务过载，稍后重试）（'), `前缀不对: ${r}`);
+  assert.ok(r.includes('10605') && r.includes('RESOURCE_LIMIT'), '原串丢失，排查时无法比对日志');
+});
+
+check('read idle → 上游排队挂起已主动断开，保留原串', () => {
+  assert.strictEqual(
+    explainError('qoder upstream read idle (120000ms)'),
+    '上游排队挂起，长时间无数据（限流，已主动断开）（qoder upstream read idle (120000ms)）',
+  );
+});
+
 // ---- 3. 不该动的情况 ----
 check('已经有信息量的错误保持原样（HTTP 502 / 402）', () => {
   assert.strictEqual(explainError('HTTP 502'), 'HTTP 502');
@@ -106,6 +121,17 @@ check('幂等：已翻译的串再翻一次不叠加', () => {
   const once = explainError('aborted');
   const twice = explainError(once);
   assert.strictEqual(twice, once, `重复翻译产生了叠加: ${twice}`);
+});
+
+// 无锚的子串匹配（限流信封 / read idle / upstream timeout）最容易套娃：
+// 翻译结果里保留的原串本身还会再命中正则，必须靠「已带中文说明就跳过」兜住。
+check('幂等：无锚条目（限流信封 / read idle / upstream timeout）重翻不叠加', () => {
+  const envelope = 'qoder 403: {"code":"10605","subCode":"RESOURCE_LIMIT","serviceAvailable":false}';
+  for (const raw of [envelope, 'qoder upstream read idle (120000ms)', 'qoder upstream timeout']) {
+    const once = explainError(raw);
+    const twice = explainError(once);
+    assert.strictEqual(twice, once, `重复翻译产生了叠加: ${twice}`);
+  }
 });
 
 console.log(`\n通过 ${pass} 项，失败 ${fail} 项`);
