@@ -1,430 +1,169 @@
-# dumate2api 架构与代码详解
+# dumate2api 架构总览
 
-> 本文描述的是**当前仓库实际实现**，所有行为结论均来自实测。
-> 代码规模：`server.js` 485 行 / `discovery.js` 155 行 / `anthropic.js` 140 行 / `upstream-launcher.js` 103 行。
-> 零第三方依赖，仅用 Node.js 内置 `http` / `net` / `child_process` / `fs` / `path`。
+> 本文是架构的**当前事实快照**（2026-10 对齐施工后重写；旧版停在单上游时代）。
+> 每个模块的"为什么存在"以源文件头注释为权威——本项目纪律是**why 写在代码头部**，
+> 本文只负责模块边界、数据流与全局图。运行手册见 `README.md` 与 `CLAUDE.md`，
+> 测试怎么跑见 `test/README.md`，历史审计记录见 `CODE_REVIEW.md`。
 
----
+## 1. 这个项目是什么
 
-## 1. 这个项目解决什么问题
+dumate2api 是一个 **Node ≥18 零依赖**的 API 网关：把四个上游（百度搭子 DuMate、
+千问办公、TRAE Work、Qoder）统一翻译成 OpenAI / Anthropic / Google 兼容协议，
+供 Codex CLI、Claude Code、cc-switch 等客户端使用，并内嵌一个管理端（登录、
+签到、积分、模型映射、聊天试调）。
 
-百度搭子（DuMate）桌面客户端内部跑着一个 Go 后端 `dumate-main-server.exe`，它暴露了一个**本地 OpenAI 兼容端点**：
+唯一的生产依赖是 `playwright-core`（仅管理端登录助手用）；`src/` 网关本体
+**零第三方模块**——所有能力用 Node 内置模块实现（http/fs/crypto/
+worker_threads/node:test）。加能力的默认姿势是"用内置模块写一个小模块"，
+不是装包。
 
-```
-http://127.0.0.1:<动态端口>/api/qianfanproxy/v1/chat/completions
-```
-
-但这个端点有三个问题，导致 Codex CLI / Claude Code 无法直接用：
-
-| 问题 | 表现 | 本项目的解决 |
-|---|---|---|
-| 端口动态 | 每次启动端口都变，客户端无法写死 | `discovery.js` 三级发现 |
-| 协议只有 OpenAI | Claude Code 说 Anthropic 协议 | `anthropic.js` 双向翻译 |
-| 必须开着客户端 | Electron GUI 占资源、开机不自启 | `upstream-launcher.js` 无 GUI 拉起 |
-
-于是本项目是一个**协议网关 + 进程管理器**，位置如下：
+## 2. 进程拓扑
 
 ```
-Codex CLI ──── OpenAI ────┐
-                          ├──→ dumate2api (:9080) ──→ dumate-main-server (:8980) ──→ 百度千帆
-Claude Code ─ Anthropic ──┘
+客户端（Codex / Claude Code / cc-switch）
+   │ OpenAI / Anthropic / Google 协议
+   ▼
+src/server.js（:9080，网关进程）
+   │  鉴权(keys.js) → CORS(cors.js) → 协议翻译(anthropic/google/responses.js)
+   │  → 预算(budget.js) → 选号(upstream-router.js + pool.js)
+   ▼
+四个出口
+   ├─ 搭子：discovery.js 找到 DuMate 后端端口（upstream-launcher.js 可无 GUI 拉起）
+   │        → web-pool.js（网页 cookie 池 + 转发）
+   ├─ qwenwork / qoder：COSY 协议直连（cosy.js 签名 + offthread.js worker）
+   ├─ traework：自有协议直连
+   └─ 全部出口可经 proxy-agent.js 注入 per-account 出站代理
+   │
+   ├──埋点──> reqlog.js（requests.jsonl，32MB 轮转）
+   │            └→ reqlog-hook.feed → usage-agg.js（分桶留存）→ balance-hist.js（余额流水）
+
+src/admin/server.js（管理端进程，独立端口）
+   └─ admin/routes/*（17 文件 ~120 路由）→ 复用 src/ 同一批模块（跨进程靠
+      data/*.json 的 mtime 失效重读 + filelock.js 互斥同步）
+
+test/mock-upstream.js（开发辅助：假 DuMate 上游，`npm run mock`）
 ```
 
-关键设计取舍：**代理不做任何鉴权，也不接触凭证**。
-它只是把请求转发给已登录的本地后端，凭证（cookie）始终留在磁盘上由 Go 后端自己读。
+三个常驻进程（网关 / 管理端 / web 网关 web-gateway.js）**共享 `data/` 下的
+JSON 与 JSONL 文件**，这是理解全部同步纪律的钥匙：进程内读-改-写是同步代码
+天然串行，跨进程只有 mtime 失效重读 + filelock 两件武器。
 
----
+## 3. 模块地图（`src/`，按层）
 
-## 2. 模块划分与职责
+### 3.1 协议入口与翻译（网关进程）
 
-```
-dumate2api/
-├── src/
-│   ├── server.js             # HTTP 网关 + 路由 + OpenAI 透传 + SSE 转译
-│   ├── discovery.js          # 上游端口发现（三级降级）+ 引导启动
-│   ├── upstream-launcher.js  # 无 GUI 拉起 Go 后端（注入登录态环境变量）
-│   ├── anthropic.js          # Anthropic ↔ OpenAI 双向翻译 + 模型名映射
-│   ├── google.js             # Google Generative Language ↔ OpenAI 翻译
-│   ├── responses.js          # OpenAI Responses API ↔ Chat Completions 翻译（Codex CLI）
-│   └── budget.js             # 输出预算策略（三入口共用）
-├── test/
-│   ├── mock-upstream.js      # 假上游，用于离线自测
-│   ├── smoke.js              # 32 项断言的回归测试
-│   ├── verify-ccswitch.js    # 端到端验证（Codex / Claude 两条路径）
-│   └── probe-oai.js / probe-anth.js  # 单路径手动探针
-├── start.bat / stop.bat / restart.bat
-└── README.md
-```
-
-依赖方向是单向的，无循环：
-
-```
-server.js ──→ discovery.js ──→ upstream-launcher.js
-    ├──────→ anthropic.js ──→ budget.js
-    ├──────→ google.js ─────→ budget.js
-    └──────→ responses.js ──→ budget.js + anthropic.js(mapModel)
-```
-
----
-
-## 3. `server.js`：HTTP 网关
-
-### 3.1 路由表
-
-请求进来先处理 `OPTIONS` 预检（CORS 全放行），然后按 `url`（去掉 query）精确匹配：
-
-| 路径 | 方法 | 处理函数 | 说明 |
-|---|---|---|---|
-| `/health` `/ping` | GET | 内联 | 返回 `{status, upstream_port, upstream_managed}` |
-| `/v1/models` | GET | `handleOpenAIModels` | 静态列表 |
-| `/v1/chat/completions` | POST | `handleOpenAIChat` | **透传**，仅改模型名与预算 |
-| `/v1/responses` 或 `/responses` | POST | `handleOpenAIResponses` | **全量翻译**（Responses ↔ chat），Codex CLI 用 |
-| `/v1/messages` 或 `/messages` | POST | `handleAnthropicMessages` | **全量翻译** |
-| `/api/v1/messages` | POST | 同上 | 兼容变体 |
-| `.../count_tokens` | POST | `handleAnthropicCountTokens` | 估算，供 Claude Code 预算用 |
-
-> **为什么 `/messages` 要同时接受带和不带 `/v1`？**
-> 这是实测踩出来的坑：Claude Code 打的是**裸路径** `/messages`，
-> 而早期版本只认 `/v1/messages`，直接 404。现在两者都收。
-
-未匹配的路径统一返回 404，外层 `try/catch` 兜 500。
-
-### 3.2 上游缓存与重发现
-
-```js
-const DISCOVERY_INTERVAL = 30000;
-```
-
-`ensureUpstream()` 的逻辑：
-
-1. 若已缓存端口且距上次发现 <30s → **直接复用**，零开销
-2. 否则调用 `discoverPort()` 重新发现
-3. 若发现失败但**有旧缓存** → 继续用旧值（上游临时抖动不至于让代理失效）
-4. 两者都没有 → 抛错，由调用方转 502
-
-这个"失败时沿用旧值"的策略是刻意的：DuMate 后端偶尔重启，硬失败会导致整条链路中断。
-
-### 3.3 OpenAI 路径：最小干预透传
-
-`handleOpenAIChat` 只做两件事，然后原样转发：
-
-```js
-reqBody.model = mapModel(reqBody.model);        // 模型名映射
-reqBody.max_tokens = resolveMaxTokens(reqBody.max_tokens);  // 预算兜底（budget.js）
-```
-
-响应完全不改：流式用 `upstreamRes.pipe(res)` 直接管道，非流式收集后原样写回。
-**不重打包 JSON**，所以新增字段（如 `completion_tokens_details`）会自动透传。
-
-### 3.4 请求转发的一个细节
-
-`forwardToUpstream` 有个特殊设计：出错时它**不是抛异常**，而是给 callback 传一个假响应对象：
-
-```js
-req.on('error', (err) => {
-  callback({ fakeResponse: true, statusCode: 502, ... });
-});
-```
-
-这样调用方可以用统一的 `if (upstreamRes.fakeResponse)` 分支处理，
-不必在 callback 内外各写一套错误处理。是代码简化，不是 hack。
-
-### 3.5 输出预算兜底（重要）
-
-这是本项目**最关键的一个修正**，两个入口都做了：
-
-三个入口（OpenAI / Anthropic / Google）都调用 `src/budget.js` 的同一个函数：
-
-```js
-// src/budget.js —— 预算策略单一来源
-const FLOOR = parseInt(process.env.DUMATE_MIN_MAX_TOKENS || '32768', 10);
-const CEIL  = parseInt(process.env.DUMATE_MAX_MAX_TOKENS || '131072', 10);
-function resolveMaxTokens(requested) { /* 客户端值只作参考，钳到 [FLOOR, CEIL] */ }
-```
-
-**原因（实测）**：GLM 的思维链（reasoning）和正文**共用同一个 `max_tokens` 预算**，
-且 reasoning 长度不可控 —— 同一提示词实测在 57 ~ 8492 tokens 之间浮动。因此：
-
-| 客户端传的 max_tokens | 实测结果 |
+| 模块 | 职责 |
 |---|---|
-| 150 | reasoning 吃掉全部 150 → 正文 `""`，`stop_reason=max_tokens` |
-| 1024 | reasoning 吃掉全部 1024 → 正文 `""` |
-| 2048 / 4096 | 多数正常，但 reasoning 峰值 4000+ 时正文被截断在半句 |
-| 32768 | 实测稳定，正文完整返回 |
+| `server.js` | HTTP 入口、路由分发、请求体上限（413）、事件循环卡顿探针。**所有施工包都不直接改它**——扩展点在 reqlog / 通道模块内 |
+| `anthropic.js` / `google.js` / `responses.js` | 三套协议 ↔ OpenAI 的双向翻译（含流式） |
+| `budget.js` | 输出预算钳制（搭子 65536 / 直连 16384 下限，各通道不互套） |
+| `modelmap.js` / `channels.js` / `keys.js` | 模型映射、通道白名单、API key 的单一来源；mtime 热读 |
 
-Claude Code 默认就传很小的值（150 / 1024 这类），不兜底就会拿到空回答或半句截断
-（客户端表现为「能快就停」）。下限取 32768 而不是 4096，是因为 4096 仍在
-reasoning 的实测峰值范围内，不能可靠覆盖。
+### 3.2 路由与选号
 
----
-
-## 4. `anthropic.js`：协议翻译层
-
-### 4.1 模型名映射
-
-```js
-function mapModel(name) {
-  if (!name) return 'model-text';
-  return MODEL_MAP[name] || 'model-text';   // 未收录一律兜底
-}
-```
-
-`MODEL_MAP` 收录了 Claude 系列（sonnet/haiku/opus 各版本）和 OpenAI 系列（gpt-4o/o1/o3/gpt-5），
-**全部指向 `model-text`**，只有 `model-artifact-validate` 直通。
-
-上游只暴露这两个真实模型，传别的名字会硬性报错：
-
-```
-model `model-ultra` does not exist. api not registered.
-```
-
-所以"兜底到 `model-text`"不是偷懒，而是**唯一可行的容错**。
-
-### 4.2 请求方向：Anthropic → OpenAI
-
-处理三种 Anthropic 特有结构：
-
-| Anthropic 输入 | 转为 |
+| 模块 | 职责 |
 |---|---|
-| `system`（字符串或块数组） | 一条 `{role:'system'}` 消息 |
-| `content` 块数组中的 `text` | 拼接为纯文本 |
-| `tool_use` | `[Tool Use: 名字]\n` + JSON |
-| `tool_result` | `[Tool Result]\n` + 内容 |
-| `image` | `[Image content - not supported]` 占位 |
-| `stop_sequences` | OpenAI 的 `stop` |
+| `upstream-router.js` | 模型名前缀 → 通道解析 + availability 三通道预检（语义一致） |
+| `pool.js` | **账号池惩罚-恢复状态机**（GAP F1/包 A）：多类冷却（429 软冷却 / 5xx 熔断退避 / 模型负缓存）、sessionDead 连续计数防误杀、余额保底拦截、freeze/revive API、`data/pool-state.json` 持久化（filelock + tmp+rename，5s 防抖）；重启择新恢复 |
+| `sticky.js` | 会话粘性（哈希→uid，LRU+TTL），保底拦截时解绑换号 |
+| `web-pool.js` | 搭子网页 cookie 池（旧的内存冷却已接 pool.js 状态机） |
 
-**说明**：工具调用被降级成纯文本。DuMate 上游不支持 function calling / tool_use，
-这是能力边界导致的降级，不是实现缺陷。图像同理。
+### 3.3 通道包（`qwenwork/`、`traework/`、`qoder/`）
 
-### 4.3 响应方向：OpenAI → Anthropic
+每个通道包自成一体：`constants.js`（协议常量）、`auth.js`（凭证读写 + 刷新）、
+`login.js`（设备流 / 授权链接）、`chat.js`（对话）、`credits.js`（积分）、
+`session.js` / `checkin.js` 等按需。约定：**凭据读写收口在通道包的
+authStore**，管理端路由只调它；`qoder/` 同时是 per-channel store 模式的
+底本（`templates/channel-skel/` 提炼自它）。
 
-```js
-if (message.reasoning_content) content.push({ type: 'thinking', thinking: ... });
-if (message.content)             content.push({ type: 'text',    text: ... });
-```
+COSY 协议栈被 qwenwork 与 qoder 共用：签名算法只在 `cosy.js` 一份
+（RSA 包 tempKey + AES 身份 + md5 请求签名，key 必须字母序、AES 必须关
+Node 自动补位——两个实测坑都写在头注释）。
 
-即把上游的思维链映射成 Anthropic 的 `thinking` block，正文映射成 `text` block。
+### 3.4 调度与联动
 
-`mapFinishReason` 的对应关系：
-
-| OpenAI | Anthropic |
+| 模块 | 职责 |
 |---|---|
-| `stop` | `end_turn` |
-| `length` | `max_tokens` |
-| `tool_calls` | `tool_use` |
-| 其他 | `end_turn` |
+| `task-scheduler.js` | 任务轮询（30min ± 抖动，风控纪律：错峰、抖动、跳过禁用号） |
+| `keepalive.js` | **凭证保活与余额联动**（GAP F2/包 B）：每日低峰轮跑 refresh→查余额；余额>0 的冷却账号自动 `pool.revive`（签到→查余额→解冻闭环） |
+| `admin/routes/autotask.js` | 每日自动签到排程（幂等、可配时刻） |
 
-### 4.4 SSE 流式转译：状态机
+### 3.5 计量与账本
 
-`translateStreamToAnthropic` 把 OpenAI 的 `data: {...}` 流逐块转成 Anthropic 事件。
-它是一个**小块状态机**，维护：
-
-```js
-let blockIndex = -1;          // 当前 content block 序号
-let currentBlockType = null;  // 'thinking' | 'text'
-let inputTokens = 0, outputTokens = 0;
-let lastFinishReason = null;  // 延后到流末尾再发
-```
-
-**块切换规则**：当收到的 delta 类型与当前块类型不同时，先 `content_block_stop` 旧块，
-再 `content_block_start` 新块。这保证 `thinking` 和 `text` 不会混在一个块里。
-
-**事件顺序（Anthropic 规范要求，也是实测修正过的）**：
-
-```
-message_start
-  content_block_start (thinking)  → content_block_delta ×N → content_block_stop
-  content_block_start (text)      → content_block_delta ×N → content_block_stop
-message_delta        ← 带 usage
-message_stop
-```
-
-> 早期版本在收到 `finish_reason` 时立刻发 `message_delta`，
-> 导致 `message_delta` 出现在 `content_block_stop` **之前**，顺序违规。
-> 现在改成只记录 `lastFinishReason`，等流结束统一补发——既修正顺序，也保证只发一次。
-
-**token 用量**：请求时带上 `stream_options: {include_usage: true}`，
-上游会在末尾补一个 `choices: []` + `usage` 的块。代理捕获后填进 `message_delta`。
-实测真上游**确实支持**该参数（返回真实的 84/22 等），不是靠估算。
-
-这条要求对**四个协议入口都成立**，且只在网页凭证链路上是必需的：
-云端网关 `dumate-svc.baidu.com` 不主动发 usage 帧，8980 桌面后端默认就发。
-漏注入的症状是「请求全部 200，token 全记 0」——不报错，只是埋点里全是零。
-注入点必须落在 `if (target.direct) return ...` **之后**：直连通道
-（千问/TRAE/Qoder）的 `buildBody` 不认识这个字段。
-
-### 4.5 `count_tokens`
-
-Claude Code 会先调这个端点做上下文预算。DuMate 没暴露分词器，
-所以用 `字符数 / 4` 估算（`String.length` 是 UTF-16 码元数，**不是字节数**：
-100 个汉字与 100 个 ASCII 都算 25 token，实测一致）：
-
-```js
-function estimateTokens(value) { ... Math.ceil(value.length / 4) ... }
-```
-
-文档里明确标注了这是**估算值不是精确值**——够客户端算预算不报错，但不能当准。
-
----
-
-## 5. `discovery.js`：端口发现（三级降级）
-
-DuMate 后端的端口是动态分配的，客户端写不死。发现顺序如下：
-
-```
-① 读进程命令行 --port=NNNN
-        ↓ 探测失败
-② 读该进程实际监听的 socket 端口
-        ↓ 探测失败
-③ 扫描已知端口 [8980, 52890]
-        ↓ 探测失败
-④ 自己拉起后端（bootstrapManaged）
-```
-
-前两级都用 PowerShell：
-
-```js
-execFileSync('powershell', ['-NoProfile','-NonInteractive','-Command', script], {...})
-```
-
-（用 `execFileSync` + 参数数组而非拼字符串，避免注入与转义问题。）
-
-**每一级候选端口都要过 `probeChat()`** ——发一个 `max_tokens:1` 的真实请求，
-确认返回体含 `chat.completion`。
-这一点很重要：只判断"端口通不通"会误判，因为本机可能有别的服务占用同端口。
-
-### 第 ④ 级：引导启动
-
-```js
-async function bootstrapManaged() {
-  const mode = process.env.DUMATE_AUTOSTART || 'auto';
-  if (mode === 'off') return null;
-  if (mode !== 'always' && (await probeChat(MANAGED_PORT))) return MANAGED_PORT;
-  const info = await launcher.ensureUpstreamProcess(MANAGED_PORT);
-  await launcher.waitForPort(MANAGED_PORT, '127.0.0.1', 30000);
-  return info.port;
-}
-```
-
-三种模式：
-
-| `DUMATE_AUTOSTART` | 行为 |
+| 模块 | 职责 |
 |---|---|
-| `auto`（默认） | 没有可用实例时才拉起 |
-| `always` | 总是自己拉起，忽略已运行的客户端 |
-| `off` | 只用已有实例，绝不自己启动 |
+| `reqlog.js` | 请求明细 `data/requests.jsonl`（32MB 轮转）；首字耗时统计；`reqlog-hook.feed` 是 usage-agg 的挂接点（不经 server.js） |
+| `usage-agg.js` | **长期用量分桶**（GAP F3/包 C）：按 (时间片，通道，账号，模型，费率) 累加，小时桶 7 天后折叠日桶永久留存，`data/usage-agg.json` 原子落盘 |
+| `balance-hist.js` | **余额变动流水**（GAP F4/包 C）：余额快照逐次比对，带符号 Delta 追加 `data/balance-hist.jsonl`，首见建基线 |
+| `points-agg.js` / `points-cursor.js` / `records.js` / `checkin-ledger.js` | 额度包聚合视图 / 消耗归因游标 / 操作流水 / 签到账本 |
+| `upstream-account.js` | 账号归因（provider 主动上报 `req._upstreamAccount`，比日志反推可靠） |
 
----
+### 3.6 横切基础设施（今天安全审计修复的主体）
 
-## 6. `upstream-launcher.js`：无 GUI 拉起后端
-
-这是整个项目**唯一的逆向成果**，也是它不需要开 DuMate 界面的原因。
-
-### 6.1 问题
-
-直接跑 `dumate-main-server.exe` 会退出码 1：
-
-```
-ERROR runtime login context init failed: loginMode is required
-```
-
-因为登录态平时由 Electron 通过 IPC 注入。
-
-### 6.2 解法
-
-在二进制里搜字符串，发现它支持从环境变量读登录上下文：
-
-```
-DUMATE_LOGIN_MODE          ← 触发 env 路径
-DUMATE_LOGIN_USER_ID       ← bceUserId
-DUMATE_LOGIN_USER_NAME     ← displayName（装饰性）
-DUMATE_LOGIN_BCE_ACCOUNT_ID
-```
-
-账户信息从 Electron 存的位置读：
-
-```
-%APPDATA%\qianfan-desktop-app\auth.json
-  └─ accountProfiles[]           # 所有登录过的账号
-  └─ activeProfileId             # 当前激活的那个
-```
-
-`activeProfile()` 优先取 `activeProfileId` 对应的 profile，
-找不到就退化为 `lastLogin` 最大的那个。
-
-然后 spawn：
-
-```js
-const child = spawn(exe, args, { env, cwd: ..., stdio: 'ignore', windowsHide: true });
-```
-
-参数：`-c <config.yml> -port 8980`（配置文件存在时才加 `-c`）。
-
-### 6.3 边界
-
-- **凭证本身不由本项目处理**。cookie 仍在 `auth.json` 里，由 Go 后端自己读。
-- 因此 **cookie 过期后必须打开一次 DuMate 客户端重新登录** —— 这个绕不过去。
-- `waitForPort` 用 TCP 连接轮询（300ms 一次，最长 30s）确认后端真的起来了，而不是盲等。
-
----
-
-## 7. 关键逆向结论汇总
-
-| 发现 | 证据 |
+| 模块 | 职责与边界 |
 |---|---|
-| 本地端点路径 | `/api/qianfanproxy/v1/chat/completions` |
-| 鉴权 | `Authorization: Bearer nokey`（后端不校验 key，靠 DuMate 登录态） |
-| 无 GUI 启动所需环境变量 | `DUMATE_LOGIN_MODE=standalone` 等 4 个 |
-| 端口参数 | `-port N`（也有 `-proxy-port`，未使用） |
-| 真实模型只有两个 | `model-text`、`model-artifact-validate`；其他名报 404 |
-| 没有 `/responses` 路由 | 上游实测 404 `dumate api not registered` → 由 `src/responses.js` 在代理侧翻译（Codex 0.155 只认 `wire_api="responses"`） |
-| 思考强度不可调 | `reasoning_effort` 各档 reasoning token 为 31/31/19/31，无差异 |
-| 思维链关不掉 | GLM 恒定输出 reasoning，系统提示只能压缩不能消除 |
-| 上下文上限 | 配置声明 192K；32K 级实测通过，128K 级 10 分钟未返回 |
-| 支持 `stream_options.include_usage` | 实测返回真实 prompt/completion token |
+| `filelock.js` | **跨进程文件锁**（P1-2）：`<target>.lock` O_EXCL 独占创建，死进程/超龄锁允许拆，同步等待（Atomics.wait）。所有共享 JSON 的读-改-写都必须在 `withLock` 内，且 fn 第一行置模块缓存失效 |
+| `jsonl.js` | **带大小轮转的 JSONL 追加**（P1-4）：超 16MB 归档 `.old` 保留一代。匿名可达的埋点文件（积分游标/审计）统一走它，堵"慢性磁盘放大器" |
+| `fileperm.js` | **凭证文件权限收紧**（P1-3）：POSIX chmod 0600；Windows 用 icacls 收紧数据目录（先授予后断继承），尽力而为、失败静默 |
+| `cors.js` | **CORS fail-closed**（P0-1）：默认不发任何 CORS 头；白名单 `DUMATE_CORS_ORIGINS` 命中才回显 Origin；配置出现字面 `*` 按配置错误处理，绝不退化回全开 |
+| `offthread.js` | **同步热点挪 worker**（P1-5）：登录 scrypt / cosy 编码在常驻 worker 串行执行，事件循环不被占；worker 起不来或崩溃回退同步版。worker 空闲 3s 自杀（Node 24 实测 unref 不再让主进程退出），下个任务懒重建 |
+| `livecfg.js` | **热配置快照**（GAP F5/包 D）：模块单例持不可变快照，Store 整体替换 / Load 返回拷贝；跨进程 mtime 失效重读；字段白名单（软冷却基数 / 脱敏开关 / 隐藏模型等） |
+| `errtext.js` / `upstream-errors.js` | 错误串人话翻译（写入与读取两层、不套娃、保留原串）；COSY 上游错误形状识别（单一来源，error 对象先于 type 判） |
+| `proxy-agent.js` | **per-account 出站代理**（GAP F8/包 E）：零依赖 HTTPS-over-CONNECT 隧道 agent + 工厂，账号 `proxy` 字段注入各通道出口 |
+| `scrypt-task.js` / `discovery.js` / `upstream-launcher.js` | 登录 scrypt 限流与 worker 化（P1-5） / 端口三级发现 / 无 GUI 拉起后端 |
 
----
+### 3.7 管理端与前端
 
-## 8. 测试策略
+- `admin/server.js` + `admin/auth.js`：会话（scrypt + 按 IP 限流 + 锁定）、
+  `audit()` 把敏感动作追加 `data/admin-audit.jsonl`（签到、登录落凭据、
+  删号/改号、chatlab 试调、cc-switch 应用——**消耗积分与改凭据的动作全部过审计**）。
+- `admin/routes/*`：17 个路由文件，`mount(prefix, table)` 声明式注册。
+- `web/`：Vue 单页（管理端前端）；`web-gateway.js` 是外部客户端的正式
+  入口网关（带密钥鉴权，:9084）。
 
-| 文件 | 用途 |
+## 4. 一次请求的生命周期（数据流）
+
+1. **入口**：`server.js` 收请求 → `cors.headersFor` 挂 CORS 头（默认零头）
+   → `keys.js` 鉴权（`DUMATE_REQUIRE_KEY=1` 或设置了 `DUMATE2API_KEY` 时强制）
+   → 请求体字节上限。
+2. **翻译**：按协议（Anthropic / OpenAI / Responses / Google）调对应翻译层，
+   `budget.resolve*MaxTokens` 钳输出预算。
+3. **选号**：`upstream-router.resolve` 按模型前缀定通道 → `pool.js` 过滤
+   惩罚态（冷却/熔断/保底拦截/sessionDead）→ 通道包取可用账号 →
+   `proxy-agent` 按账号注入出口 agent。
+4. **出口**：搭子走 `web-pool` 转发 DuMate 后端；直连通道走各自 `chat.js`
+   （COSY 通道经 `offthread.run(cosy.encode)` 签名，worker 里算）。
+5. **埋点**：`reqlog.record` 写明细 → 钩子喂 `usage-agg` 分桶；余额快照
+   走 `points-cursor` / `balance-hist`；失败按错误类别回写 `pool.js`
+   （429 软冷却、5xx 熔断计数、模型负缓存）。
+6. **回程**：流式 SSE 透传 / 翻译回目标协议；首字耗时由 `reqlog.markFirstToken` 统一记。
+
+**管理端动作**（签到 / 登录 / 删号 / chatlab / 配置热改）与网关共享同一批
+`data/` 文件：写侧 `filelock.withLock` + tmp+rename，读侧 mtime 失效重读，
+敏感动作尾部 `auth.audit()` 留痕。
+
+## 5. 测试基座
+
+`npm test` = `node --test "test/*.test.js"`（**必须用 glob 形态**——显式目录
+形态会把 smoke/verify 探针一起执行）。约定与夹具见 `test/README.md`：
+
+- `test/<模块>.test.js`：离线单测（node:test + assert/strict），新模块随包 TDD；
+- `test/helpers/`：`tmpdata`（临时 data 目录 + 模块重载——env 在 require 时
+  固化的模块必须"先设 env 再 reload"）、`http-mock`（一次性假上游）；
+- `test/smoke.js`（`npm run test:smoke`）与 `verify-*` / `probe-*`：真机门禁，
+  需活网关、耗真实积分，**不属自动化门禁**；
+- 存量模块已覆盖：cors / filelock / jsonl / fileperm / offthread（安全修复
+  五件套）+ points-agg / errtext / upstream-errors / cosy / model-info。
+
+## 6. 文档地图
+
+| 文档 | 内容 |
 |---|---|
-| `test/mock-upstream.js` | 假上游（端口 52890），无需装 DuMate 即可验证协议逻辑 |
-| `test/smoke.js` | 32 项断言：模型列表、双协议流式/非流式、思维链、token 用量、事件顺序、多轮、工具块、错误路径 |
-| `test/verify-ccswitch.js` | 端到端：Codex 路径、Claude 路径、裸路径、模型映射 |
-| `probe-oai.js` / `probe-anth.js` | 单路径手动探针，看原始输出 |
+| `README.md` | 面向使用者的运行说明 |
+| `CLAUDE.md` | 给编码 agent 的全景手册（命令 / 约定与陷阱 / 环境变量 / 数据文件），97KB 单体，按「网关 / 通道包 / 管理端 / 前端」拆章是已排期的 D3 建议 |
+| 本文 | 架构边界与数据流快照 |
+| `test/README.md` | 测试约定 |
+| `CODE_REVIEW.md` / `QODER_HANDOFF.md` | 历史审计与通道交接记录 |
 
-设计要点：**断言校验形状而非字面值**。
-早期断言写死了 mock 的固定返回（"Hello world"、token 11/7），
-接真上游时一批失败——因为真上游返回的是真实文本和真实 token 数。
-现在改为"非空"、"大于 0"这类形状断言，mock 和真上游都能过。
-
-还有一个隐蔽陷阱已修复：`message_start` 事件里也有一个全 0 的 `usage` 占位，
-正则如果取第一个匹配会误判成 0。现在只取 `message_delta` 上的 usage。
-
----
-
-## 9. 生命周期脚本
-
-| 脚本 | 作用 |
-|---|---|
-| `start.bat` | 启动代理（自动拉起后端） |
-| `stop.bat` | 停代理 + 停后端 + 校验端口释放；不动 DuMate GUI 和 cc-switch；可重复执行 |
-| `restart.bat` | stop → start |
-
-`stop.bat` 用 `taskkill /T`（杀进程树），因为后端是代理的子进程，
-杀代理会连带清掉后端。保留后续步骤只为兜底残留进程。
-
-`stop.bat nopause` 参数供 `restart.bat` 内部调用，跳过 `pause` 避免卡住。
-
----
-
-## 10. 已知限制
-
-1. **cookie 会过期** —— 届时必须开一次 DuMate 客户端重新登录。
-2. **不支持工具调用 / 图像** —— 上游无此能力，降级为文本占位。
-3. **思考强度不可调** —— 模型没有这个旋钮，只能靠提示词。
-4. **超长上下文很慢** —— 128K 级单请求实测超 10 分钟未返回，建议单次控制在 32K 内。
-5. **`count_tokens` 是估算** —— 字符数/4，非精确分词。
-6. **仅 Windows** —— 依赖 PowerShell / CIM / 注册表路径。
-7. **`/v1/models` 是静态列表** —— 不查询上游（上游也无 `/models` 路由，实测 404）。
+模块的深层"为什么"（实测数字、事故复盘）一律以**源文件头注释**为权威——
+本文与其冲突时，以代码头注释为准。
