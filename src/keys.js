@@ -164,6 +164,15 @@ function tokenFromHeaders(headers) {
   return '';
 }
 
+// 常时比较任意明文 token（DUMATE2API_KEY 环境变量兜底鉴权用）。
+// 与 resolve 同款套路：先哈希再 timingSafeEqual，避免用响应耗时逐字节猜密钥。
+function tokenMatches(token, plain) {
+  if (!token || !plain) return false;
+  const a = Buffer.from(hash(String(token).trim()), 'hex');
+  const b = Buffer.from(hash(String(plain).trim()), 'hex');
+  return a.length === b.length && a.length > 0 && crypto.timingSafeEqual(a, b);
+}
+
 function resolve(token) {
   if (!token) return null;
   const h = hash(String(token).trim());
@@ -259,5 +268,6 @@ module.exports = {
   validateCIDR,
   ipMatches,
   tokenFromHeaders,
+  tokenMatches,
   hash,
 };

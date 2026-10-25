@@ -224,7 +224,7 @@ async function handleDirect(req, res, ctx) {
         'Content-Type': 'text/event-stream',
         'Cache-Control': 'no-cache',
         Connection: 'keep-alive',
-        'Access-Control-Allow-Origin': '*',
+        ...(res._cors || {}),
       });
       settled = true;
       try {
@@ -459,7 +459,7 @@ const routes = [
             'Content-Type': 'text/event-stream',
             'Cache-Control': 'no-cache',
             Connection: 'keep-alive',
-            'Access-Control-Allow-Origin': '*',
+            ...(res._cors || {}),
           });
           settled = true;
           sendMeta();
@@ -482,7 +482,7 @@ const routes = [
             'Content-Type': 'text/event-stream',
             'Cache-Control': 'no-cache',
             Connection: 'keep-alive',
-            'Access-Control-Allow-Origin': '*',
+            ...(res._cors || {}),
           });
           settled = true;
           sendMeta();

@@ -268,7 +268,7 @@ function translateStreamToResponses(upstreamRes, res, model, onDone) {
     'Content-Type': 'text/event-stream',
     'Cache-Control': 'no-cache',
     'Connection': 'keep-alive',
-    'Access-Control-Allow-Origin': '*',
+    ...(res._cors || {}),
   });
 
   // 收尾时把最终 usage 交回调用方做埋点；两条收尾路径都要走一次

@@ -8,6 +8,7 @@ const path = require('path');
 
 const router = require('./router');
 const auth = require('./auth');
+const cors = require('../cors');
 const { ensureDir } = require('./store');
 const { routes: authRoutes } = require('./routes/auth');
 const { routes: systemRoutes } = require('./routes/system');
@@ -96,7 +97,8 @@ function sendJSON(res, status, data) {
   const body = JSON.stringify(data);
   res.writeHead(status, {
     'Content-Type': 'application/json',
-    'Access-Control-Allow-Origin': '*',
+    // CORS fail-closed（P0-1）：见 ../cors.js；默认不发 ACAO
+    ...(res._cors || {}),
     // 管理端接口是实时数据（模型表、账号、埋点）。浏览器/中间层一旦缓存
     // 就会把「上游已更新」看成「界面还是旧的」，且普通刷新也不会重新请求。
     'Cache-Control': 'no-store',
@@ -136,10 +138,14 @@ const server = http.createServer((req, res) => {
 });
 
 function handleRequest(req, res) {
-  // CORS preflight：开发期 Vite(5173) 直连本端口，生产期同源不需要，留着无害
+  // CORS 白名单判定（fail-closed，P0-1）：入口算一次挂到 res 上，
+  // router/admin 的 sendJSON 与下面的 preflight 统一取用。
+  res._cors = cors.headersFor(req);
+  // CORS preflight：仅白名单命中的 Origin 才回 ACAO。开发期 Vite(5173) 直连
+  // 本端口需在 DUMATE_CORS_ORIGINS 里显式列出；生产同源不需要 CORS。
   if (req.method === 'OPTIONS') {
     res.writeHead(204, {
-      'Access-Control-Allow-Origin': '*',
+      ...res._cors,
       'Access-Control-Allow-Methods': 'GET, POST, PATCH, PUT, DELETE, OPTIONS',
       'Access-Control-Allow-Headers': 'Content-Type, Authorization',
     });

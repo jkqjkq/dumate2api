@@ -49,7 +49,10 @@ function sendJSON(res, status, data) {
   const body = JSON.stringify(data);
   res.writeHead(status, {
     'Content-Type': 'application/json',
-    'Access-Control-Allow-Origin': '*',
+    // CORS fail-closed（P0-1）：ACAO 仅在 res._cors（入口按白名单算好）里出现。
+    // 管理前端与 API 同源，生产不需要 CORS；开发期 Vite 直连用
+    // DUMATE_CORS_ORIGINS=http://localhost:5173 显式放行。
+    ...(res._cors || {}),
     // 管理端接口是实时数据（模型表、账号、埋点）。浏览器/中间层一旦缓存
     // 就会把「上游已更新」看成「界面还是旧的」，且普通刷新也不会重新请求。
     'Cache-Control': 'no-store',
