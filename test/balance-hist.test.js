@@ -122,6 +122,37 @@ test('重启后基线从文件恢复，不误报 Delta', () => {
   assert.equal(e.before, 130);
 });
 
+test('refreshTail：跨进程基线增量——完整首行采纳（轮转后单行更新不误报 Delta）', () => {
+  const dir = tmpdir();
+  const file = path.join(dir, balanceHist.FILE_NAME);
+  const a = balanceHist.create({ dir, now: () => T });
+  a.observe({ account: 'r1', balance: 100 });
+  // 模拟轮转后另一进程写入的唯一一行更新：新文件的首行就是完整行
+  fs.writeFileSync(
+    file,
+    `${JSON.stringify({ ts: T + 5000, account: 'r1', balance: 200, delta: 100, before: 100, after: 200, source: 'other', channel: '' })}\n`,
+    'utf8',
+  );
+  const e = a.observe({ account: 'r1', balance: 210, ts: T + 6000 });
+  assert.equal(e.delta, 10, '基线已被他进程的 200 刷新，不得拿旧基线 100 算出 +110');
+  assert.equal(e.before, 200);
+});
+
+test('refreshTail：窗口内首段为半行时跳过，其后完整行照常采纳', () => {
+  const dir = tmpdir();
+  const file = path.join(dir, balanceHist.FILE_NAME);
+  const a = balanceHist.create({ dir, now: () => T }); // 文件还不存在，基线空
+  // 首行超长（>64KB 窗口）：窗口起点必切在其内部，首段是半行
+  fs.writeFileSync(
+    file,
+    `${'X'.repeat(70000)}\n${JSON.stringify({ ts: T, account: 'r2', balance: 55, source: 'other' })}\n`,
+    'utf8',
+  );
+  const e = a.observe({ account: 'r2', balance: 60, ts: T + 1 });
+  assert.equal(e.delta, 5, '半行跳过、其后完整行成为基线');
+  assert.equal(e.before, 55);
+});
+
 test('curve：升序曲线、基线行入图、超点数降采样', () => {
   const h = inst();
   const balances = [100, 80, 90, 60, 70];

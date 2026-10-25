@@ -71,7 +71,8 @@ function create(opts = {}) {
   const maxDelta = opts.maxDelta || DEFAULT_MAX_DELTA;
   const now = opts.now || Date.now;
 
-  const baselines = new Map(); // account → 最近一次余额
+  const baselines = new Map();   // account → 最近一次余额
+  const baselineTs = new Map();  // account → 该基线的观测时刻（refreshTail 判行新旧用）
   let loaded = false;
 
   function gens() {
@@ -90,12 +91,18 @@ function create(opts = {}) {
     try { text = fs.readFileSync(file, 'utf8'); } catch (e) { return; }
     for (const line of text.split('\n')) {
       const r = parseLine(line.trim());
-      if (r && r.account != null) baselines.set(String(r.account), Number(r.balance));
+      if (r && r.account != null) {
+        const key = String(r.account);
+        baselines.set(key, Number(r.balance));
+        baselineTs.set(key, Number(r.ts) || 0);
+      }
     }
   }
 
   // 每次观察前从文件尾刷新基线：他进程可能刚写过同账号，不刷新的话本进程
-  // 会拿旧基线算错 Delta。只读末尾 64KB，首段可能是被截断的半行，跳过。
+  // 会拿旧基线算错 Delta。只读末尾 64KB；首段是否半行按窗口前置字节判定
+  // （见实现内注释），完整行照常采纳；采纳按 ts 判新旧——文件里本进程自己
+  // 的旧行（脏数据护栏静默挪基线后尤甚）不得把内存基线拉回过去。
   function refreshTail() {
     if (!persist) return;
     let size = 0;
@@ -115,10 +122,32 @@ function create(opts = {}) {
         got += n;
       }
       if (got <= 0) return;
+      // 首段是否半行,看窗口起点前一个字节是不是 \n:是 → 首行完整,照常处理;
+      // 不是（或窗口已顶到文件头）→ 首段是被截断的半行,跳过。无条件跳过会漏掉
+      // 他进程刚写的基线——轮转后该账号若只有这一条更新,本进程就会拿旧基线
+      // 算出错误 Delta。
+      let first = 1;
+      if (size === len) {
+        first = 0;
+      } else {
+        try {
+          const prev = Buffer.alloc(1);
+          const n = fs.readSync(fd, prev, 0, 1, size - len - 1);
+          if (n === 1 && prev[0] === 0x0A) first = 0;
+        } catch (e) { /* 读不到前置字节按半行处理 */ }
+      }
       const lines = buf.toString('utf8', 0, got).split('\n');
-      for (let i = 1; i < lines.length; i++) {
+      for (let i = first; i < lines.length; i++) {
         const r = parseLine(lines[i].trim());
-        if (r && r.account != null) baselines.set(String(r.account), Number(r.balance));
+        if (!r || r.account == null) continue;
+        // 只采纳比已知基线**更新**的行（按 ts）：文件里该账号自己的旧行
+        // （或本进程刚写过但 ts 相同的行）不得把内存基线拉回去——脏数据护栏
+        // 静默挪基线后、落盘失败留在内存的基线,都靠这条不被文件回退。
+        const key = String(r.account);
+        const ts = Number(r.ts) || 0;
+        if (!(ts > (baselineTs.get(key) || 0))) continue;
+        baselines.set(key, Number(r.balance));
+        baselineTs.set(key, ts);
       }
     } finally {
       try { fs.closeSync(fd); } catch (e) { /* 已关 */ }
@@ -152,6 +181,7 @@ function create(opts = {}) {
       }
     }
     baselines.set(account, balance);
+    baselineTs.set(account, ts);
     if (entry && persist) {
       try {
         fs.mkdirSync(dir, { recursive: true });
