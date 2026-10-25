@@ -15,6 +15,7 @@ const path = require('path');
 const crypto = require('crypto');
 const c = require('./constants');
 const { explainError } = require('../errtext');
+const filelock = require('../filelock');
 
 const FILE = 'qwenwork-accounts.json';
 
@@ -120,64 +121,77 @@ function preferred() {
 
 /** 新增或按 uid / id 覆盖。uid 相同视为同一个账号（重新登录同一个号） */
 function upsert(acc) {
-  const data = load();
-  const i = data.accounts.findIndex((a) => (acc.uid && a.uid === acc.uid) || (acc.id && a.id === acc.id));
-  // 主账号是排他的：任何写路径带 preferred:true 都要先清掉别人的。
-  // 只在新账号时设 preferred 是不够的——绕过 upsert 直接传 preferred 的
-  // 调用方（如探针、导入）会留下两个 true，选号就变成「看谁排在前面」。
-  if (acc && acc.preferred === true) {
-    for (const x of data.accounts) x.preferred = false;
-  }
-  if (i >= 0) {
-    data.accounts[i] = { ...data.accounts[i], ...acc };
+  // 跨进程互斥（filelock.js）：**高危点**——网关在请求失败时 patch(lastError)、
+  // 管理端在换票后写新的 accessToken/refreshToken，两个进程同时 RMW 时后写者
+  // 会用旧快照盖掉先写者刚换到的 refresh token，账号直接报废。锁内先失效
+  // 缓存再重读，保证改的是磁盘上的最新值。
+  return filelock.withLock(filePath(), () => {
+    cache = { mtime: -1, data: null };
+    const data = load();
+    const i = data.accounts.findIndex((a) => (acc.uid && a.uid === acc.uid) || (acc.id && a.id === acc.id));
+    // 主账号是排他的：任何写路径带 preferred:true 都要先清掉别人的。
+    // 只在新账号时设 preferred 是不够的——绕过 upsert 直接传 preferred 的
+    // 调用方（如探针、导入）会留下两个 true，选号就变成「看谁排在前面」。
+    if (acc && acc.preferred === true) {
+      for (const x of data.accounts) x.preferred = false;
+    }
+    if (i >= 0) {
+      data.accounts[i] = { ...data.accounts[i], ...acc };
+      save(data);
+      return data.accounts[i];
+    }
+    const id = data.accounts.reduce((m, a) => Math.max(m, Number(a.id) || 0), 0) + 1;
+    // 池里第一个账号自动成为主账号，否则一个账号时也要额外配一次
+    const rec = { id, enabled: true, createdAt: Date.now(), ...acc };
+    if (rec.preferred === undefined) rec.preferred = data.accounts.length === 0;
+    data.accounts.push(rec);
     save(data);
-    return data.accounts[i];
-  }
-  const id = data.accounts.reduce((m, a) => Math.max(m, Number(a.id) || 0), 0) + 1;
-  // 池里第一个账号自动成为主账号，否则一个账号时也要额外配一次
-  const rec = { id, enabled: true, createdAt: Date.now(), ...acc };
-  if (rec.preferred === undefined) rec.preferred = data.accounts.length === 0;
-  data.accounts.push(rec);
-  save(data);
-  return rec;
+    return rec;
+  });
 }
 
 function remove(id) {
-  const data = load();
-  const before = data.accounts.length;
-  data.accounts = data.accounts.filter((a) => a.id !== Number(id));
-  if (data.accounts.length === before) return false;
-  // 删掉的是主账号时，把主账号顺延给剩下的第一个——否则池里没有 preferred，
-  // 选号会静默退化成「取第一个」，用户以为是随机换的
-  if (!data.accounts.some((a) => a.preferred) && data.accounts.length) {
-    data.accounts[0].preferred = true;
-  }
-  save(data);
-  return true;
+  return filelock.withLock(filePath(), () => {
+    cache = { mtime: -1, data: null };
+    const data = load();
+    const before = data.accounts.length;
+    data.accounts = data.accounts.filter((a) => a.id !== Number(id));
+    if (data.accounts.length === before) return false;
+    // 删掉的是主账号时，把主账号顺延给剩下的第一个——否则池里没有 preferred，
+    // 选号会静默退化成「取第一个」，用户以为是随机换的
+    if (!data.accounts.some((a) => a.preferred) && data.accounts.length) {
+      data.accounts[0].preferred = true;
+    }
+    save(data);
+    return true;
+  });
 }
 
 function patch(id, fields) {
-  const data = load();
-  const a = data.accounts.find((x) => x.id === Number(id));
-  if (!a) return null;
-  // 设为主账号是排他的：置 true 时清掉其他账号的同标记
-  if (fields && fields.preferred === true) {
-    for (const x of data.accounts) if (x.id !== a.id) x.preferred = false;
-  }
-  // lastError 与 lastErrorAt 必须同步移动：所有写 lastError 的调用方
-  // （index.js 的 markFailure、chat.js 的换票失败）都走这里，集中打时间戳
-  // 比在每个调用点各写一次可靠——漏一处就会出现「有时间戳的错误」和
-  // 「没时间戳的错误」两种形状，界面无法统一判断新鲜度。
-  //
-  // 为什么要时间戳：lastError **只在换票成功时才清空**，所以它经常停在
-  // 很久以前的失败上。用户看到「Model is not available」会以为当前坏了，
-  // 其实可能是几小时前那次瞬时抖动的残留。带上时刻才能显示「N 分钟前」。
-  if (fields && fields.lastError !== undefined) {
-    fields.lastErrorAt = fields.lastError ? Date.now() : null;
-  }
-  Object.assign(a, fields);
-  save(data);
-  return a;
+  return filelock.withLock(filePath(), () => {
+    cache = { mtime: -1, data: null };
+    const data = load();
+    const a = data.accounts.find((x) => x.id === Number(id));
+    if (!a) return null;
+    // 设为主账号是排他的：置 true 时清掉其他账号的同标记
+    if (fields && fields.preferred === true) {
+      for (const x of data.accounts) if (x.id !== a.id) x.preferred = false;
+    }
+    // lastError 与 lastErrorAt 必须同步移动：所有写 lastError 的调用方
+    // （index.js 的 markFailure、chat.js 的换票失败）都走这里，集中打时间戳
+    // 比在每个调用点各写一次可靠——漏一处就会出现「有时间戳的错误」和
+    // 「没时间戳的错误」两种形状，界面无法统一判断新鲜度。
+    //
+    // 为什么要时间戳：lastError **只在换票成功时才清空**，所以它经常停在
+    // 很久以前的失败上。用户看到「Model is not available」会以为当前坏了，
+    // 其实可能是几小时前那次瞬时抖动的残留。带上时刻才能显示「N 分钟前」。
+    if (fields && fields.lastError !== undefined) {
+      fields.lastErrorAt = fields.lastError ? Date.now() : null;
+    }
+    Object.assign(a, fields);
+    save(data);
+    return a;
+  });
 }
 
 /** token 是否在 skewMs 内过期 */

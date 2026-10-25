@@ -48,12 +48,26 @@ function verifyPwd(pwd, stored) {
 }
 
 // session 签名密钥与用户表分开存：密钥泄露不该连带把口令库也交出去
+//
+// 进程内缓存一份：密钥生成后不再变化，原实现每次 parseToken 都同步读盘，
+// 每个管理端请求多一次文件 IO。跨进程首次生成走文件锁（filelock.js）——
+// 两个进程同时首启都走 readJSON→writeJSON 时，后写者会把先写者的密钥
+// 覆盖掉，另一边签发的会话全部失效。
+let _secretCache = null;
 function secret() {
+  if (_secretCache) return _secretCache;
   let s = readJSON(SECRET_FILE, null);
   if (!s || typeof s !== 'string') {
-    s = crypto.randomBytes(32).toString('hex');
-    writeJSON(SECRET_FILE, s);
+    const filelock = require('../filelock');
+    filelock.withLock(secretPath(), () => {
+      s = readJSON(SECRET_FILE, null); // 锁内重读：另一进程可能刚生成过
+      if (!s || typeof s !== 'string') {
+        s = crypto.randomBytes(32).toString('hex');
+        writeJSON(SECRET_FILE, s);
+      }
+    });
   }
+  _secretCache = s;
   return s;
 }
 

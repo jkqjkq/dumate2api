@@ -8,6 +8,7 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const filelock = require('./filelock');
 
 const DATA_DIR = process.env.DUMATE_ADMIN_DATA || path.resolve(__dirname, '..', 'data');
 const FILE = 'keys.json';
@@ -197,60 +198,71 @@ function list() {
 }
 
 function create(opts = {}) {
-  const { keys } = load();
-  const token = generateToken();
-  const now = Date.now();
-  // 默认名不能按 keys.length 生成：删掉一个再建，长度回到原值就会与现存
-  // key 重名，而用量是按名字聚合的，两个 key 的统计会串在一起。
-  // 取「当前最大编号 +1」，与现存名字保证不撞。
-  let autoName = '';
-  if (!String(opts.name || '').trim()) {
-    const used = new Set(keys.map((k) => k.name));
-    let n = keys.length + 1;
-    while (used.has(`key-${n}`)) n++;
-    autoName = `key-${n}`;
-  }
-  const key = {
-    id: (keys.reduce((m, k) => Math.max(m, k.id || 0), 0) + 1),
-    name: String(opts.name || '').trim() || autoName,
-    prefix: token.slice(0, 12),
-    hash: hash(token),
-    created_at: now,
-    expires_at: opts.expires_at || null,
-    enabled: opts.enabled !== false,
-    ip_allowlist: normalizeList(opts.ip_allowlist),
-    model_allowlist: normalizeList(opts.model_allowlist),
-    // 通道绑定：留空 = 不限（网关按模型名前缀分流）
-    channel: normalizeChannel(opts.channel),
-    note: String(opts.note || ''),
-  };
-  keys.push(key);
-  save({ keys });
-  return { key: { ...key, hash: undefined }, token };
+  // 跨进程互斥（filelock.js）：网关/管理端两个进程都会写 keys.json，
+  // 无锁 RMW 时后写者会用旧快照覆盖先写者的 key。锁内先失效缓存再重读。
+  return filelock.withLock(filePath(), () => {
+    cache = { mtime: -1, data: null };
+    const { keys } = load();
+    const token = generateToken();
+    const now = Date.now();
+    // 默认名不能按 keys.length 生成：删掉一个再建，长度回到原值就会与现存
+    // key 重名，而用量是按名字聚合的，两个 key 的统计会串在一起。
+    // 取「当前最大编号 +1」，与现存名字保证不撞。
+    let autoName = '';
+    if (!String(opts.name || '').trim()) {
+      const used = new Set(keys.map((k) => k.name));
+      let n = keys.length + 1;
+      while (used.has(`key-${n}`)) n++;
+      autoName = `key-${n}`;
+    }
+    const key = {
+      id: (keys.reduce((m, k) => Math.max(m, k.id || 0), 0) + 1),
+      name: String(opts.name || '').trim() || autoName,
+      prefix: token.slice(0, 12),
+      hash: hash(token),
+      created_at: now,
+      expires_at: opts.expires_at || null,
+      enabled: opts.enabled !== false,
+      ip_allowlist: normalizeList(opts.ip_allowlist),
+      model_allowlist: normalizeList(opts.model_allowlist),
+      // 通道绑定：留空 = 不限（网关按模型名前缀分流）
+      channel: normalizeChannel(opts.channel),
+      note: String(opts.note || ''),
+    };
+    keys.push(key);
+    save({ keys });
+    return { key: { ...key, hash: undefined }, token };
+  });
 }
 
 function update(id, patch = {}) {
-  const data = load();
-  const k = data.keys.find((x) => x.id === Number(id));
-  if (!k) return null;
-  if (patch.name !== undefined) k.name = String(patch.name).trim() || k.name;
-  if (patch.enabled !== undefined) k.enabled = !!patch.enabled;
-  if (patch.expires_at !== undefined) k.expires_at = patch.expires_at || null;
-  if (patch.ip_allowlist !== undefined) k.ip_allowlist = normalizeList(patch.ip_allowlist);
-  if (patch.model_allowlist !== undefined) k.model_allowlist = normalizeList(patch.model_allowlist);
-  if (patch.channel !== undefined) k.channel = normalizeChannel(patch.channel);
-  if (patch.note !== undefined) k.note = String(patch.note);
-  save(data);
-  return { ...k, hash: undefined };
+  return filelock.withLock(filePath(), () => {
+    cache = { mtime: -1, data: null };
+    const data = load();
+    const k = data.keys.find((x) => x.id === Number(id));
+    if (!k) return null;
+    if (patch.name !== undefined) k.name = String(patch.name).trim() || k.name;
+    if (patch.enabled !== undefined) k.enabled = !!patch.enabled;
+    if (patch.expires_at !== undefined) k.expires_at = patch.expires_at || null;
+    if (patch.ip_allowlist !== undefined) k.ip_allowlist = normalizeList(patch.ip_allowlist);
+    if (patch.model_allowlist !== undefined) k.model_allowlist = normalizeList(patch.model_allowlist);
+    if (patch.channel !== undefined) k.channel = normalizeChannel(patch.channel);
+    if (patch.note !== undefined) k.note = String(patch.note);
+    save(data);
+    return { ...k, hash: undefined };
+  });
 }
 
 function remove(id) {
-  const data = load();
-  const before = data.keys.length;
-  data.keys = data.keys.filter((x) => x.id !== Number(id));
-  if (data.keys.length === before) return false;
-  save(data);
-  return true;
+  return filelock.withLock(filePath(), () => {
+    cache = { mtime: -1, data: null };
+    const data = load();
+    const before = data.keys.length;
+    data.keys = data.keys.filter((x) => x.id !== Number(id));
+    if (data.keys.length === before) return false;
+    save(data);
+    return true;
+  });
 }
 
 module.exports = {

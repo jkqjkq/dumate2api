@@ -12,6 +12,7 @@ const path = require('path');
 const crypto = require('crypto');
 const c = require('./constants');
 const { explainError } = require('../errtext');
+const filelock = require('../filelock');
 
 const FILE = 'qoder-accounts.json';
 
@@ -139,22 +140,28 @@ function preferred() {
 
 /** 新增或按 uid / id 覆盖 */
 function upsert(acc) {
-  const data = load();
-  const i = data.accounts.findIndex((a) => (acc.uid && a.uid === acc.uid) || (acc.id && a.id === acc.id));
-  if (acc && acc.preferred === true) {
-    for (const x of data.accounts) x.preferred = false;
-  }
-  if (i >= 0) {
-    data.accounts[i] = { ...data.accounts[i], ...acc };
+  // 跨进程互斥（filelock.js）：refresh token 是轮换的，管理端登录/换票写新值、
+  // 网关请求失败 patch(lastError)，两进程无锁 RMW 时后写者会盖掉新 token。
+  // 锁内先失效缓存再重读。
+  return filelock.withLock(filePath(), () => {
+    cache = { mtime: -1, data: null };
+    const data = load();
+    const i = data.accounts.findIndex((a) => (acc.uid && a.uid === acc.uid) || (acc.id && a.id === acc.id));
+    if (acc && acc.preferred === true) {
+      for (const x of data.accounts) x.preferred = false;
+    }
+    if (i >= 0) {
+      data.accounts[i] = { ...data.accounts[i], ...acc };
+      save(data);
+      return data.accounts[i];
+    }
+    const id = data.accounts.reduce((m, a) => Math.max(m, Number(a.id) || 0), 0) + 1;
+    const rec = { id, enabled: true, createdAt: Date.now(), ...acc };
+    if (rec.preferred === undefined) rec.preferred = data.accounts.length === 0;
+    data.accounts.push(rec);
     save(data);
-    return data.accounts[i];
-  }
-  const id = data.accounts.reduce((m, a) => Math.max(m, Number(a.id) || 0), 0) + 1;
-  const rec = { id, enabled: true, createdAt: Date.now(), ...acc };
-  if (rec.preferred === undefined) rec.preferred = data.accounts.length === 0;
-  data.accounts.push(rec);
-  save(data);
-  return rec;
+    return rec;
+  });
 }
 
 /**
@@ -189,33 +196,39 @@ async function backfillPhone(session) {
 
 /** 局部更新。lastError 与 lastErrorAt 同步移动（与千问同一约定） */
 function patch(id, fields) {
-  const data = load();
-  const a = data.accounts.find((x) => x.id === Number(id));
-  if (!a) return null;
-  if (fields && fields.preferred === true) {
-    for (const x of data.accounts) if (x.id !== a.id) x.preferred = false;
-  }
-  // lastError 打时间戳：界面据此显示「N 分钟前」，避免把几小时前的瞬时
-  // 错误读成「当前故障」。所有写 lastError 的调用方都走这里，集中一处。
-  if (fields && fields.lastError !== undefined) {
-    fields.lastErrorAt = fields.lastError ? Date.now() : null;
-  }
-  Object.assign(a, fields);
-  save(data);
-  return a;
+  return filelock.withLock(filePath(), () => {
+    cache = { mtime: -1, data: null };
+    const data = load();
+    const a = data.accounts.find((x) => x.id === Number(id));
+    if (!a) return null;
+    if (fields && fields.preferred === true) {
+      for (const x of data.accounts) if (x.id !== a.id) x.preferred = false;
+    }
+    // lastError 打时间戳：界面据此显示「N 分钟前」，避免把几小时前的瞬时
+    // 错误读成「当前故障」。所有写 lastError 的调用方都走这里，集中一处。
+    if (fields && fields.lastError !== undefined) {
+      fields.lastErrorAt = fields.lastError ? Date.now() : null;
+    }
+    Object.assign(a, fields);
+    save(data);
+    return a;
+  });
 }
 
 function remove(id) {
-  const data = load();
-  const before = data.accounts.length;
-  data.accounts = data.accounts.filter((a) => a.id !== Number(id));
-  if (data.accounts.length === before) return false;
-  // 删掉的是主账号时顺延给剩下的第一个，否则选号会静默退化成「取第一个」
-  if (!data.accounts.some((a) => a.preferred) && data.accounts.length) {
-    data.accounts[0].preferred = true;
-  }
-  save(data);
-  return true;
+  return filelock.withLock(filePath(), () => {
+    cache = { mtime: -1, data: null };
+    const data = load();
+    const before = data.accounts.length;
+    data.accounts = data.accounts.filter((a) => a.id !== Number(id));
+    if (data.accounts.length === before) return false;
+    // 删掉的是主账号时顺延给剩下的第一个，否则选号会静默退化成「取第一个」
+    if (!data.accounts.some((a) => a.preferred) && data.accounts.length) {
+      data.accounts[0].preferred = true;
+    }
+    save(data);
+    return true;
+  });
 }
 
 /** token 是否在 skewMs 内过期。无 expiresAt 视为需要刷新 */
