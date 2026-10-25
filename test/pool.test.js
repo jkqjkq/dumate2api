@@ -457,6 +457,78 @@ test('跨进程合并:运维冻结立即落盘,热进程落盘前吸纳（不被
   adm.close();
 });
 
+test('reloadIfChanged 不清在途计数:管理端重读不破坏并发帽', () => {
+  const clock = makeClock();
+  const file = tmpStateFile();
+  const a = createPool({ file, flushMs: 0, now: clock.now });
+  a.acquire('1');
+  a.noteError('2', { kind: 'soft' });
+  a.flush();
+
+  // 另一「进程」写过盘后,a 重读——在途名额是本进程运行态,不能被清零
+  const b = createPool({ file, flushMs: 0, now: clock.now });
+  b.noteError('9', { kind: 'soft' });
+  b.flush();
+  assert.equal(a.reloadIfChanged(), true);
+  assert.equal(a.status('1').in_flight, 1);
+  a.close();
+  b.close();
+});
+
+test('跨进程合并:同毫秒写入不互相覆盖（rev 单调序,updated_at 同值也能吸纳）', () => {
+  const clock = makeClock(); // 时钟全程冻结:所有记录的 updated_at 恒相等
+  const file = tmpStateFile();
+  const gw = createPool({ file, flushMs: 0, now: clock.now });
+  const adm = createPool({ file, flushMs: 0, now: clock.now });
+
+  gw.noteSuccess('1'); // gw 落盘:记录 { updated_at: T0, rev: 1 }
+  gw.flush();
+  assert.equal(adm.reloadIfChanged(), true);
+
+  adm.freeze('1', 60000, '运维'); // adm 在同一毫秒写:updated_at 仍是 T0,rev 升到 2
+  gw.noteSuccess('2'); // gw 全量落盘前必须按 rev 吸纳 adm 的冻结
+  gw.flush();
+  assert.equal(gw.status('1').cool_kind, 'hard');
+
+  // 反向:rev 序下运维复活也不被热进程旧态回滚
+  adm.revive('1');
+  gw.noteSuccess('3');
+  gw.flush();
+  assert.equal(gw.status('1').cooling, false);
+  gw.close();
+  adm.close();
+});
+
+test('落盘失败回置脏标记:flush 抛错后状态仍待写,恢复后能补写成功（P1-2 教训）', async () => {
+  const clock = makeClock();
+
+  // flush() 同步路径:写失败必须把 dirty 还回来,否则第二次 flush 直接空转
+  const file = tmpStateFile();
+  const p = createPool({ file, flushMs: 0, now: clock.now });
+  fs.mkdirSync(`${file}.tmp`); // 占住临时文件路径:writeFileSync 必然 EISDIR
+  p.noteError('1', { kind: 'soft' });
+  assert.throws(() => p.flush());
+  fs.rmdirSync(`${file}.tmp`);
+  assert.equal(p.flush(), true); // 脏标记被回置:第二次 flush 真的落盘
+  const b = createPool({ file, flushMs: 0, now: clock.now });
+  assert.equal(b.status('1').cooling, true);
+  b.close();
+  p.close();
+
+  // flusher 周期路径:写失败静默,但下个周期必须重试成功而不是丢弃
+  const file2 = tmpStateFile();
+  const q = createPool({ file: file2, flushMs: 10, now: clock.now });
+  fs.mkdirSync(`${file2}.tmp`);
+  q.noteError('1', { kind: 'soft' });
+  await new Promise((r) => setTimeout(r, 50)); // 跨一个周期:写失败,脏标记保留
+  fs.rmdirSync(`${file2}.tmp`);
+  await new Promise((r) => setTimeout(r, 50)); // 下一周期补写
+  const c = createPool({ file: file2, flushMs: 0, now: clock.now });
+  assert.equal(c.status('1').cooling, true);
+  c.close();
+  q.close();
+});
+
 // ---------------------------------------------------------------------------
 // 会话粘性（src/sticky.js）
 // ---------------------------------------------------------------------------

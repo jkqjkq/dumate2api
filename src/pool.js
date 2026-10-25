@@ -63,8 +63,9 @@
 //   落盘文件是跨进程共享的（web-gateway 9084 与管理端是两个进程）。热路径
 //   （noteSuccess/noteError/acquire）只写内存 + 置脏,由 5s 防抖 flusher 落盘;
 //   冷路径运维操作（freeze/revive/reenableIfCredits...）走「锁内读盘→改单条→
-//   写盘」,立即对其他进程可见。热进程落盘前按记录级 updated_at 吸纳其他进程
-//   的更新（per-record LWW）,防止防抖窗口内的全量写把管理端刚做的冻结盖回去。
+//   写盘」,立即对其他进程可见。热进程落盘前按记录级 rev 吸纳其他进程
+//   的更新（per-record LWW,rev 是锁内单调递增的版本号,同毫秒写入也能分先后）,
+//   防止防抖窗口内的全量写把管理端刚做的冻结盖回去。
 //   代价（有意接受）:运维写盘与热进程下一次落盘之间,热进程 ≤5s 内未落盘的
 //   该账号热变化会被磁盘记录覆盖——运维操作低频,丢一次冷却计数的代价远小于
 //   引入跨进程合并日志的复杂度。
@@ -116,9 +117,11 @@ function newEntry(id) {
     last_used_at: 0,
     last_success_at: 0,
     last_error: '',
-    // 运行态,不落盘:synced_at = 本进程最后一次采纳/写盘该记录的时刻
+    // 运行态,不落盘:synced_at = 本进程最后一次采纳/写盘该记录的时刻;
+    // rev = 该记录最后采纳的落盘版本号（写侧每次 +1,是跨进程 LWW 的裁决序）
     in_flight: 0,
     synced_at: 0,
+    rev: 0,
   };
 }
 
@@ -211,8 +214,18 @@ function createPool(opts = {}) {
     // 已在有效软冷却中:不推进/不延长——重试与并发兜底探测不得把冷却越堆越厚
     // （对齐 CooldownSoftRate:这是「全池被推到封顶」教训的直接防回归）
     if (e.cooldown.kind === 'soft' && e.cooldown.until > now) return;
+    // 热配置软冷却基数（D 包 livecfg ↔ 本模块对接）:>0 生效,<=0/读不到 =
+    // 内置默认。仅生产单例开启（hotSoftCooldown）,测试池不读机器真实配置;
+    // 错误路径调用频率低,每次现读 mtime 换取管理端 PUT 后下一个 429 即新口径。
+    let base = o.softBaseMs;
+    if (o.hotSoftCooldown) {
+      try {
+        const hot = require('./livecfg').Load().softCooldownMs;
+        if (Number.isFinite(hot) && hot > 0) base = hot;
+      } catch (err) { /* livecfg 不可用按内置默认 */ }
+    }
     const shift = Math.min(e.soft_streak, 16); // 防大 streak 溢出
-    const d = Math.min(o.softBaseMs * Math.pow(2, shift), o.softMaxMs);
+    const d = Math.min(base * Math.pow(2, shift), o.softMaxMs);
     e.soft_streak++;
     e.cooldown = { kind: 'soft', until: now + d, reason };
     e.model_cooldowns = {}; // 账号级冷却清模型级豁免,防上一次豁免泄漏
@@ -397,6 +410,7 @@ function createPool(opts = {}) {
   function entryFromRecord(id, rec, now) {
     const e = newEntry(id);
     if (!rec || typeof rec !== 'object') return e;
+    e.rev = Math.max(0, rec.rev | 0);
     e.disabled = !!rec.disabled;
     e.disabled_reason = clampMsg(rec.disabled_reason);
     e.paused = !!rec.paused;
@@ -431,10 +445,12 @@ function createPool(opts = {}) {
     return e;
   }
 
-  /** entry → 磁盘记录。瞬态字段只落未过期的（写侧与读侧双重惰性过滤）。 */
-  function serializeEntry(e, now) {
+  /** entry → 磁盘记录。瞬态字段只落未过期的（写侧与读侧双重惰性过滤）。
+   *  rev 由调用方传入:锁内读到的磁盘版本号 +1,保证跨进程严格单调。 */
+  function serializeEntry(e, now, rev) {
     const rec = {
       updated_at: now,
+      rev: Math.max(0, rev | 0),
       disabled: e.disabled,
       disabled_reason: e.disabled_reason || '',
       paused: e.paused,
@@ -481,11 +497,12 @@ function createPool(opts = {}) {
       result = fn(base, now);
       if (!doc || typeof doc !== 'object' || typeof doc.accounts !== 'object') doc = { accounts: {} };
       const wnow = nowMs();
-      const rec2 = serializeEntry(base, wnow);
-      if (rec2) doc.accounts[key] = rec2;
+      const rec2 = serializeEntry(base, wnow, (base.rev || 0) + 1);
+      doc.accounts[key] = rec2;
       doc.saved_at = wnow;
       writeDoc(doc);
       base.synced_at = wnow; // 同 save():自己写的记录不回吸
+      base.rev = rec2.rev;
     });
     return result;
   }
@@ -585,15 +602,23 @@ function createPool(opts = {}) {
     if (!doc || typeof doc !== 'object' || !doc.accounts) return;
     const now = nowMs();
     for (const [id, rec] of Object.entries(doc.accounts)) {
-      states.set(String(id), entryFromRecord(id, rec, now));
+      const key = String(id);
+      const cur = states.get(key);
+      const e = entryFromRecord(id, rec, now);
+      // 重读不清在途帽:reloadIfChanged 落在管理端视图路径,chatlab 等本进程
+      // 在途请求还占着名额,清零会让并发帽失守（release 有下溢保护,帽没有）
+      if (cur) e.in_flight = cur.in_flight;
+      states.set(key, e);
     }
     lastMtime = mtimeOf();
   }
 
   /** 热路径落盘（flusher/flush 调用）。锁内「读盘吸纳 → 全量写」:
-   *  写前按记录级 updated_at 吸纳其他进程的更新（per-record LWW）,否则防抖
-   *  窗口内的全量写会把管理端刚做的冻结/复活盖回去。与 mutatePersisted 各自
-   *  拿锁、互不嵌套。 */
+   *  写前按记录级 rev 吸纳其他进程的更新（per-record LWW）,否则防抖
+   *  窗口内的全量写会把管理端刚做的冻结/复活盖回去。rev 是锁内维护的
+   *  单调版本号（每次写 = 磁盘当前版本 + 1）, updated_at 同毫秒时仍能
+   *  分清谁新谁旧——只比 updated_at 在同毫秒并发写时会丢掉对方的更新。
+   *  与 mutatePersisted 各自拿锁、互不嵌套。 */
   function save() {
     if (!file) return false;
     filelock.withLock(file, () => {
@@ -607,7 +632,10 @@ function createPool(opts = {}) {
             states.set(id, entryFromRecord(id, rec, now));
             continue;
           }
-          if ((rec.updated_at || 0) > (cur.synced_at || 0)) {
+          const recRev = (rec && rec.rev) | 0;
+          const absorbed = recRev > (cur.rev || 0)
+            || (!recRev && (rec.updated_at || 0) > (cur.synced_at || 0)); // 旧版文件无 rev,退回 updated_at
+          if (absorbed) {
             const fresh = entryFromRecord(id, rec, now);
             fresh.in_flight = cur.in_flight;
             states.set(id, fresh);
@@ -616,12 +644,14 @@ function createPool(opts = {}) {
       }
       const out = { saved_at: now, accounts: {} };
       for (const [id, e] of states) {
-        out.accounts[id] = serializeEntry(e, now);
-        // 记下本进程写盘时刻:下次 save 时磁盘上 updated_at == synced_at 的记录
-        // 是自己写的,不再吸纳;只有别人的更新（updated_at 更大）才覆盖内存。
+        const rec2 = serializeEntry(e, now, (e.rev || 0) + 1);
+        out.accounts[id] = rec2;
+        // 记下本进程写盘时刻与版本号:下次 save 时磁盘上 rev == e.rev 的记录
+        // 是自己写的,不再吸纳;只有别人的更新（rev 更大）才覆盖内存。
         // 漏了这步,每次 save 都会把自己的旧记录当外部更新吸回来,
         // 防抖窗口内的内存变化全部被回滚。
         e.synced_at = now;
+        e.rev = rec2.rev;
       }
       writeDoc(out);
     });
@@ -642,16 +672,17 @@ function createPool(opts = {}) {
     timer = setInterval(() => {
       if (!dirty) return;
       dirty = false;
-      try { save(); } catch (e) { /* 落盘失败不打断转发,下个周期重试 */ }
+      try { save(); } catch (e) { dirty = true; /* 写失败回置脏标记,下个周期重试——吞掉就等于丢了防抖窗口 */ }
     }, o.flushMs);
     if (timer.unref) timer.unref();
   }
 
-  /** 同步落盘（幂等:无变更不写）。供进程退出前与测试调用。 */
+  /** 同步落盘（幂等:无变更不写）。供进程退出前与测试调用。
+   *  写失败时脏标记回置（P1-2 教训:先清后写,失败即静默丢状态）,异常向上抛。 */
   function flush() {
     if (!dirty || !file) { dirty = false; return false; }
     dirty = false;
-    save();
+    try { save(); } catch (e) { dirty = true; throw e; }
     return true;
   }
 
