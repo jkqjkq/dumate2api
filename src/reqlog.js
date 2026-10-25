@@ -34,6 +34,16 @@ function rotateIfNeeded(file) {
 function record(entry) {
   if (disabled) return;
   try {
+    // 调用来源开关（livecfg.recordClientInfo，F6e）：关掉时不落 ip / ua。
+    // 收口在 record 里而不是调用方——server.js 的 logRequest 与三个协议
+    // 翻译器都汇到这里，一处判定全覆盖，server.js 不用动。
+    // 开关热生效：livecfg 按 mtime 重读，管理端 PUT 后下一次请求即新口径。
+    try {
+      if (require('./livecfg').Load().recordClientInfo === false) {
+        delete entry.ip;
+        delete entry.ua;
+      }
+    } catch (e) { /* 配置读不到按默认（记录）处理 */ }
     ensureDir();
     const file = path.join(LOG_DIR, FILE);
     rotateIfNeeded(file);

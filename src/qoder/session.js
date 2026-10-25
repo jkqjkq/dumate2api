@@ -329,6 +329,13 @@ async function claimCampaign(token, region, campaignId) {
     status: d.status || '',
     benefit: d.benefit || null,
     replayed: d.replayed === true,
+    // **grantId 是本地批次账本的幂等键**（grants.record 靠它去重）。响应原文
+    // d.grantId 存在（benefit 里部分活动形态也带）。此前没有带出，
+    // fromClaim 恒返 ''、record 以空键拒写——过期提醒自 2026-10-02 起实际
+    // 无数据源（P0-1）。两个位置都试，缺失如实空串（不编造）。
+    grantId: d.grantId || (d.benefit && d.benefit.grantId) || '',
+    // campaignKey 优先取领取响应，列表条目（camp.campaignKey）由调用方兜底
+    campaignKey: d.campaignKey || (d.benefit && d.benefit.campaignKey) || '',
     // grantedAt 是服务端给的领取时刻（ISO）；缺失时由调用方用本地时间兜底
     grantedAt: d.grantedAt || '',
     // 有效期：mode=RELATIVE_DAYS + days=30 是最常见形态
@@ -355,9 +362,14 @@ async function checkin(token, region, opts = {}) {
   for (const camp of list.campaigns) {
     if (camp.claimStatus !== 'CLAIMABLE') continue;
     const r = await claimCampaign(token, region, camp.campaignId);
+    // campaignKey 两个来源都可信：领取响应（claimCampaign 现已带出）与列表条目。
+    // 领取响应缺失时用列表值兜底——账本里它参与标识批次，空着没法对账。
+    const campaignKey = r.campaignKey || camp.campaignKey || '';
     claimed.push({
       campaignId: camp.campaignId,
-      key: camp.campaignKey || '',
+      key: campaignKey,
+      // grantId 只有领取响应里有：账本幂等键（P0-1 补齐后才会非空）
+      grantId: r.grantId || '',
       amount: (r.amount != null ? r.amount : (camp.benefit && camp.benefit.amount)),
       ok: r.ok,
       status: r.status || '',
@@ -371,7 +383,7 @@ async function checkin(token, region, opts = {}) {
     if (r.ok && opts.account) {
       try {
         const grants = require('./grants');
-        grants.record(grants.fromClaim(r, opts.account));
+        grants.record(grants.fromClaim({ ...r, campaignKey }, opts.account));
       } catch (e) { /* 记账失败不影响签到 */ }
     }
   }

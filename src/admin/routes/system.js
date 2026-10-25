@@ -2,6 +2,7 @@
 const http = require('http');
 const discovery = require('../../discovery');
 const launcher = require('../../upstream-launcher');
+const livecfg = require('../../livecfg');
 
 // 要观察的网关端口。默认 9080（稳定版），开发实例通过 DUMATE_ADMIN_GATEWAY_PORT
 // 指向 9082——管理端与网关是两个独立进程，各自监听不同端口，不能让管理端
@@ -56,6 +57,35 @@ async function discoveryTrail() {
 }
 
 const routes = [
+  {
+    // 热配置读（F5/F6c）。返回当前生效的快照与落盘文件名——界面上
+    // 「这个开关到底存在哪」要能被回答。只有白名单字段，见 src/livecfg.js。
+    method: 'GET',
+    path: '/config',
+    handler: async ({ res }) => {
+      require('../router').sendJSON(res, 200, {
+        ok: true,
+        file: livecfg.FILE,
+        fields: livecfg.FIELDS,
+        config: livecfg.Load(),
+      });
+    },
+  },
+  {
+    // 热配置写。patch 语义：只传要改的键；未知键 400（白名单外不收，
+    // 手滑写错键名让它静默无效比报错更伤）。写完立即生效：网关进程按
+    // mtime 重读，不需要重启。
+    method: 'PUT',
+    path: '/config',
+    handler: async ({ res, body }) => {
+      try {
+        const config = livecfg.Store(body || {});
+        require('../router').sendJSON(res, 200, { ok: true, config });
+      } catch (e) {
+        require('../router').sendJSON(res, 400, { ok: false, error: e.message });
+      }
+    },
+  },
   {
     method: 'GET',
     path: '/status',
