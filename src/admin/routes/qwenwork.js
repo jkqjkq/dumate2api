@@ -453,6 +453,11 @@ const routes = [
       const nonce = body && body.nonce;
       if (!nonce) return sendJSON(res, 400, { error: '缺少 nonce（需先调 /login/start）' });
       const r = await login.pollFlow(nonce);
+      // 审计（Q4）：poll 成功即凭据（refresh token）落盘的时刻；pending/error
+      // 每秒轮询会来，只审成功避免刷屏
+      if (r && r.status === 'ok') {
+        try { require('../auth').audit('admin', 'qwenwork_login', (r.account && r.account.id) || '', '凭据落盘'); } catch (e) { /* 审计失败不影响结果 */ }
+      }
       return sendJSON(res, 200, r);
     },
   },
@@ -489,6 +494,9 @@ const routes = [
           out.push({ id: a.id, name: a.nickname || '', ok: false, error: e.message });
         }
       }
+      // 审计（Q4）：phone 字段落进凭据文件，改了什么留痕
+      const filled = out.filter((r) => r.ok).length;
+      try { require('../auth').audit('admin', 'qwenwork_phone_refresh', id || 'all', `${filled}/${out.length}`); } catch (e) { /* 审计失败不影响结果 */ }
       return sendJSON(res, 200, { ok: true, results: out });
     },
   },
@@ -502,6 +510,7 @@ const routes = [
       // 基准/队列/缓存都按账号存着，删号后清掉，否则 Map 会一直涨
       try { require('../../qwenwork/credits').forget(a); } catch (e) { /* 清理失败不影响 */ }
       cache.data.delete(String(params[0]));
+      try { require('../auth').audit('admin', 'qwenwork_account_delete', params[0]); } catch (e) { /* 审计失败不影响结果 */ }
       return sendJSON(res, 200, { ok: true });    },
   },
   {
@@ -515,6 +524,7 @@ const routes = [
       if (!Object.keys(fields).length) return sendJSON(res, 400, { error: '没有可更新的字段' });
       const a = authStore.patch(params[0], fields);
       if (!a) return sendJSON(res, 404, { error: '账号不存在' });
+      try { require('../auth').audit('admin', 'qwenwork_account_patch', params[0], JSON.stringify(fields)); } catch (e) { /* 审计失败不影响结果 */ }
       return sendJSON(res, 200, { ok: true, account: authStore.list().find((x) => x.id === a.id) });
     },
   },

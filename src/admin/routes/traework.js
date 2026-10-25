@@ -249,6 +249,9 @@ const routes = [
         const r = await checkin.checkinAndSave(a, authStore);
         out.push({ id: a.id, nickname: a.nickname || a.uid || '', ...r });
       }
+      // 审计（Q4）：签到是真实获取积分的动作，成败都留痕
+      const okCount = out.filter((r) => r.ok).length;
+      try { require('../auth').audit('admin', 'traework_checkin', id || 'all', `${okCount}/${out.length}`); } catch (e) { /* 审计失败不影响结果 */ }
       return sendJSON(res, 200, { ok: true, results: out });
     },
   },
@@ -290,6 +293,8 @@ const routes = [
         uid: parsed.uid, nickname: parsed.nickname,
       });
       if (!r.ok) return sendJSON(res, 200, { ok: false, error: r.error });
+      // 审计（Q4）：callback 成功即凭据（refresh token）落盘的时刻
+      try { require('../auth').audit('admin', 'traework_login', (r.account && r.account.id) || '', '凭据落盘'); } catch (e) { /* 审计失败不影响结果 */ }
       return sendJSON(res, 200, { ok: true, account: r.account });
     },
   },
@@ -321,6 +326,9 @@ const routes = [
           });
         }
       }
+      // 审计（Q4）：phone 字段落进凭据文件，改了什么留痕
+      const filled = out.filter((r) => r.ok).length;
+      try { require('../auth').audit('admin', 'traework_phone_refresh', id || 'all', `${filled}/${out.length}`); } catch (e) { /* 审计失败不影响结果 */ }
       return sendJSON(res, 200, {
         ok: true, results: out,
         // 如实说明：TRAE 侧拿不到官方手机号，能填上纯属昵称恰好合格式
@@ -334,6 +342,7 @@ const routes = [
     handler: async ({ res, params }) => {
       const ok = authStore.remove(params[0]);
       if (!ok) return sendJSON(res, 404, { error: '账号不存在' });
+      try { require('../auth').audit('admin', 'traework_account_delete', params[0]); } catch (e) { /* 审计失败不影响结果 */ }
       return sendJSON(res, 200, { ok: true });
     },
   },
@@ -345,6 +354,7 @@ const routes = [
       if (body && body.enabled !== undefined) fields.enabled = !!body.enabled;
       const a = authStore.patch(params[0], fields);
       if (!a) return sendJSON(res, 404, { error: '账号不存在' });
+      try { require('../auth').audit('admin', 'traework_account_patch', params[0], JSON.stringify(fields)); } catch (e) { /* 审计失败不影响结果 */ }
       return sendJSON(res, 200, { ok: true, account: authStore.list().find((x) => x.id === a.id) });
     },
   },

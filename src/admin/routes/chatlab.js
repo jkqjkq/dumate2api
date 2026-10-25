@@ -418,6 +418,9 @@ const routes = [
           account: acct ? accounts.displayName(acct) : '',
           error: r.ok ? '' : (r.error || 'upstream_error'),
         });
+        // 审计（Q4）：试调消耗真实积分，成败都留痕（与 reqlog 同口径的通道/模型）
+        try { require('../auth').audit('admin', 'chatlab_chat', `${channel}/${model || mapped}`,
+          r.ok ? `tokens ${u.total}` : (r.error || 'upstream_error')); } catch (e) { /* 审计失败不影响结果 */ }
         if (!r.ok) {
           return sendJSON(res, r.status || 502, {
             error: r.error || (j.error && j.error.message) || `HTTP ${r.status}`,
@@ -561,6 +564,9 @@ const routes = [
       });
       // 与请求日志同一条余额游标链：「本次消耗」和日志里的实测值才能对上
       if (!upstreamErr) pointsCursor.capture(Date.now(), accounts.displayName(account));
+      // 审计（Q4）：试调消耗真实积分，成败都留痕（与 reqlog 同口径的通道/模型）
+      try { require('../auth').audit('admin', 'chatlab_chat', `${channel}/${model || mapped}`,
+        upstreamErr || `tokens ${usage.total}`); } catch (e) { /* 审计失败不影响结果 */ }
 
       if (upstreamErr) sendFinal({ type: 'error', error: upstreamErr });
       sendFinal({ type: 'done', usage, account: accounts.displayName(account), cost });

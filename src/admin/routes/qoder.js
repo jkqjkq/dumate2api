@@ -178,6 +178,9 @@ const routes = [
           results.push({ id: a.id, nickname: a.nickname || '', ok: false, error: e.message });
         }
       }
+      // 审计（Q4）：签到是真实消耗/获取积分的动作，成败都留痕
+      const okCount = results.filter((r) => r.ok).length;
+      try { require('../auth').audit('admin', 'qoder_checkin', id || 'all', `${okCount}/${results.length}`); } catch (e) { /* 审计失败不影响结果 */ }
       return sendJSON(res, 200, { ok: true, results });
     },
   },
@@ -290,6 +293,11 @@ const routes = [
       const nonce = body && body.nonce;
       if (!nonce) return sendJSON(res, 400, { error: '缺少 nonce（需先调 /login/start）' });
       const r = await login.pollFlow(nonce);
+      // 审计（Q4）：poll 成功即凭据（refresh token）落盘的时刻；pending/error
+      // 每秒轮询会来，只审成功避免刷屏
+      if (r && r.status === 'ok') {
+        try { require('../auth').audit('admin', 'qoder_login', (r.account && r.account.id) || '', '凭据落盘'); } catch (e) { /* 审计失败不影响结果 */ }
+      }
       return sendJSON(res, 200, r);
     },
   },
@@ -307,6 +315,7 @@ const routes = [
     handler: async ({ res, params }) => {
       const ok = authStore.remove(params[0]);
       if (!ok) return sendJSON(res, 404, { error: '账号不存在' });
+      try { require('../auth').audit('admin', 'qoder_account_delete', params[0]); } catch (e) { /* 审计失败不影响结果 */ }
       return sendJSON(res, 200, { ok: true });
     },
   },
@@ -319,6 +328,7 @@ const routes = [
       if (body && body.preferred !== undefined) fields.preferred = !!body.preferred;
       const a = authStore.patch(params[0], fields);
       if (!a) return sendJSON(res, 404, { error: '账号不存在' });
+      try { require('../auth').audit('admin', 'qoder_account_patch', params[0], JSON.stringify(fields)); } catch (e) { /* 审计失败不影响结果 */ }
       return sendJSON(res, 200, { ok: true, account: authStore.list().find((x) => x.id === a.id) });
     },
   },
