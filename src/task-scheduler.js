@@ -20,6 +20,13 @@ const accounts = require('./accounts');
 const taskRunner = require('./task-runner');
 const { readJSON, writeJSON } = require('./admin/store');
 
+// 保活与余额联动调度（施工包 B / GAP F2）：keepalive 有自己的每日排程与
+// 配置，但它的启动/重排挂在本模块的 schedule() 链路上——admin/server.js
+// 只调 taskScheduler.schedule() 一处，server.js 与 admin/server.js 都不必
+// 感知 keepalive。加载失败不拖累任务轮询。
+let keepalive = null;
+try { keepalive = require('./keepalive'); } catch (e) { /* keepalive 缺失/故障时任务轮询照常 */ }
+
 const CONFIG_FILE = 'task-scheduler.json';
 const DEFAULT_MINUTES = parseInt(process.env.DUMATE_TASK_POLL_MINUTES || '30', 10);
 const MIN_MINUTES = 5;          // 低于这个值拒绝——太快了
@@ -59,6 +66,9 @@ function nextDelayMs() {
 }
 
 function schedule() {
+  // keepalive 排程与本轮询互相独立（它有自己的 enabled/时点），这里只负责
+  // 「进程启动或重排时把它的定时器也架上」；无论本模块开关状态如何都要调。
+  if (keepalive) { try { keepalive.schedule(); } catch (e) { /* 同上，不阻塞主排程 */ } }
   if (timer) { clearTimeout(timer); timer = null; }
   if (!state.enabled || state.minutes <= 0) { state.next_run_at = null; return; }
 
@@ -156,6 +166,8 @@ function snapshot() {
     last_result: state.last_result,
     next_run_at: state.next_run_at,
     running: state.running,
+    // 保活调度的排程与运行态（施工包 B）：null = 模块缺失/加载失败
+    keepalive: keepalive ? keepalive.snapshot() : null,
     // 把「为什么是这个间隔」写进接口，界面直接展示，避免被当成随便设的
     rationale: [
       '任务不是每日重置，只在有活动时新增——高频轮询收益为零',
