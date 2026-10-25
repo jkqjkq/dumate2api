@@ -108,4 +108,53 @@ function envelopeStatus(raw) {
   return null;
 }
 
-module.exports = { payloadError, envelopeStatus };
+// ---------------------------------------------------------------------------
+// code → 处置类别映射（GAP Q3,随 F1 落地）
+//
+// payloadError/envelopeStatus 回答「这是什么错误」,classify 回答「池子该拿它
+// 怎么办」——错误类别决定账号池动作,替代 web-pool 旧的一律 markFailure。
+// 类别与 src/pool.js 的冷却域一一对应（对齐 codebuddyManager 的错误策略）:
+//
+//   soft         429 限流 → 账号级软冷却（有界指数退避,冷却中不叠加）
+//   hard         402/余额耗尽文案 → 硬冷却到下一次签到窗口（次日 04:00）
+//   model        403+模型不可用文案 → (账号,模型) 级负缓存,切模型即可用
+//   session_dead 401 → 登录态疑似失效,连续计数达阈值才禁用（防误杀:
+//                网络抖动/refresh 竞态会临时性触发 401,一次就杀号会误杀,
+//                对齐 codebuddy 的 12153 sessionDeadThreshold 缓冲模式）
+//   breaker      5xx / 网络层失败 / 其余 403 → 熔断计数（连续失败指数退避）
+//   null         其余 4xx → 请求本身的问题,换账号也一样失败,不惩罚账号
+//
+// 保守原则:拿不准的类别宁可少惩罚。401 也可能是上游闪断,所以走「连续计数」
+// 而不是直接禁用;403 只有带明确模型文案才进模型负缓存,否则按熔断兜底。
+// ---------------------------------------------------------------------------
+
+/** 余额耗尽:中文「余额/积分 不足/耗尽/用完」或英文 insufficient credit/balance/quota */
+const HARD_TEXT = /(余额|积分)[^\n]{0,8}(不足|耗尽|用完)|insufficient[^\n]{0,20}(credit|balance|quota)/i;
+/** 模型不可用:403 的典型文案 "Model is not available for this user" 及变体 */
+const MODEL_TEXT = /model[^\n]{0,40}(not available|not found|not exist|unsupported)|模型[^\n]{0,12}(不可用|不存在|不支持)/i;
+
+/**
+ * 把一次上游错误归入池处置类别。
+ *
+ * @param {{status?:number, code?:unknown, message?:string}|string|Error|null} err
+ *   status 为 HTTP 状态码（0 = 网络层失败/超时）;裸字符串按网络层失败处理。
+ * @returns {{kind:'soft'|'hard'|'model'|'session_dead'|'breaker'|null, status:number, message:string}}
+ */
+function classify(err) {
+  if (err == null) return { kind: null, status: 0, message: '' };
+  if (typeof err === 'string') err = { status: 0, message: err };
+  else if (err instanceof Error) err = { status: 0, message: err.message };
+  const status = Math.max(0, Math.floor(Number(err.status) || 0));
+  const message = String(err.message || err.error || '').slice(0, 200);
+  const base = { kind: null, status, message };
+
+  if (status === 429) return { ...base, kind: 'soft' };
+  if (status === 401) return { ...base, kind: 'session_dead' };
+  if (status === 402 || HARD_TEXT.test(message)) return { ...base, kind: 'hard' };
+  if (status === 403 && MODEL_TEXT.test(message)) return { ...base, kind: 'model' };
+  if (status === 0 || status >= 500 || status === 403) return { ...base, kind: 'breaker' };
+  // 其余 4xx（400/404/422...）:请求本身的问题,不惩罚账号
+  return base;
+}
+
+module.exports = { payloadError, envelopeStatus, classify };
