@@ -82,6 +82,7 @@ module.exports = {
   // 算法：转发自 src/cosy.js，保持本模块原有的导出面不变
   // （qoder/chat.js、qoder/index.js、qoder/session.js 与三个测试都按这个面调用）
   encode: core.encode,
+  encodeAsync: core.encodeAsync,
   aesEncrypt: core.aesEncrypt,
   rsaEncrypt: core.rsaEncrypt,
   md5hex: core.md5hex,

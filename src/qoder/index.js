@@ -169,7 +169,8 @@ async function runOnce(account, payload, onChunk, opts, meter) {
   const modelMeta = cachedModels.find((m) => m.key === modelKey);
   const ctxMax = process.env.DUMATE_QODER_CONTEXT === 'default' ? null : (modelMeta && modelMeta.maxInputTokens);
   const bodyJson = chat.buildBody(modelKey, payload, { maxInputTokens: ctxMax });
-  const encBody = cosy.encode(Buffer.from(bodyJson));
+  // encode 进 worker（审计 P1-5b）：几 MB 请求的编码不再独占事件循环
+  const encBody = await cosy.encodeAsync(Buffer.from(bodyJson));
 
   // COSY 会话与账号身份绑定：uid / device_token 都进签名。
   // machineId/Token/Type 每账号一份（登录时生成并持久化）。

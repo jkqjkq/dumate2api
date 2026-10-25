@@ -120,10 +120,13 @@ const routes = [
         return true;
       };
 
-      const { rows, total } = reqlog.read({ limit, offset, filter });
-      // 并发判定要看窗口内全量，不能只看当前页：页外的请求同样会
-      // 与页内请求重叠，只看一页会把不准的差值标成准确
+      // 一次读全量再切页（审计 P1-5d）：原实现先读一遍取页、再读一遍取
+      // 全量窗口做并发判定——整文件同步 JSON.parse 两遍（2×32MB），页面
+      // 负载被放大一倍。并发判定要看窗口内全量，不能只看当前页：页外的
+      // 请求同样会与页内请求重叠，只看一页会把不准的差值标成准确
       const { rows: allInWindow } = reqlog.read({ limit: 0, filter });
+      const total = allInWindow.length;
+      const rows = allInWindow.slice(offset, offset + limit);
       return sendJSON(res, 200, {
         // 附上实测扣费（余额差）。没有游标的行如实留空——
         // 第一条请求没有参照点，补 0 会被读成「这条没花钱」

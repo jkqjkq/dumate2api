@@ -102,4 +102,15 @@ function prepareInfer({ uid, token, bodyJson, modelKey, machineId }) {
   return { url: c.GATEWAY + c.CHAT_PATH + '?' + c.CHAT_QUERY, body, headers };
 }
 
-module.exports = { prepareInfer, newSession, buildHeaders, identityJson, CHAT_PATH_SIG };
+/** prepareInfer 的异步版（审计 P1-5b）：encode 进 worker，事件循环不被占 */
+async function prepareInferAsync({ uid, token, bodyJson, modelKey, machineId }) {
+  const body = await core.encodeAsync(bodyJson);
+  const sess = newSession({ uid, token, machineId });
+  const headers = buildHeaders(sess, CHAT_PATH_SIG, body, 'text/event-stream', {
+    'x-model-key': modelKey,
+    'x-model-source': 'system',
+  });
+  return { url: c.GATEWAY + c.CHAT_PATH + '?' + c.CHAT_QUERY, body, headers };
+}
+
+module.exports = { prepareInfer, prepareInferAsync, newSession, buildHeaders, identityJson, CHAT_PATH_SIG };

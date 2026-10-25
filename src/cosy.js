@@ -28,6 +28,7 @@
 // 离线验证：node test/verify-qoder-cosy.js（与参考实现的确定性测试向量
 // 逐字节比对）
 const crypto = require('crypto');
+const offthread = require('./offthread');
 
 // 服务端公钥（RSA-1024，PKCS#1 v1.5）。硬编码——它不属于用户凭证，是协议常量。
 // Qoder 与千问办公共用同一把（实测两个网关都接受用它签出来的请求）。
@@ -114,6 +115,16 @@ function encode(plaintext) {
 }
 
 /**
+ * encode 的 worker 版（审计 P1-5b）：O(n) 修复后单次代价可控，但几 MB 请求
+ * 仍是几十 ms 级的独占，并发下叠加。热路径（qoder/index.js、千问本地签名）
+ * 改走 encodeAsync——worker 里算，事件循环不被占；worker 起不来时回退
+ * 同步版，退化成旧行为，不破坏功能。
+ */
+function encodeAsync(plaintext) {
+  return offthread.run(__filename, 'encode', [plaintext], (p) => encode(p));
+}
+
+/**
  * AES-128-CBC + PKCS#7，IV 取 key 前 16 字节。
  * **必须 setAutoPadding(false)**：本函数已手工补位，Node 默认会再补一次。
  */
@@ -187,7 +198,7 @@ function sortedJson(obj) {
 }
 
 module.exports = {
-  encode, aesEncrypt, rsaEncrypt, md5hex, newUUID, newSession,
+  encode, encodeAsync, aesEncrypt, rsaEncrypt, md5hex, newUUID, newSession,
   buildPayloadB64, signRequest, composeBearer, sortedJson,
   SERVER_PUBKEY_PEM, CUSTOM_ALPHABET, STD_ALPHABET, S2C,
 };

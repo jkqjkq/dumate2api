@@ -31,10 +31,21 @@ const routes = [
     method: 'POST',
     path: '/auth/login',
     public: true,
-    handler: ({ req, res, body }) => {
+    handler: async ({ req, res, body }) => {
       const ip = clientIP(req);
       const username = String((body && body.username) || '').trim();
       const password = String((body && body.password) || '');
+
+      // 前置限流（审计 P1-5）：在锁定计数与 scrypt 校验之前先按 IP 卡窗口，
+      // 换用户名稀释锁定键的爆破在这里就被挡下
+      if (auth.loginThrottled(ip)) {
+        auth.audit(username || 'anonymous', 'login_rate_limited', username, `ip=${ip}`);
+        return sendJSON(res, 429, {
+          error: 'too_many_attempts',
+          retry_after: auth.RATE_WINDOW_MS / 1000,
+        });
+      }
+      auth.recordLoginAttempt(ip);
 
       if (auth.loginBlocked(ip, username)) {
         auth.audit(username || 'anonymous', 'login_blocked', username, `ip=${ip}`);
@@ -46,7 +57,7 @@ const routes = [
 
       const data = auth.users() || {};
       const user = data[username];
-      if (!user || !auth.verifyPwd(password, user.hash)) {
+      if (!user || !(await auth.verifyPwd(password, user.hash))) {
         auth.recordFail(ip, username);
         auth.audit(username || 'anonymous', 'login_failed', username, `ip=${ip}`);
         const blocked = auth.loginBlocked(ip, username);

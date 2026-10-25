@@ -2,6 +2,12 @@
 const crypto = require('crypto');
 const path = require('path');
 const { readJSON, writeJSON, appendJSONL } = require('./store');
+const offthread = require('../offthread');
+// scrypt 的 worker 侧实现（审计 P1-5a）：登录是 public 路由，同步 scrypt
+// 每次失败尝试都在事件循环上跑一次 256MB 内存分配 + 秒级 CPU，
+// 换用户名可以稀释锁定键（ip|username）反复触发。搬到 worker 后
+// 事件循环不被占用，串行 worker 还天然限流。
+const SCRYPT_TASK = require.resolve('../scrypt-task');
 
 const USERS_FILE = 'admin-users.json';
 const SECRET_FILE = 'admin.secret';
@@ -35,12 +41,23 @@ function makeHash(pwd) {
   return `scrypt$${N_COST}$${salt}$${dk}`;
 }
 
-function verifyPwd(pwd, stored) {
+/**
+ * 口令校验（**异步**，审计 P1-5a）。scrypt 在常驻 worker 里算，事件循环
+ * 不被秒级阻塞；worker 起不来时回退同步版——退化成旧行为，登录仍可用。
+ * makeHash 保持同步：只在 bootstrap / 管理员重置密码时调用，不是匿名热路径。
+ */
+async function verifyPwd(pwd, stored) {
   const parts = String(stored || '').split('$');
   if (parts.length !== 4 || parts[0] !== 'scrypt') return false;
   const n = parseInt(parts[1], 10);
   if (!Number.isInteger(n) || n <= 0) return false;
-  const expected = _scrypt(pwd, parts[2], n);
+  const expectedHex = await offthread.run(
+    SCRYPT_TASK,
+    'scrypt',
+    [{ pwd, salt: parts[2], n }],
+    (p) => _scrypt(p.pwd, p.salt, p.n).toString('hex'),
+  );
+  const expected = Buffer.from(expectedHex, 'hex');
   const actual = Buffer.from(parts[3], 'hex');
   // 长度不等时 timingSafeEqual 会抛异常，先挡掉
   if (expected.length !== actual.length) return false;
@@ -176,6 +193,45 @@ function revokeSessions(username) {
 // 而落盘会在断电后留下陈旧锁定把管理员自己锁在外面。
 const fails = {};
 
+// ---- 登录前置限流（按 IP 滑动窗口，审计 P1-5）----
+// scrypt 搬进 worker 后事件循环不再被卡，但每次校验仍要吃 256MB 内存；
+// 且失败锁定键是 ip|username——换用户名即可稀释（MAX_TRACKED=5000 个键）。
+// 所以在进入锁定计数**之前**按 IP 卡一道：RATE_WINDOW_MS 内超过 RATE_MAX 次
+// 登录尝试直接 429，不给 scrypt 跑的机会。DUMATE_ADMIN_LOGIN_RATE 可调。
+const RATE_WINDOW_MS = 60000;
+const RATE_MAX = Math.max(1, parseInt(process.env.DUMATE_ADMIN_LOGIN_RATE || '20', 10));
+const ipHits = new Map();
+
+function _pruneHits(now) {
+  for (const [ip, arr] of ipHits) {
+    const keep = arr.filter((t) => now - t < RATE_WINDOW_MS);
+    if (keep.length) ipHits.set(ip, keep);
+    else ipHits.delete(ip);
+  }
+}
+
+function loginThrottled(ip) {
+  const key = String(ip || '');
+  const now = Date.now();
+  // 只清自己的窗口：攻击者每 IP 至多压 RATE_MAX 条记录，Map 增长可控；
+  // 超过阈值时整体清一次过期项兜底
+  if (ipHits.size > 5000) {
+    _pruneHits(now);
+    if (ipHits.size > 10000) ipHits.clear(); // 真洪峰：宁可限流失效也不无限吃内存
+  }
+  const arr = (ipHits.get(key) || []).filter((t) => now - t < RATE_WINDOW_MS);
+  if (arr.length) ipHits.set(key, arr);
+  else ipHits.delete(key);
+  return arr.length >= RATE_MAX;
+}
+
+function recordLoginAttempt(ip) {
+  const key = String(ip || '');
+  const arr = ipHits.get(key) || [];
+  arr.push(Date.now());
+  ipHits.set(key, arr);
+}
+
 function _prune() {
   const keys = Object.keys(fails);
   if (keys.length <= MAX_TRACKED) return;
@@ -252,6 +308,7 @@ module.exports = {
   MAX_FAILS,
   LOCK_SECONDS,
   N_COST,
+  RATE_WINDOW_MS,
   secretPath,
   makeHash,
   verifyPwd,
@@ -262,6 +319,8 @@ module.exports = {
   users,
   saveUsers,
   revokeSessions,
+  loginThrottled,
+  recordLoginAttempt,
   loginBlocked,
   lockRemaining,
   recordFail,

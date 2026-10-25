@@ -104,7 +104,8 @@ async function runOnce(account, payload, onChunk, opts) {
   const auth = await chat.ensureAccount(authStore, account);
   const modelKey = chat.resolveModelKey(payload && payload.model);
   const bodyJson = chat.buildBody(modelKey, payload);
-  const built = bridge.prepareInfer({
+  // encode 进 worker（审计 P1-5b），签名构造不再独占事件循环
+  const built = await bridge.prepareInferAsync({
     uid: auth.uid,
     token: auth.accessToken,
     bodyJson,
@@ -253,7 +254,7 @@ async function send(payload, onChunk, opts = {}) {
 async function listModels() {
   try {
     const account = await chat.ensureAccount(authStore, pickAccount());
-    const built = bridge.prepareInfer({
+    const built = await bridge.prepareInferAsync({
       uid: account.uid,
       token: account.accessToken,
       bodyJson: '{}',
