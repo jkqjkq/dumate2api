@@ -2,6 +2,7 @@
 const fs = require('fs');
 const path = require('path');
 const fileperm = require('../fileperm');
+const jsonl = require('../jsonl');
 
 const ROOT = path.resolve(__dirname, '..', '..');
 const DATA_DIR = process.env.DUMATE_ADMIN_DATA || path.join(ROOT, 'data');
@@ -38,7 +39,9 @@ function writeJSON(name, data) {
 
 function appendJSONL(name, obj) {
   const target = dataPath(name);
-  fs.appendFileSync(target, `${JSON.stringify(obj)}\n`, 'utf8');
+  // 大小轮转（jsonl.js）：admin-audit / activity / task-runs 都是无界追加，
+  // 管理端端口暴露时 login_failed 每次失败追加一行，可被匿名刷写
+  jsonl.append(target, `${JSON.stringify(obj)}\n`);
   // 审计流水含来源 IP 与操作者，收窄到当前用户（Windows 上仅首次触发
   // 目录 ACL 收紧，开销可忽略）
   fileperm.harden(target);

@@ -367,6 +367,13 @@ async function fetchWallets(opts = {}) {
 const queues = new Map();   // 账号 id → Promise（串行队列）
 const baselines = new Map(); // 账号 id → 上一次结算后的余额
 
+// 归因节流（审计 P1-4）：每次归因要「前后两次」打上游余额接口（force 读，
+// 不走 30s 缓存），匿名刷网关等于把每条请求放大成两次上游调用。TTL 内同一
+// 账号只做一次实测归因，窗口内的请求不落归因记录（与首个请求无基准时的
+// 行为一致），窗口两端的差值涵盖期间消耗总量。DUMATE_QWENWORK_CREDIT_TTL_MS 可调。
+const CAPTURE_TTL_MS = Math.max(0, parseInt(process.env.DUMATE_QWENWORK_CREDIT_TTL_MS || '60000', 10));
+const lastCaptureAt = new Map();
+
 /** 账号在队列里的 key。没有 id 就退回 token 尾段，保证同一身份同一条队列 */
 function queueKeyOf(account) {
   return String((account && account.id) || tokenOf(account).slice(-8) || 'unknown');
@@ -389,6 +396,10 @@ function capture(opts = {}) {
   const account = opts.account;
   if (!account) return Promise.resolve(null);
   const key = queueKeyOf(account);
+  // 节流窗口内不打上游、不落归因
+  const last = lastCaptureAt.get(key) || 0;
+  if (CAPTURE_TTL_MS && Date.now() - last < CAPTURE_TTL_MS) return Promise.resolve(null);
+  lastCaptureAt.set(key, Date.now());
   const run = async () => {
     // 首次没有基准，只建立它，不产出归因（否则会把历史消耗算到这次请求上）
     if (!baselines.has(key)) {
@@ -473,6 +484,7 @@ function forget(account) {
   const key = queueKeyOf(account);
   baselines.delete(key);
   queues.delete(key);
+  lastCaptureAt.delete(key);
   caches.delete(String(account.id || ''));
 }
 
@@ -511,10 +523,12 @@ function indexByReqId() {
 function record(entry) {
   const fs = require('fs');
   const path = require('path');
+  const jsonl = require('../jsonl');
   const dir = process.env.DUMATE_ADMIN_DATA || path.resolve(__dirname, '..', '..', 'data');
   try {
     fs.mkdirSync(dir, { recursive: true });
-    fs.appendFileSync(path.join(dir, 'qwenwork-credits.jsonl'), `${JSON.stringify(entry)}\n`, 'utf8');
+    // 大小轮转（jsonl.js）：逐请求归因文件不设限会无限增长
+    jsonl.append(path.join(dir, 'qwenwork-credits.jsonl'), `${JSON.stringify(entry)}\n`);
   } catch (e) { /* 埋点失败绝不影响正在转发的响应 */ }
 }
 

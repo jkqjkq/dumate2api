@@ -8,6 +8,7 @@
 // 所以这里**不做游标差值**，只做「按 req_id 落一条」。落盘失败绝不影响响应。
 const fs = require('fs');
 const path = require('path');
+const jsonl = require('../jsonl');
 
 const FILE = 'qoder-credits.jsonl';
 
@@ -22,7 +23,8 @@ function filePath() {
 function append(entry) {
   try {
     fs.mkdirSync(dataDir(), { recursive: true });
-    fs.appendFileSync(filePath(), `${JSON.stringify(entry)}\n`, 'utf8');
+    // 大小轮转（jsonl.js）：逐请求归因文件不设限会无限增长
+    jsonl.append(filePath(), `${JSON.stringify(entry)}\n`);
   } catch (e) { /* 埋点失败绝不影响已发出的响应 */ }
 }
 

@@ -8,6 +8,7 @@
 // 采集放在响应发出之后异步做，不占请求延迟。
 const fs = require('fs');
 const path = require('path');
+const jsonl = require('./jsonl');
 
 const DATA_DIR = process.env.DUMATE_ADMIN_DATA || path.resolve(__dirname, '..', 'data');
 const FILE = 'points-cursor.jsonl';
@@ -17,10 +18,17 @@ const ENABLED = process.env.DUMATE_POINTS_METER !== '0';
 // 下一条请求的差值跨过两条请求，静默算错。宁可排队慢一点，也不能缺档。
 const queues = new Map();
 
+// 余额采集节流（审计 P1-4）：匿名刷网关时每条请求都会为游标打一次上游
+// 余额接口（网页凭证按账号 HTTP 查询、桌面链路探测 8980）。加 TTL 后同一
+// 账号窗口内只实测一次，窗口内的请求共享下一次实测的差值——与并发请求的
+// inexact 标注同一性质，消耗总量仍然正确。DUMATE_POINTS_CURSOR_TTL_MS 可调。
+const THROTTLE_MS = Math.max(0, parseInt(process.env.DUMATE_POINTS_CURSOR_TTL_MS || '60000', 10));
+const lastCaptureAt = new Map();
+
 function append(entry) {
   try {
     fs.mkdirSync(DATA_DIR, { recursive: true });
-    fs.appendFileSync(path.join(DATA_DIR, FILE), `${JSON.stringify(entry)}\n`, 'utf8');
+    jsonl.append(path.join(DATA_DIR, FILE), `${JSON.stringify(entry)}\n`);
   } catch (e) { /* 埋点失败绝不能影响转发 */ }
 }
 
@@ -68,6 +76,12 @@ async function balanceWeb(accountName) {
 async function capture(ts, account) {
   if (!ENABLED) return;
   const key = account || '';
+  // 节流窗口内不打上游也不落游标（保持队列原样返回，调用方 await 无感）
+  const last = lastCaptureAt.get(key) || 0;
+  if (THROTTLE_MS && Date.now() - last < THROTTLE_MS) {
+    return queues.get(key) || Promise.resolve();
+  }
+  lastCaptureAt.set(key, Date.now());
   // 串行：同一账号的游标必须按请求结束顺序落盘，否则差值会配错
   const prev = queues.get(key) || Promise.resolve();
   const next = prev.then(async () => {
