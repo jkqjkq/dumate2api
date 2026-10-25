@@ -104,7 +104,8 @@ async function currentBalance() {
   let sum = 0;
   let ok = false;
   for (const a of list) {
-    const bal = await web.api.quotaOverview(a.cookie).catch(() => ({ ok: false }));
+    // 出站代理（E 包收口补点）：配置非法走 catch 按「查不到余额」计
+    const bal = await web.api.quotaOverview(a.cookie, { agent: web.agentFor(a) }).catch(() => ({ ok: false }));
     if (bal.ok) { sum += bal.left; ok = true; }
   }
   return ok ? sum : null;
@@ -113,7 +114,7 @@ async function currentBalance() {
 // 单个账号的余额。试调的实际消耗按「该账号请求前 - 请求后」算，
 // 比全池合计更准（并发时别的账号的消耗不会混进来）。
 async function balanceOf(account) {
-  const r = await web.api.quotaOverview(account.cookie).catch(() => ({ ok: false }));
+  const r = await web.api.quotaOverview(account.cookie, { agent: web.agentFor(account) }).catch(() => ({ ok: false }));
   return r.ok ? r.left : null;
 }
 

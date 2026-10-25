@@ -25,8 +25,14 @@ async function pointsUsage(days) {
 
   for (const a of list) {
     // limit=1 就够：只取 totalCount 与 consumedPoints 这两个汇总字段，
-    // 明细列表这个页面用不上，取全量只是白白多传数据
-    const r = await web.api.usageRecords(a.cookie, { startAt: start, endAt: now, page: 1, limit: 1 });
+    // 明细列表这个页面用不上，取全量只是白白多传数据。
+    // 出站代理（E 包收口补点）：配置非法该账号出错误行，不回退直连。
+    let agent;
+    try { agent = web.agentFor(a); } catch (e) {
+      perAccount.push({ id: a.id, name: accounts.displayName(a), ok: false, error: e.message });
+      continue;
+    }
+    const r = await web.api.usageRecords(a.cookie, { startAt: start, endAt: now, page: 1, limit: 1, agent });
     if (!r.ok) {
       perAccount.push({ id: a.id, name: accounts.displayName(a), ok: false, error: r.error });
       continue;
@@ -50,7 +56,10 @@ async function pointsTodayUsage() {
   let count = 0;
 
   for (const a of list) {
-    const r = await web.api.usageRecords(a.cookie, { startAt: start, endAt: now, page: 1, limit: 1 });
+    // 出站代理（E 包收口补点）：配置非法跳过该账号（按查不到计），不直连
+    let agent = null;
+    try { agent = web.agentFor(a); } catch (e) { continue; }
+    const r = await web.api.usageRecords(a.cookie, { startAt: start, endAt: now, page: 1, limit: 1, agent });
     if (r.ok) {
       total += Number(r.consumed_points || 0);
       count += Number(r.total_count || 0);

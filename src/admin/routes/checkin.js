@@ -150,7 +150,8 @@ const routes = [
         const backfill = [];
         await Promise.all(raw.map(async (a) => {
           try {
-            const info = await web.api.loginBonusInfo(a.cookie);
+            // 出站代理（E 包收口补点）：配置非法走 catch 记失败，不直连
+            const info = await web.api.loginBonusInfo(a.cookie, { agent: web.agentFor(a) });
             if (!info.ok) {
               upstream.failed += 1;
               upstream.errors.push({ id: a.id, error: info.error || '查询失败' });

@@ -110,8 +110,14 @@ async function exchangeAndSave(opts) {
     ClientSecret: '-',
     UserID: '',
   };
+  // 出站代理（E 包收口补点）：换票时还没有账号，走全局默认代理。
+  // 配置非法按换票失败返回，不回退直连。
+  let agent;
+  try { agent = require('../proxy-agent').getAgentFor(null); } catch (e) {
+    return { ok: false, error: e.message };
+  }
   const r = await c.request(host, c.EP_EXCHANGE, {
-    method: 'POST', body, headers: oauthHeaders(),
+    method: 'POST', body, headers: oauthHeaders(), agent,
   });
   if (r.status !== 200 || !r.data) {
     return { ok: false, error: `换票失败 HTTP ${r.status} ${String(r.raw).slice(0, 160)}` };

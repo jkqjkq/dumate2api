@@ -68,7 +68,9 @@ async function balanceWeb(accountName) {
     const web = require('./dumate-web');
     const a = accounts.load().accounts.find((x) => x.name === accountName || x.nickname === accountName);
     if (!a || !a.cookie) return null;
-    const r = await web.api.quotaOverview(a.cookie);
+    // 出站代理（E 包收口补点）：与对话同出口；配置非法走外层 catch 返 null
+    const agent = web.agentFor(a);
+    const r = await web.api.quotaOverview(a.cookie, { agent });
     return r.ok ? r.left : null;
   } catch (e) { return null; }
 }

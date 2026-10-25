@@ -189,7 +189,10 @@ async function backfillPhone(session) {
     if (!a.accessToken) continue;
     phoneTried.add(a.id);
     try {
-      const info = await session.fetchUserInfo(a.accessToken, a.region);
+      const info = await session.fetchUserInfo(a.accessToken, a.region, {
+        // 出站代理（E 包收口补点）：与对话同出口；配置非法走下面的 catch 跳过
+        agent: require('../proxy-agent').getAgentFor(a),
+      });
       const masked = maskPhone(info && info.security_mobile);
       if (masked) { patch(a.id, { phone: masked }); n++; }
     } catch (e) { /* 读路径失败不影响账号展示 */ }

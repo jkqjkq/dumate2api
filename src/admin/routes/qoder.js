@@ -70,13 +70,30 @@ const routes = [
     path: '/credits',
     handler: async ({ res }) => {
       const list = authStore.list();
+      const proxyAgent = require('../../proxy-agent');
       const rows = [];
       for (const a of list) {
         const raw = authStore.get(a.id);
-        const q = await session.fetchQuota(raw.accessToken, a.region);
+        // 出站代理（E 包收口补点）：额度/签到状态与对话同出口。配置非法
+        // 出错误行，不回退直连。
+        let agent = null;
+        try { agent = proxyAgent.getAgentFor(raw); } catch (e) {
+          rows.push({
+            id: a.id,
+            nickname: a.nickname || a.uid || `账号 ${a.id}`,
+            region: a.region,
+            planName: a.planName || '',
+            userQuota: null, addOnQuota: null, isQuotaExceeded: null,
+            checkedIn: null, checkinPending: null, checkinNextAt: null,
+            lastCheckin: a.lastCheckin || null,
+            error: `出站代理配置错误: ${e.message}`,
+          });
+          continue;
+        }
+        const q = await session.fetchQuota(raw.accessToken, a.region, { agent });
         // 签到状态走**只读**的 /campaigns（不领取任何东西），与 TRAE 的
         // checkedIn 同一口径。查失败给 null，不猜成「已签」或「未签」。
-        const ck = await session.checkinStatus(raw.accessToken, a.region);
+        const ck = await session.checkinStatus(raw.accessToken, a.region, { agent });
         rows.push({
           id: a.id,
           nickname: a.nickname || a.uid || `账号 ${a.id}`,

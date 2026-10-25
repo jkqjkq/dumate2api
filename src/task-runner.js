@@ -69,6 +69,12 @@ function buildQueryMessage(task) {
   return q || task.title || '你好';
 }
 
+// 出站 agent（E 包收口补点）：任务动作与对话同出口。配置非法抛错，调用方
+// 让该账号本轮以失败收场，绝不静默回退直连。
+function egress(account) {
+  return { agent: web.agentFor(account) };
+}
+
 // 让指定账号「做」一个任务。
 // 返回 { ok, task_id, title, error, via }
 async function runTask(account, task) {
@@ -79,7 +85,7 @@ async function runTask(account, task) {
   const startedAt = Date.now();
   // 任务奖励的积分不在接口响应里，只能用积分余额差值测。
   // 在动作前取一次快照，完成后再取一次。
-  const before = await records.pointsSnapshot(account.cookie);
+  const before = await records.pointsSnapshot(account.cookie, account);
 
   // QUERY_INPUT：先发一条内容匹配的消息。这一步同时满足「用一次模型」和
   // 「内容匹配」两个条件，服务端据此认定任务已完成。
@@ -105,11 +111,11 @@ async function runTask(account, task) {
   }
 
   // 再上报完成
-  const c = await web.api.completeTask(account.cookie, task.task_id);
+  const c = await web.api.completeTask(account.cookie, task.task_id, egress(account));
 
   // 完成任务可能发的是抽奖次数而不是积分，所以差值可能为 0；
   // 那不代表失败，只是这次奖励的形式不是积分。
-  const after = await records.pointsSnapshot(account.cookie);
+  const after = await records.pointsSnapshot(account.cookie, account);
   const pd = records.pointsDelta(before, after);
 
   // 任务定义里自带「该得多少奖励」，用来对照实际到账：差着就说明
@@ -132,7 +138,7 @@ async function runTask(account, task) {
 
 // 跑一个账号的所有可自动任务
 async function runForAccount(account) {
-  const t = await web.api.tasks(account.cookie);
+  const t = await web.api.tasks(account.cookie, egress(account));
   if (!t.ok) return { account_id: account.id, name: accounts.displayName(account), ok: false, error: t.error, expired: !!t.expired };
 
   const pending = t.tasks.filter((x) => !x.done && AUTO_TYPES.has(x.task_type));
@@ -175,7 +181,7 @@ async function runForAccount(account) {
   }
 
   // 完成后重取一次，让界面能看到最新状态
-  const after = await web.api.tasks(account.cookie);
+  const after = await web.api.tasks(account.cookie, egress(account));
 
   return {
     account_id: account.id,
@@ -210,8 +216,13 @@ async function listTasks() {
   const list = accounts.load().accounts.filter((a) => a.enabled);
   const out = [];
   for (const a of list) {
-    const t = await web.api.tasks(a.cookie);
-    const draw = await web.api.drawStatus(a.cookie);
+    let agent = null;
+    try { agent = web.agentFor(a); } catch (e) {
+      out.push({ account_id: a.id, name: accounts.displayName(a), ok: false, error: e.message, tasks: [], draw_remaining: null, my_prizes: null, expired: false });
+      continue;
+    }
+    const t = await web.api.tasks(a.cookie, { agent });
+    const draw = await web.api.drawStatus(a.cookie, { agent });
     out.push({
       account_id: a.id,
       name: accounts.displayName(a),

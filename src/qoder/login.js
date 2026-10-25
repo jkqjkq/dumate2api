@@ -75,10 +75,14 @@ function startFlow(region) {
   };
 }
 
-/** 查一次取票端点 */
+/** 查一次取票端点。取票时还没有账号，走全局默认代理（E 包收口补点） */
 function fetchPoll(region, nonce, verifier) {
   const ep = c.endpointsOf(region);
   return new Promise((resolve) => {
+    let agent;
+    try { agent = require('../proxy-agent').getAgentFor(null); } catch (e) {
+      return resolve({ status: 0, data: null, raw: e.message });
+    }
     const q = new URLSearchParams({ nonce, verifier, challenge_method: 'S256' });
     const u = new URL(ep.PollEndpoint);
     const req = https.request({
@@ -87,6 +91,7 @@ function fetchPoll(region, nonce, verifier) {
       method: 'GET',
       headers: { Accept: 'application/json', 'User-Agent': 'qoder/1.0.0' },
       timeout: 20000,
+      ...(agent ? { agent } : {}),
     }, (res) => {
       let buf = '';
       const dec = new StringDecoder('utf8');
@@ -147,11 +152,15 @@ async function pollFlow(nonce) {
  */
 async function finish(rec) {
   const region = c.normalizeRegion(rec.region);
-  const info = await session.fetchUserInfo(rec.accessToken, region);
+  let agent;
+  try { agent = require('../proxy-agent').getAgentFor(rec); } catch (e) {
+    return { status: 'error', error: e.message };
+  }
+  const info = await session.fetchUserInfo(rec.accessToken, region, { agent });
   if (!info || !info.id) {
     return { status: 'error', error: '取到了 token 但读不到账号信息（userinfo 失败），无法建立可用账号' };
   }
-  const plan = await session.fetchPlan(rec.accessToken, region).catch(() => null);
+  const plan = await session.fetchPlan(rec.accessToken, region, { agent }).catch(() => null);
   const saved = authStore.upsert({
     ...rec,
     region,

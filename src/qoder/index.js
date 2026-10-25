@@ -504,7 +504,11 @@ async function checkinAndSave(account) {
 
 function quota(account) {
   const a = account || pickAccount();
-  return session.fetchQuota(a.accessToken, a.region);
+  let agent;
+  try { agent = proxyAgent.getAgentFor(a); } catch (e) {
+    return Promise.resolve({ ok: false, error: e.message });
+  }
+  return session.fetchQuota(a.accessToken, a.region, { agent });
 }
 
 module.exports = {

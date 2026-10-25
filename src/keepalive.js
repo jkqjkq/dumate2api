@@ -259,7 +259,12 @@ function builtinAdapters() {
       },
       async balance(a) {
         const web = require('./dumate-web');
-        const r = await web.api.quotaOverview(a.cookie);
+        // 出站代理（E 包收口补点）：余额查询与对话同出口，配置非法按查询失败处理
+        let agent = null;
+        try { agent = web.agentFor(a); } catch (e) {
+          return { ok: false, error: e.message, remain: null };
+        }
+        const r = await web.api.quotaOverview(a.cookie, { agent });
         return { ok: !!r.ok, remain: r.ok && Number.isFinite(r.left) ? r.left : null, error: r.error || '' };
       },
       async checkin(a) {
@@ -344,7 +349,12 @@ function builtinAdapters() {
         const authStore = require('./qoder/auth');
         const session = require('./qoder/session');
         const cur = authStore.get(a.id) || a;
-        const r = await session.fetchQuota(cur.accessToken, cur.region);
+        // 出站代理（E 包收口补点）：余额查询与对话同出口，配置非法按查询失败处理
+        let agent = null;
+        try { agent = require('./proxy-agent').getAgentFor(cur); } catch (e) {
+          return { ok: false, error: e.message, remain: null };
+        }
+        const r = await session.fetchQuota(cur.accessToken, cur.region, { agent });
         if (!r.ok) return { ok: false, error: r.error || '', remain: null };
         // 管理端口径：userQuota 与 addOnQuota 分开报不相加。解冻判据看主套餐，
         // 主套餐取不到再看加量包；都取不到就是 null（不猜 0）。

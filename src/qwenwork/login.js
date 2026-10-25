@@ -86,9 +86,13 @@ function startFlow() {
   };
 }
 
-/** 查一次取票端点 */
+/** 查一次取票端点。取票时还没有账号，走全局默认代理（E 包收口补点） */
 function fetchPoll(nonce, verifier) {
   return new Promise((resolve) => {
+    let agent;
+    try { agent = require('../proxy-agent').getAgentFor(null); } catch (e) {
+      return resolve({ status: 0, data: null, raw: e.message });
+    }
     const q = new URLSearchParams({ nonce, verifier, challenge_method: 'S256' });
     const req = https.request({
       hostname: new URL(c.GATEWAY).hostname,
@@ -100,6 +104,7 @@ function fetchPoll(nonce, verifier) {
         'X-Request-Id': crypto.randomUUID(),
       },
       timeout: 20000,
+      ...(agent ? { agent } : {}),
     }, (res) => {
       let buf = '';
       const dec = new StringDecoder('utf8');

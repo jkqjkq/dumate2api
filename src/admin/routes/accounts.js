@@ -75,7 +75,9 @@ async function backfillNickname(account) {
 
   const task = (async () => {
     try {
-      const info = await withTimeout(web.api.userInfo(account.cookie), NICK_TIMEOUT_MS);
+      // 出站代理（E 包收口补点）：与对话同出口；失败走 catch 不影响主流程
+      const agent = web.agentFor(account);
+      const info = await withTimeout(web.api.userInfo(account.cookie, { agent }), NICK_TIMEOUT_MS);
       if (!info || !info.ok || !info.nickname) {
         nickFailAt.set(id, Date.now());
         return account.nickname || '';
@@ -122,7 +124,9 @@ async function backfillAll(list) {
 // 与「本系统主动做的动作」区分开。
 async function recordAutoGrant(account, beforeSnapshot) {
   try {
-    const r = await web.api.quotaOverview(account.cookie);
+    // 出站代理（E 包收口补点）：配置非法走 catch 返 null（少记一笔，不直连）
+    const agent = web.agentFor(account);
+    const r = await web.api.quotaOverview(account.cookie, { agent });
     if (!r.ok) return null;
 
     // 只认今天发的登录奖励：历史包也在 packages 里，全取会把过去每天
@@ -180,12 +184,18 @@ function alreadyRecordedGrant(accountId, grantedAt) {
 // 签到结果写回账号记录。抽出来单独一个函数是因为「一键签到」和
 // 「单账号签到」两条路径都要用，且都要在失败时记下原因。
 async function doCheckin(account) {
+  // 出站代理（E 包收口补点）：签到全链路与对话同出口。配置非法直接失败，
+  // 绝不静默回退直连（否则代理配置形同虚设）。
+  let agent;
+  try { agent = web.agentFor(account); } catch (e) {
+    return { ok: false, error: e.message };
+  }
   // 动作前的积分快照，用于算这次签到带来多少积分变化。
   // 放在最前面取：已签到的分支不需要它，但多取一次的成本远低于
   // 「有的分支有差值、有的没有」造成的记录不一致。
-  account._pointsBefore = await records.pointsSnapshot(account.cookie);
+  account._pointsBefore = await records.pointsSnapshot(account.cookie, account);
 
-  const info = await web.api.loginBonusInfo(account.cookie);
+  const info = await web.api.loginBonusInfo(account.cookie, { agent });
   if (!info.ok) {
     accounts.patchInternal(account.id, {
       last_error: info.error,
@@ -250,10 +260,10 @@ async function doCheckin(account) {
     return ret;
   }
 
-  const res = await web.api.claimLoginBonus(account.cookie);
+  const res = await web.api.claimLoginBonus(account.cookie, { agent });
   // 签到前先取一次积分快照，签完再取一次，差值就是这次签到发了多少。
   // 上游不返回金额，只能用余额差值——这是实测真值，不是估算。
-  const afterPoints = res.ok ? await records.pointsSnapshot(account.cookie) : null;
+  const afterPoints = res.ok ? await records.pointsSnapshot(account.cookie, account) : null;
   const pd = records.pointsDelta(account._pointsBefore, afterPoints);
 
   accounts.patchInternal(account.id, {
@@ -369,7 +379,9 @@ const routes = [
           // 先问上游这个 cookie 是谁：昵称和 uid 是列表页展示要用的，
           // 拿不到就退回「账号 N」，不要让入库因为一次查询失败而中断
           let info = null;
-          try { info = await web.api.userInfo(cookie); } catch (e) { info = null; }
+          // 出站代理（E 包收口补点）：登录时还没有账号，走全局默认代理；
+          // 配置非法按查不到信息处理（入库流程不中断）
+          try { info = await web.api.userInfo(cookie, { agent: web.agentFor(null) }); } catch (e) { info = null; }
           const name = (wantName ? decodeURIComponent(wantName) : '') ||
             (info && info.nickname) || '';
 
@@ -451,7 +463,12 @@ const routes = [
     handler: async ({ res, body }) => {
       const cookie = accounts.normalizeCookie(body && body.cookie);
       if (!cookie) return sendJSON(res, 400, { error: 'cookie 不能为空' });
-      const r = await web.api.userInfo(cookie);
+      // 出站代理（E 包收口补点）：验证时还没有账号，走全局默认代理；
+      // 配置非法如实报错，不回退直连
+      let r;
+      try { r = await web.api.userInfo(cookie, { agent: web.agentFor(null) }); } catch (e) {
+        return sendJSON(res, 502, { ok: false, error: e.message });
+      }
       return sendJSON(res, r.ok ? 200 : 401, r.ok
         ? { ok: true, uid: r.uid, nickname: r.nickname }
         : { ok: false, error: r.error, expired: !!r.expired });
@@ -516,10 +533,10 @@ const routes = [
       if (!acc) return sendJSON(res, 404, { error: '账号不存在' });
 
       const [bonus, draw, points, tasks] = await Promise.all([
-        web.api.loginBonusInfo(acc.cookie),
-        web.api.drawStatus(acc.cookie),
-        web.api.quotaOverview(acc.cookie),
-        web.api.tasks(acc.cookie),
+        web.api.loginBonusInfo(acc.cookie, { agent: web.agentFor(acc) }),
+        web.api.drawStatus(acc.cookie, { agent: web.agentFor(acc) }),
+        web.api.quotaOverview(acc.cookie, { agent: web.agentFor(acc) }),
+        web.api.tasks(acc.cookie, { agent: web.agentFor(acc) }),
       ]);
 
       // 登录态失效是最需要立刻知道的状态，单独置顶
@@ -582,7 +599,7 @@ const routes = [
       for (let i = 0; i < times; i++) {
         // 幂等键必须每次不同：复用会让服务端把后续请求当成重复提交
         const rid = crypto.randomUUID();
-        const r = await web.api.draw(acc.cookie, rid);
+        const r = await web.api.draw(acc.cookie, rid, { agent: web.agentFor(acc) });
         results.push(r);
         if (!r.ok) break;
         if (r.remaining_draws !== null && r.remaining_draws <= 0) break;
@@ -614,7 +631,7 @@ const routes = [
       if (!acc) return sendJSON(res, 404, { error: '账号不存在' });
       const prizeId = body && body.prize_id;
       if (!prizeId) return sendJSON(res, 400, { error: '缺少 prize_id' });
-      const r = await web.api.claimPrize(acc.cookie, prizeId);
+      const r = await web.api.claimPrize(acc.cookie, prizeId, undefined, { agent: web.agentFor(acc) });
       return sendJSON(res, r.ok ? 200 : 502, r);
     },
   },
@@ -625,9 +642,9 @@ const routes = [
       const acc = accounts.getRaw(params[0]);
       if (!acc) return sendJSON(res, 404, { error: '账号不存在' });
       const [points, charge, usage] = await Promise.all([
-        web.api.quotaOverview(acc.cookie),
-        web.api.chargeRecords(acc.cookie),
-        web.api.usageRecords(acc.cookie),
+        web.api.quotaOverview(acc.cookie, { agent: web.agentFor(acc) }),
+        web.api.chargeRecords(acc.cookie, { agent: web.agentFor(acc) }),
+        web.api.usageRecords(acc.cookie, { agent: web.agentFor(acc) }),
       ]);
       if (!points.ok) return sendJSON(res, 502, { error: points.error, expired: !!points.expired });
       return sendJSON(res, 200, {
@@ -668,7 +685,12 @@ const routes = [
           return { ...hit.data, ...base, cached: true };
         }
 
-        const r = await web.api.quotaOverview(a.cookie);
+        // 出站代理（E 包收口补点）：配置非法该账号出错误行，其余账号照常
+        let agent;
+        try { agent = web.agentFor(a); } catch (e) {
+          return { ...base, ok: false, error: e.message, expired: false };
+        }
+        const r = await web.api.quotaOverview(a.cookie, { agent });
         if (!r.ok) {
           accounts.patchInternal(a.id, { last_error: r.error });
           return { ...base, ok: false, error: r.error, expired: !!r.expired };
@@ -771,18 +793,24 @@ const routes = [
       const out = [];
 
       for (const a of list) {
-        const st = await web.api.drawStatus(a.cookie);
+        // 出站代理（E 包收口补点）：配置非法该账号出错误行，其余账号照常
+        let agent;
+        try { agent = web.agentFor(a); } catch (e) {
+          out.push({ id: a.id, name: accounts.displayName(a), ok: false, error: e.message });
+          continue;
+        }
+        const st = await web.api.drawStatus(a.cookie, { agent });
         if (!st.ok) { out.push({ id: a.id, name: accounts.displayName(a), ok: false, error: st.error }); continue; }
 
         // 抽奖前后的积分快照：抽到积分类奖品会让总量上涨，
         // 差值就是这一轮实际到手的积分。
-        const beforePoints = await records.pointsSnapshot(a.cookie);
+        const beforePoints = await records.pointsSnapshot(a.cookie, a);
 
         let remaining = st.remaining_draws || 0;
         const draws = [];
         // 抽到没次数为止。上限 20 次防止服务端计数异常时无限循环。
         for (let i = 0; i < Math.min(remaining, 20); i++) {
-          const r = await web.api.draw(a.cookie, crypto.randomUUID());
+          const r = await web.api.draw(a.cookie, crypto.randomUUID(), { agent });
           draws.push(r);
           if (!r.ok) break;
           if (r.remaining_draws !== null && r.remaining_draws <= 0) break;
@@ -794,18 +822,18 @@ const routes = [
         // 逐个去领反而报「参数错误:DrawRecordID」。
         let claimed = [];
         if (autoClaim) {
-          const after = await web.api.drawStatus(a.cookie);
+          const after = await web.api.drawStatus(a.cookie, { agent });
           const pending = (after.ok ? after.my_prizes : []).filter(
             (p) => p.status && p.status !== 'SUCCESS' && p.draw_record_id,
           );
           for (const p of pending.slice(0, 10)) {
-            const c = await web.api.claimPrize(a.cookie, p.draw_record_id);
+            const c = await web.api.claimPrize(a.cookie, p.draw_record_id, undefined, { agent });
             claimed.push({ prize: p.prize_name, ok: c.ok, error: c.error || '' });
           }
         }
 
         // 抽到的奖品按类型汇总，让界面能直接说「抽到了什么」
-        const finalStatus = await web.api.drawStatus(a.cookie);
+        const finalStatus = await web.api.drawStatus(a.cookie, { agent });
         const wonPrizes = [];
         if (finalStatus.ok) {
           const before = new Set((st.my_prizes || []).map((p) => p.draw_record_id));
@@ -819,7 +847,7 @@ const routes = [
         // 一次抽奖可能连抽多次，按「每次抽到的奖品」逐条记录，
         // 这样记录页能列出具体中了什么而不是只写「抽了 N 次」。
         // 积分变化记在第一条上（整轮的总变化），避免每条都重复同一个数。
-        const dp = records.pointsDelta(beforePoints, await records.pointsSnapshot(a.cookie));
+        const dp = records.pointsDelta(beforePoints, await records.pointsSnapshot(a.cookie, a));
         for (let i = 0; i < wonPrizes.length; i++) {
           const w = wonPrizes[i];
           records.append({
@@ -938,7 +966,13 @@ const routes = [
       const out = [];
 
       for (const a of list) {
-        const info = await web.api.loginBonusInfo(a.cookie);
+        // 出站代理（E 包收口补点）：配置非法该账号出错误行，其余账号照常
+        let agent;
+        try { agent = web.agentFor(a); } catch (e) {
+          out.push({ account_id: a.id, name: accounts.displayName(a), ok: false, error: e.message });
+          continue;
+        }
+        const info = await web.api.loginBonusInfo(a.cookie, { agent });
         out.push({
           account_id: a.id,
           name: accounts.displayName(a),
@@ -1006,7 +1040,17 @@ const routes = [
             expiring: a.points.expiring || [], cached: true,
           };
         }
-        const r = await web.api.quotaOverview(a.cookie);
+        // 出站代理（E 包收口补点）：配置非法该账号出错误行，其余账号照常
+        let agent;
+        try { agent = web.agentFor(a); } catch (e) {
+          return {
+            id: a.id, points: a.points || null,
+            expire_at: a.points ? a.points.expire_at : null,
+            expiring: (a.points && a.points.expiring) || [],
+            error: e.message,
+          };
+        }
+        const r = await web.api.quotaOverview(a.cookie, { agent });
         if (!r.ok) {
           return {
             id: a.id, points: a.points || null,
@@ -1175,7 +1219,12 @@ const routes = [
     handler: async ({ res, params }) => {
       const acc = accounts.getRaw(params[0]);
       if (!acc) return sendJSON(res, 404, { error: '账号不存在' });
-      const r = await web.api.quotaOverview(acc.cookie);
+      // 出站代理（E 包收口补点）：手动余额刷新与对话同出口，配置非法如实报 502
+      let agent;
+      try { agent = web.agentFor(acc); } catch (e) {
+        return sendJSON(res, 502, { ok: false, error: e.message });
+      }
+      const r = await web.api.quotaOverview(acc.cookie, { agent });
       if (!r.ok) return sendJSON(res, 502, { ok: false, error: r.error, expired: !!r.expired });
       accountPool.setCredits(acc.id, r.left, r.total);
       const { unfrozen } = accountPool.reenableIfCredits(acc.id, r.left, r.total);

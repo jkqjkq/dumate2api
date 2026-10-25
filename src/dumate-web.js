@@ -22,7 +22,7 @@ const https = require('https');
 const BASE = process.env.DUMATE_WEB_BASE || 'https://www.dumate.cn';
 const TIMEOUT = parseInt(process.env.DUMATE_WEB_TIMEOUT || '20000', 10);
 
-function request(cookie, method, urlPath, body) {
+function request(cookie, method, urlPath, body, opts = {}) {
   return new Promise((resolve) => {
     let url;
     try {
@@ -55,6 +55,9 @@ function request(cookie, method, urlPath, body) {
         method,
         timeout: TIMEOUT,
         headers,
+        // 出站代理（E 包收口补点）：网页端动作（签到/抽奖/任务/积分）与网关
+        // 对话同出口——per-account proxy 字段就配在这类账号上，绕过等于白配
+        ...(opts.agent ? { agent: opts.agent } : {}),
       },
       (res) => {
         let data = '';
@@ -100,18 +103,26 @@ function errOf(res) {
   return d.message || d.msg || d.error_message || `HTTP ${res.status}`;
 }
 
+// 出站 agent 解析（E 包收口补点）：调用方持有**原始账号记录**（load()/getRaw()
+// 的元素，proxy 字段全量可用）时用它把本次动作挂到账号自己的代理上。
+// 无代理返回 null（直连）；配置非法**抛错**——调用方让本次操作以失败收场，
+// 绝不静默回退直连（与 proxy-agent.getAgentFor 同一契约）。
+function agentFor(account) {
+  return require('./proxy-agent').getAgentFor(account);
+}
+
 const api = {
   // ---- 账号信息 ----
-  async userInfo(cookie) {
-    const res = await request(cookie, 'GET', '/api/dumate/user/info');
+  async userInfo(cookie, eopts = {}) {
+    const res = await request(cookie, 'GET', '/api/dumate/user/info', undefined, eopts);
     if (!res.ok) return { ok: false, error: errOf(res), expired: res.expired };
     const r = pick(res) || {};
     return { ok: true, uid: r.uid || r.userId || '', nickname: r.nickname || r.displayName || r.name || '', raw: r };
   },
 
   // ---- 签到 ----
-  async loginBonusInfo(cookie) {
-    const res = await request(cookie, 'GET', '/api/dumate/points/loginBonusInfo');
+  async loginBonusInfo(cookie, eopts = {}) {
+    const res = await request(cookie, 'GET', '/api/dumate/points/loginBonusInfo', undefined, eopts);
     if (!res.ok) return { ok: false, error: errOf(res), expired: res.expired };
     const r = pick(res) || {};
     return {
@@ -126,15 +137,15 @@ const api = {
     };
   },
 
-  async claimLoginBonus(cookie) {
-    const res = await request(cookie, 'POST', '/api/dumate/points/loginBonus');
+  async claimLoginBonus(cookie, eopts = {}) {
+    const res = await request(cookie, 'POST', '/api/dumate/points/loginBonus', undefined, eopts);
     if (!res.ok) return { ok: false, error: errOf(res), expired: res.expired };
     return { ok: true, result: pick(res) };
   },
 
   // ---- 积分 ----
-  async quotaOverview(cookie) {
-    const res = await request(cookie, 'GET', '/api/dumate/points/quota_overview?clientType=desktop&timezone=Asia%2FShanghai');
+  async quotaOverview(cookie, eopts = {}) {
+    const res = await request(cookie, 'GET', '/api/dumate/points/quota_overview?clientType=desktop&timezone=Asia%2FShanghai', undefined, eopts);
     if (!res.ok) return { ok: false, error: errOf(res), expired: res.expired };
     const r = pick(res) || {};
     const total = Number(r.totalPoints || 0);
@@ -169,7 +180,7 @@ const api = {
     if (opts.endAt) q.set('endAt', String(opts.endAt));
     if (opts.page) q.set('page', String(opts.page));
     if (opts.limit) q.set('limit', String(opts.limit));
-    const res = await request(cookie, 'GET', '/api/dumate/points/records/usage?' + q.toString());
+    const res = await request(cookie, 'GET', '/api/dumate/points/records/usage?' + q.toString(), undefined, { agent: opts.agent });
     if (!res.ok) return { ok: false, error: errOf(res), expired: res.expired };
     const r = pick(res) || {};
     return {
@@ -187,7 +198,7 @@ const api = {
     if (opts.endAt) q.set('endAt', String(opts.endAt));
     if (opts.page) q.set('page', String(opts.page));
     if (opts.limit) q.set('limit', String(opts.limit));
-    const res = await request(cookie, 'GET', '/api/dumate/points/records/charge?' + q.toString());
+    const res = await request(cookie, 'GET', '/api/dumate/points/records/charge?' + q.toString(), undefined, { agent: opts.agent });
     if (!res.ok) return { ok: false, error: errOf(res), expired: res.expired };
     const r = pick(res) || {};
     return {
@@ -198,8 +209,8 @@ const api = {
   },
 
   // ---- 抽奖 ----
-  async drawStatus(cookie) {
-    const res = await request(cookie, 'GET', '/api/dumate/activity/growth-plan/draw/status');
+  async drawStatus(cookie, eopts = {}) {
+    const res = await request(cookie, 'GET', '/api/dumate/activity/growth-plan/draw/status', undefined, eopts);
     if (!res.ok) return { ok: false, error: errOf(res), expired: res.expired };
     const r = pick(res) || {};
     return {
@@ -214,10 +225,10 @@ const api = {
 
   // 抽奖需要幂等键：客户端用 randomUUID 生成，服务端据此防重复扣次数。
   // 必须每次生成新的，复用同一个值会让第二次抽奖被当成重复请求。
-  async draw(cookie, requestId) {
+  async draw(cookie, requestId, eopts = {}) {
     const res = await request(cookie, 'POST', '/api/dumate/activity/growth-plan/draw', {
       request_id: requestId,
-    });
+    }, eopts);
     if (!res.ok) return { ok: false, error: errOf(res), expired: res.expired };
     const r = pick(res) || {};
     return { ok: true, remaining_draws: r.remaining_draws ?? r.remainingDraws ?? null, result: r };
@@ -226,11 +237,11 @@ const api = {
   // 领奖。注意：实测积分与会员类奖品抽到即 status=SUCCESS，自动到账，
   // 不需要调这个接口；只有需要填联系方式的实物奖品才用得上。
   // 对已 SUCCESS 的记录调用会报「参数错误:DrawRecordID」。
-  async claimPrize(cookie, drawRecordId, contact) {
+  async claimPrize(cookie, drawRecordId, contact, eopts = {}) {
     const res = await request(cookie, 'POST', '/api/dumate/activity/growth-plan/prize/claim', {
       draw_record_id: drawRecordId,
       ...(contact ? { contact } : {}),
-    });
+    }, eopts);
     if (!res.ok) return { ok: false, error: errOf(res), expired: res.expired };
     return { ok: true, result: pick(res) };
   },
@@ -239,8 +250,8 @@ const api = {
   // 实测返回结构是 { groups: [{ group_code, group_name, tasks: [...] }] }，
   // 不是平铺数组。任务是否完成看 completed_count >= repeat_count——
   // 这是客户端 completedIds 的判定口径（bundle 里就是这么算的）。
-  async tasks(cookie) {
-    const res = await request(cookie, 'GET', '/api/dumate/activity/growth-plan/tasks');
+  async tasks(cookie, eopts = {}) {
+    const res = await request(cookie, 'GET', '/api/dumate/activity/growth-plan/tasks', undefined, eopts);
     if (!res.ok) return { ok: false, error: errOf(res), expired: res.expired };
     const r = pick(res) || {};
     const groups = Array.isArray(r.groups) ? r.groups : [];
@@ -268,10 +279,10 @@ const api = {
     return { ok: true, groups, tasks: flat };
   },
 
-  async completeTask(cookie, taskId) {
+  async completeTask(cookie, taskId, eopts = {}) {
     const res = await request(cookie, 'POST', '/api/dumate/activity/growth-plan/task/complete', {
       task_id: taskId,
-    });
+    }, eopts);
     if (!res.ok) return { ok: false, error: errOf(res), expired: res.expired };
     const r = pick(res);
     // 业务层可能返回 success:false + code（如 410121 该任务次数已发放）。
@@ -283,11 +294,11 @@ const api = {
     return { ok: true, result: r };
   },
 
-  async pageStatus(cookie) {
-    const res = await request(cookie, 'GET', '/api/dumate/activity/growth-plan/page/status');
+  async pageStatus(cookie, eopts = {}) {
+    const res = await request(cookie, 'GET', '/api/dumate/activity/growth-plan/page/status', undefined, eopts);
     if (!res.ok) return { ok: false, error: errOf(res), expired: res.expired };
     return { ok: true, data: pick(res) };
   },
 };
 
-module.exports = { BASE, request, pick, errOf, api };
+module.exports = { BASE, request, pick, errOf, agentFor, api };

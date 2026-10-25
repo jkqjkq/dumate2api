@@ -153,7 +153,7 @@ function tokenOf(account) {
   return account.accessToken || account.token || '';
 }
 
-function httpGet(path, token, timeout = 15000, hostname = 'qwenwork.cn') {
+function httpGet(path, token, timeout = 15000, hostname = 'qwenwork.cn', opts = {}) {
   return new Promise((resolve) => {
     const req = https.request({
       hostname,
@@ -165,6 +165,8 @@ function httpGet(path, token, timeout = 15000, hostname = 'qwenwork.cn') {
         'User-Agent': constants.USER_AGENT,
       },
       timeout,
+      // 出站代理（E 包收口补点）：余额查询与对话同出口，null = 直连
+      ...(opts.agent ? { agent: opts.agent } : {}),
     }, (res) => {
       let b = '';
       res.on('data', (c) => { b += c; });
@@ -190,8 +192,8 @@ function num(v) {
  * 只在 wallets 报可疑的 0 时才调用——正常路径不该为一次查询多打一个上游。
  * 取不到（网络错 / 结构变了）返回 null，调用方据此回落，不编数字。
  */
-async function fetchQuotaRemaining(token) {
-  const r = await httpGet(constants.ACCOUNT_CONTEXT_PATH, token, 15000, ACCOUNT_CONTEXT_HOST);
+async function fetchQuotaRemaining(token, opts = {}) {
+  const r = await httpGet(constants.ACCOUNT_CONTEXT_PATH, token, 15000, ACCOUNT_CONTEXT_HOST, opts);
   if (r.status !== 200 || !r.data) return null;
   const q = (r.data.data || {}).quota;
   if (!q || typeof q.remaining !== 'number' || !Number.isFinite(q.remaining)) return null;
@@ -211,6 +213,13 @@ async function fetchWallets(opts = {}) {
   if (!token) {
     return { ok: false, error: '缺少账号 token，无法查询余额', daily: null, monthly: null, longterm: null };
   }
+  // 出站代理（E 包收口补点）：余额查询与对话同出口。配置非法按查询失败
+  // 返回（保活/面板把该账号当「查不到余额」），绝不回退直连。
+  let agent = null;
+  try { agent = require('../proxy-agent').getAgentFor(opts.account); } catch (e) {
+    return { ok: false, error: e.message, daily: null, monthly: null, longterm: null };
+  }
+  const agentOpts = { agent };
   // 无账号对象（裸 token）时按 token 尾段分桶，保证缓存仍然按身份隔离
   const key = String((opts.account && opts.account.id) || token.slice(-8));
   if (!opts.force) {
@@ -218,7 +227,7 @@ async function fetchWallets(opts = {}) {
     if (hit && Date.now() - hit.at < CACHE_MS) return hit.data;
   }
 
-  let r = await httpGet(WALLETS_PATH, token);
+  let r = await httpGet(WALLETS_PATH, token, 15000, 'qwenwork.cn', agentOpts);
   if (r.status !== 200 || !r.data) {
     return { ok: false, error: r.error || `HTTP ${r.status}`, daily: null, monthly: null, longterm: null };
   }
@@ -253,7 +262,7 @@ async function fetchWallets(opts = {}) {
   if (allZero(r)) {
     retried = true;
     await new Promise((s) => setTimeout(s, 400));
-    const r2 = await httpGet(WALLETS_PATH, token);
+    const r2 = await httpGet(WALLETS_PATH, token, 15000, 'qwenwork.cn', agentOpts);
     if (r2.status === 200 && r2.data && !allZero(r2)) {
       // 重试拿到了非 0 —— 第一次确实是抖动，用第二次的结果
       r = r2;
@@ -283,7 +292,7 @@ async function fetchWallets(opts = {}) {
   let authoritativeDaily = null;
   let dailyCorrected = false;
   if (walletsDaily === 0) {
-    const remaining = await fetchQuotaRemaining(token);
+    const remaining = await fetchQuotaRemaining(token, agentOpts);
     if (remaining != null && Number.isFinite(remaining)
         && remaining - (monthlyVal + longtermVal) > 0.005) {
       authoritativeDaily = remaining - (monthlyVal + longtermVal);

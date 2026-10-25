@@ -171,7 +171,13 @@ const routes = [
       let totalConsumed = 0;
 
       for (const a of list) {
-        const r = await web.api.usageRecords(a.cookie, { startAt, endAt: now, page, limit });
+        // 出站代理（E 包收口补点）：配置非法该账号出错误行，其余账号照常
+        let agent;
+        try { agent = web.agentFor(a); } catch (e) {
+          perAccount.push({ id: a.id, name: accounts.displayName(a), nickname: a.nickname || '', ok: false, error: e.message, rows: [] });
+          continue;
+        }
+        const r = await web.api.usageRecords(a.cookie, { startAt, endAt: now, page, limit, agent });
         if (!r.ok) {
           perAccount.push({ id: a.id, name: accounts.displayName(a), nickname: a.nickname || '', ok: false, error: r.error, rows: [] });
           continue;

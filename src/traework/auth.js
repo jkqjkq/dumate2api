@@ -279,10 +279,14 @@ function ensureDevice(a) {
   }) || { ...a, ...d };
 }
 
-/** 取用户信息（登录后用一次，补 uid / 昵称） */
+/** 取用户信息（登录后用一次，补 uid / 昵称）。
+ *  出站代理（E 包收口补点）：与对话同出口。配置非法返回 null（调用方按
+ *  「读不到」处理），不回退直连。 */
 async function fetchUserInfo(a) {
+  let agent = null;
+  try { agent = require('../proxy-agent').getAgentFor(a); } catch (e) { return null; }
   const r = await c.request(a.apiHost || c.OAUTH_HOST, c.EP_USER_INFO, {
-    method: 'POST', body: {}, headers: { ...oauthHeaders(), Authorization: `Cloud-IDE-JWT ${a.accessToken}` },
+    method: 'POST', body: {}, headers: { ...oauthHeaders(), Authorization: `Cloud-IDE-JWT ${a.accessToken}` }, agent,
   });
   if (r.status !== 200 || !r.data) return null;
   const res = (r.data && r.data.Result) || r.data || {};

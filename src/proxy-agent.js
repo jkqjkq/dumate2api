@@ -180,13 +180,23 @@ class HttpConnectAgent extends https.Agent {
   createConnection(options, callback) {
     connectViaProxy(this.proxy, options.host, options.port, { connectTimeout: this.connectTimeout })
       .then((socket) => {
-        const tlsOpts = { ...options, socket };
-        // SNI 不允许 IP 字面量（RFC 6066，Node 会警告并将拒绝），IP 直连
-        // 目标不设 servername，与 https.Agent 默认行为一致
-        if (!tlsOpts.servername && net.isIP(options.host) === 0) tlsOpts.servername = options.host;
+        // tls.connect 极少数情况会同步抛（非法 TLS 选项）：必须毁掉洞内
+        // socket 并把错误交给 callback，否则请求悬挂到自身超时、隧道泄漏
+        let tlsSock;
+        try {
+          const tlsOpts = { ...options, socket };
+          // SNI 不允许 IP 字面量（RFC 6066，Node 会警告并将拒绝），IP 直连
+          // 目标不设 servername，与 https.Agent 默认行为一致
+          if (!tlsOpts.servername && net.isIP(options.host) === 0) tlsOpts.servername = options.host;
+          tlsSock = tls.connect(tlsOpts);
+        } catch (e) {
+          socket.destroy();
+          callback(e);
+          return;
+        }
         // 与 https.Agent 默认 createConnection 相同：同步返回 TLSSocket，
         // 握手错误经 socket error 事件传到请求方
-        callback(null, tls.connect(tlsOpts));
+        callback(null, tlsSock);
       })
       .catch(callback);
   }

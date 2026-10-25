@@ -85,10 +85,13 @@ function dailySummary(days = 30) {
 // 用 left（可用余额）而不是 total（累计总量）作为对比基准：
 // 「余额 26 → 56」是用户实际能用的钱；总量会受模型消耗影响，
 // 看起来会像「发了 30 但总量只涨了 10」，容易误读。
-async function pointsSnapshot(cookie) {
+async function pointsSnapshot(cookie, account) {
   try {
     const web = require('./dumate-web');
-    const r = await web.api.quotaOverview(cookie);
+    // 出站代理（E 包收口补点）：与对话同出口；配置非法走 catch 返 null
+    //（快照缺失只是差值算不出，不能变成一次直连）
+    const agent = account ? web.agentFor(account) : null;
+    const r = await web.api.quotaOverview(cookie, { agent });
     if (!r.ok) return null;
     return { left: r.left, total: r.total, at: Date.now() };
   } catch (e) {

@@ -300,11 +300,15 @@ async function exchange(a) {
 async function fetchUserInfo(a) {
   const token = (a && (a.accessToken || a.access)) || '';
   if (!token) return null;
+  // 出站代理（E 包收口补点）：用户信息查询与对话同出口。配置非法返回 null
+  //（调用方按「读不到」处理），不回退直连。
+  let agent = null;
+  try { agent = require('../proxy-agent').getAgentFor(a); } catch (e) { return null; }
   const r = await requestJson(c.ACCOUNT_CONTEXT_PATH, 'GET', null, {
     Accept: 'application/json',
     'User-Agent': c.USER_AGENT,
     Authorization: `Bearer ${token}`,
-  });
+  }, 20000, { agent });
   if (r.status !== 200 || !r.data) return null;
   const d = (r.data && r.data.data) || r.data;
   const u = d.user || d;
