@@ -7,7 +7,8 @@
     "start": "node src/server.js",
     "admin": "node src/admin/server.js",
     "mock": "node test/mock-upstream.js",
-    "test": "node test/smoke.js"
+    "test": "node --test \"test/*.test.js\"",
+    "test:smoke": "node test/smoke.js"
   },
   "engines": {
     "node": ">=18"
