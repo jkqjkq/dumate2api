@@ -48,6 +48,10 @@ function stateOf(id) {
   return runtime.get(id);
 }
 
+// 上游 JSON 响应的累积上限（审计 P1-1b）：token / JSON 接口的响应都很小，
+// 不设限等于把上游（或中间人）的输出全部吃进内存。超限按连接失败处理。
+const MAX_JSON_RESP_BYTES = 8 * 1024 * 1024;
+
 function httpsJSON(hostname, path, method, headers, body, timeout = 30000) {
   return new Promise((resolve) => {
     const payload = body === undefined || body === null ? null : JSON.stringify(body);
@@ -67,7 +71,14 @@ function httpsJSON(hostname, path, method, headers, body, timeout = 30000) {
       (res) => {
         let data = '';
         res.setEncoding('utf8');
-        res.on('data', (c) => { data += c; });
+        res.on('data', (c) => {
+          data += c;
+          if (data.length > MAX_JSON_RESP_BYTES) {
+            data = '';
+            req.destroy();
+            resolve({ status: 0, json: null, raw: 'upstream response too large' });
+          }
+        });
         res.on('end', () => {
           let json = null;
           try { json = JSON.parse(data); } catch (e) { json = null; }
@@ -216,10 +227,15 @@ function callModelStream(account, path, method, body, onChunk, opts = {}) {
           if (typeof opts.onStatus === 'function') {
             try { opts.onStatus(res.statusCode); } catch (e) { /* 忽略 */ }
           }
+          // text 只用于日志/usage 扫描（usage 在流的最后），转发走 onChunk。
+          // 原实现全量累积（审计 P1-1c：号称「不缓冲」实际整条 SSE 又存一份），
+          // 这里改为尾部固定窗口——语义不变，内存有界。
+          const TEXT_TAIL = 1024 * 1024;
           let text = '';
           res.setEncoding('utf8');
           res.on('data', (c) => {
             text += c;
+            if (text.length > TEXT_TAIL) text = text.slice(-TEXT_TAIL);
             try { onChunk(c); } catch (e) { /* 下游写失败不影响上游读取 */ }
           });
           res.on('end', () => {

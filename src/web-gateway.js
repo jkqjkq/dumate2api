@@ -20,8 +20,10 @@ const { resolveMaxTokens } = require('./budget');
 
 const PORT = parseInt(process.env.DUMATE_WEB_GATEWAY_PORT || '9084', 10);
 const HOST = process.env.DUMATE_WEB_GATEWAY_HOST || '127.0.0.1';
-// 与 9080 同款开关，默认关闭
-const REQUIRE_KEY = process.env.DUMATE_REQUIRE_KEY === '1';
+// 与 9080 同款开关（P0-1）：DUMATE_REQUIRE_KEY=1 或设置 DUMATE2API_KEY 即启用
+const ENV_API_KEY = String(process.env.DUMATE2API_KEY || '').trim();
+const REQUIRE_KEY = process.env.DUMATE_REQUIRE_KEY === '1' || !!ENV_API_KEY;
+const cors = require('./cors');
 
 function log(...args) {
   console.log(`[${new Date().toISOString()}]`, ...args);
@@ -31,19 +33,39 @@ function sendJSON(res, statusCode, data) {
   const body = JSON.stringify(data);
   res.writeHead(statusCode, {
     'Content-Type': 'application/json',
-    'Access-Control-Allow-Origin': '*',
+    ...(res._cors || {}),
     'Content-Length': Buffer.byteLength(body),
   });
   res.end(body);
 }
 
+// 请求体上限（审计 P1-1a，与 server.js 同口径）：9084 同样是匿名可达的一侧，
+// 不设限等于让一次 POST 把内存吃满。DUMATE_MAX_BODY_MB 可调。
+const MAX_BODY_BYTES = Math.max(1, parseInt(process.env.DUMATE_MAX_BODY_MB || '32', 10)) * 1024 * 1024;
+
 function readBody(req) {
+  if (req._bodyTooLarge) return Promise.resolve(null);
   if (typeof req._rawBody === 'string') return Promise.resolve(req._rawBody);
   return new Promise((resolve) => {
     const chunks = [];
-    req.on('data', (c) => chunks.push(c));
-    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+    let size = 0;
+    req.on('data', (c) => {
+      size += c.length;
+      if (size > MAX_BODY_BYTES) {
+        req._bodyTooLarge = true;
+        chunks.length = 0;
+        // 继续把剩余数据读干净，连接才能正常收尾；handler 统一回 413
+        req.resume();
+        return;
+      }
+      chunks.push(c);
+    });
+    req.on('end', () => resolve(req._bodyTooLarge ? null : Buffer.concat(chunks).toString('utf8')));
   });
+}
+
+function sendBodyTooLarge(res) {
+  return sendJSON(res, 413, { error: { message: 'Request body too large', type: 'invalid_request_error' } });
 }
 
 function logRequest(req, res, startedAt, info, status, usage, extra) {
@@ -110,6 +132,7 @@ async function handleOpenAIModels(req, res) {
 async function handleOpenAIChat(req, res) {
   const startedAt = Date.now();
   const bodyStr = await readBody(req);
+  if (bodyStr == null) return sendBodyTooLarge(res);
   let reqBody;
   try {
     reqBody = JSON.parse(bodyStr);
@@ -159,7 +182,7 @@ function streamOpenAI(r, req, res, startedAt, info) {
     'Content-Type': 'text/event-stream',
     'Cache-Control': 'no-cache',
     Connection: 'keep-alive',
-    'Access-Control-Allow-Origin': '*',
+    ...(res._cors || {}),
   });
 
   const id = j.id || ('chatcmpl_' + crypto.randomUUID());
@@ -187,6 +210,7 @@ function streamOpenAI(r, req, res, startedAt, info) {
 async function handleAnthropicMessages(req, res) {
   const startedAt = Date.now();
   const bodyStr = await readBody(req);
+  if (bodyStr == null) return sendBodyTooLarge(res);
   let anthropicReq;
   try {
     anthropicReq = JSON.parse(bodyStr);
@@ -237,7 +261,7 @@ function translateStreamToAnthropic(r, req, res, startedAt, info, originalModel)
     'Content-Type': 'text/event-stream',
     'Cache-Control': 'no-cache',
     Connection: 'keep-alive',
-    'Access-Control-Allow-Origin': '*',
+    ...(res._cors || {}),
   });
   const send = (event, data) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
 
@@ -324,6 +348,7 @@ function googleToOpenAI(googleReq) {
 async function handleGoogleGenerate(req, res, pathModel, isStream) {
   const startedAt = Date.now();
   const bodyStr = await readBody(req);
+  if (bodyStr == null) return sendBodyTooLarge(res);
   let googleReq;
   try {
     googleReq = JSON.parse(bodyStr);
@@ -354,7 +379,7 @@ async function handleGoogleGenerate(req, res, pathModel, isStream) {
       'Content-Type': 'text/event-stream',
       'Cache-Control': 'no-cache',
       Connection: 'keep-alive',
-      'Access-Control-Allow-Origin': '*',
+      ...(res._cors || {}),
     });
     res.write(`data: ${JSON.stringify(out)}\n\n`);
     res.end();
@@ -367,9 +392,11 @@ async function handleGoogleGenerate(req, res, pathModel, isStream) {
 // ==================== 服务 ====================
 
 const server = http.createServer(async (req, res) => {
+  // CORS 白名单判定（fail-closed，见 cors.js）：与 9080 同款
+  res._cors = cors.headersFor(req);
   if (req.method === 'OPTIONS') {
     res.writeHead(204, {
-      'Access-Control-Allow-Origin': '*',
+      ...res._cors,
       'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
       'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-api-key, anthropic-version, anthropic-beta',
     });
@@ -402,7 +429,12 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (REQUIRE_KEY) {
-      const key = keysvc.resolve(keysvc.tokenFromHeaders(req.headers));
+      const token = keysvc.tokenFromHeaders(req.headers);
+      let key = keysvc.resolve(token);
+      // env 密钥兜底（P0-1）：与登记 key 并联，常时比较
+      if (!key && ENV_API_KEY && keysvc.tokenMatches(token, ENV_API_KEY)) {
+        key = { id: 0, name: 'env:DUMATE2API_KEY', enabled: true };
+      }
       const verdict = keysvc.validate(key, reqlog.clientIP(req), null);
       if (!verdict.ok) {
         return sendJSON(res, key ? 403 : 401, {
@@ -443,6 +475,18 @@ function start() {
   }
   server.listen(PORT, HOST, () => {
     log(`✓ web gateway listening on http://${HOST}:${PORT}`);
+    // 鉴权态势（P0-1）：与 9080 同款告警——未开鉴权且监听非回环时显式提示
+    if (!REQUIRE_KEY) {
+      const LOOPBACK = new Set(['127.0.0.1', '::1', 'localhost']);
+      if (!LOOPBACK.has(String(HOST).toLowerCase())) {
+        log(`  ⚠ 安全警告：未启用任何 API key 鉴权（未设 DUMATE2API_KEY / DUMATE_REQUIRE_KEY=1），且监听 ${HOST} 非回环地址——局域网内任何设备都能直接消耗上游账号与积分。`);
+      }
+    } else {
+      log(`  ✓ 已启用鉴权：模型端点要求 ${ENV_API_KEY ? 'DUMATE2API_KEY 或登记 key' : '管理端登记的 API key'}`);
+    }
+    if (!cors.allowlistSize()) {
+      log('  · CORS 默认关闭；如需放行请设 DUMATE_CORS_ORIGINS=http://localhost:xxxx（逗号分隔）');
+    }
     log(`  上游: https://${pool.GATEWAY_HOST}${pool.GATEWAY_PREFIX}`);
     log(`  OpenAI:    http://127.0.0.1:${PORT}/v1/chat/completions`);
     log(`  Anthropic: http://127.0.0.1:${PORT}/v1/messages`);

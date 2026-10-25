@@ -239,8 +239,19 @@ function post(url, body, headers) {
       // 否则非流式响应里的汉字也会在 chunk 边界处变成 U+FFFD
       const { StringDecoder } = require('string_decoder');
       const dec = new StringDecoder('utf8');
-      res.on('data', (c) => { buf += dec.write(c); });
-      res.on('end', () => { buf += dec.end(); resolve({ status: res.statusCode, headers: res.headers, raw: buf }); });
+      // 上游响应累积上限（审计 P1-1b）：上游半信任，无限 buf += 等于把
+      // 上游输出全部吃进内存。超限按连接错误处理。
+      let over = false;
+      res.on('data', (c) => {
+        if (over) return;
+        buf += dec.write(c);
+        if (buf.length > 64 * 1024 * 1024) {
+          over = true;
+          buf = '';
+          req.destroy(new Error('qwenwork upstream response too large'));
+        }
+      });
+      res.on('end', () => { if (!over) { buf += dec.end(); resolve({ status: res.statusCode, headers: res.headers, raw: buf }); } });
       res.on('error', reject);
     });
     req.on('error', reject);
