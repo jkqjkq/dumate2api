@@ -116,3 +116,28 @@ test('envelopeStatus：body 不是 JSON 时 message 回落为 body 截断 200', 
   const raw = JSON.stringify({ statusCodeValue: 502, body: 'gateway died badly' });
   assert.deepEqual(envelopeStatus(raw), { code: 502, message: 'gateway died badly' });
 });
+
+// ---------------------------------------------------------------------------
+// classify：code → 池处置类别（GAP Q3）。集成阶段校准点：
+// model 字段必须原样透传——池的 model 类别靠它建 (账号,模型) 负缓存，
+// 此前被 classify 丢掉，403 模型错误实际退化为熔断计数。
+const { classify } = require('../src/upstream-errors');
+
+test('classify：429→soft / 401→session_dead / 402→hard / 403+模型文案→model / 5xx→breaker', () => {
+  assert.equal(classify({ status: 429, message: 'too many' }).kind, 'soft');
+  assert.equal(classify({ status: 401, message: 'unauthorized' }).kind, 'session_dead');
+  assert.equal(classify({ status: 402, message: '积分不足' }).kind, 'hard');
+  assert.equal(classify({ status: 403, message: 'Model is not available for this user' }).kind, 'model');
+  assert.equal(classify({ status: 500, message: 'boom' }).kind, 'breaker');
+  assert.equal(classify({ status: 0, message: 'ECONNREFUSED' }).kind, 'breaker');
+  assert.equal(classify({ status: 400, message: 'bad request' }).kind, null);
+});
+
+test('classify：model 字段透传（模型级负缓存的数据依赖）', () => {
+  const cls = classify({ status: 403, message: 'Model is not available for this user', model: 'pro' });
+  assert.equal(cls.kind, 'model');
+  assert.equal(cls.model, 'pro');
+  // 非 model 类别也带 model（池按 kind 分发，多带的字段无害）
+  assert.equal(classify({ status: 429, message: 'x', model: 'glm' }).model, 'glm');
+  assert.equal(classify({ status: 500, message: 'x' }).model, undefined);
+});

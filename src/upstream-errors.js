@@ -136,9 +136,13 @@ const MODEL_TEXT = /model[^\n]{0,40}(not available|not found|not exist|unsupport
 /**
  * 把一次上游错误归入池处置类别。
  *
- * @param {{status?:number, code?:unknown, message?:string}|string|Error|null} err
+ * @param {{status?:number, code?:unknown, message?:string, model?:string}|string|Error|null} err
  *   status 为 HTTP 状态码（0 = 网络层失败/超时）;裸字符串按网络层失败处理。
- * @returns {{kind:'soft'|'hard'|'model'|'session_dead'|'breaker'|null, status:number, message:string}}
+ *   model（上游模型名）原样透传：池的 model 类别要建 (账号,模型) 负缓存，
+ *   缺了它 403 模型错误会退化成熔断计数（集成阶段校准——此前 classify
+ *   把 model 丢掉，web 通道的模型级负缓存实际从未生效过）。
+ * @returns {{kind:'soft'|'hard'|'model'|'session_dead'|'breaker'|null,
+ *            status:number, message:string, model?:string}}
  */
 function classify(err) {
   if (err == null) return { kind: null, status: 0, message: '' };
@@ -147,6 +151,7 @@ function classify(err) {
   const status = Math.max(0, Math.floor(Number(err.status) || 0));
   const message = String(err.message || err.error || '').slice(0, 200);
   const base = { kind: null, status, message };
+  if (err.model) base.model = String(err.model).slice(0, 100);
 
   if (status === 429) return { ...base, kind: 'soft' };
   if (status === 401) return { ...base, kind: 'session_dead' };

@@ -17,6 +17,12 @@ const constants = require('./constants');
 const wasmPath = require('./wasm-path');
 const credits = require('./credits');
 const { normalizeError } = require('../errtext');
+// 选号接缝（集成阶段）：冷却/熔断/粘性/在途帽统一走池状态机。
+// 通道在池里的 uid 键位 = 'qwenwork:<id>'（channel-pool.js 统一裁决）。
+const channelPool = require('../channel-pool');
+const CHANNEL = 'qwenwork';
+// 出站代理工厂（E 包接线）：runOnce 按账号解析 agent
+const proxyAgent = require('../proxy-agent');
 
 // 在飞请求计数。积分归因在并发下有个本质限制：两个请求同时在飞时，
 // 「前后差值」分不清是谁消耗的——总和正确，单项归属不准。
@@ -52,17 +58,15 @@ function status() {
  *
  * 顺序：preferred 标记 → 环境变量 DUMATE_QWENWORK_ACCOUNT → 第一个可用。
  * 由 authStore.preferred() 统一判定（那里也写了为什么是这个顺序）。
+ *
+ * **只服务辅助路径**（listModels 等不消耗会话状态的动作）。对话请求的
+ * 选号走池状态机（send → channel-pool），冷却/熔断账号不会被选中；
+ * 这里保持旧口径——查模型表不该因为账号在冷却里就拒绝。
  */
 function pickAccount() {
   const a = authStore.preferred();
   if (!a) throw new Error('千问办公没有可用账号，请先添加一个');
   return a;
-}
-
-/** 主账号失败时，下一个可试的账号（不含已试过的） */
-function nextAccount(exclude) {
-  const usable = authStore.findUsable();
-  return usable.filter((a) => !exclude.has(a.id));
 }
 
 /**
@@ -104,6 +108,9 @@ async function runOnce(account, payload, onChunk, opts) {
   const auth = await chat.ensureAccount(authStore, account);
   const modelKey = chat.resolveModelKey(payload && payload.model);
   const bodyJson = chat.buildBody(modelKey, payload);
+  // 出站代理（E 包接线）：账号 proxy 字段 > 全局 DUMATE_PROXY，无代理 null 直连。
+  // 千问账号记录暂无 proxy 字段（代理字段只在搭子 web 账号上），走全局默认。
+  const agent = proxyAgent.getAgentFor(account);
   // encode 进 worker（审计 P1-5b），签名构造不再独占事件循环
   const built = await bridge.prepareInferAsync({
     uid: auth.uid,
@@ -153,7 +160,7 @@ async function runOnce(account, payload, onChunk, opts) {
         }
         sent = true;
         onChunk(inner);
-      });
+      }, { agent });
       settle();
       if (firstErr) {
         const err = new Error(`qwenwork ${firstErr.code}: ${firstErr.message}`);
@@ -165,7 +172,7 @@ async function runOnce(account, payload, onChunk, opts) {
       if (doneSeen) onChunk('[DONE]');
       return res;
     }
-    const res = await chat.post(built.url, built.body, built.headers);
+    const res = await chat.post(built.url, built.body, built.headers, { agent });
     const es = chat.envelopeStatus(res.raw);
     if (es && es.code >= 400) {
       settle();
@@ -210,9 +217,26 @@ const MAX_ATTEMPTS = 3;
 async function send(payload, onChunk, opts = {}) {
   const tried = new Set();
   const errors = [];
-  let account = pickAccount();
+  // 上游模型名（去掉通道前缀）：池的模型级负缓存与故障喂入都按它记
+  const model = payload && payload.model ? String(payload.model).replace(/^qwen\//, '') : '';
+  // 会话粘性键：同一会话尽量落到同一账号（TRAE/长上下文场景省重放），
+  // channel-pool 内部判定不健康即解绑换号
+  const sessionKey = channelPool.sessionKeyOf(payload, opts);
+  const usable = authStore.findUsable();
+  if (!usable.length) throw new Error('千问办公没有可用账号，请先添加一个');
+
+  // 选号经池状态机：冷却/熔断/禁用/暂停/在途满的账号直接跳过（不再作为
+  // 主账号去撞一次失败）；全池不可用时报 503 而不是拿冷却账号空转。
+  let sel = channelPool.pickCandidate(CHANNEL, usable, { exclude: tried, sessionKey, model });
+  if (!sel) {
+    const err = new Error('千问办公没有可用账号（全部处于冷却/禁用/在途满，可到管理端账号池复活）');
+    err.statusCode = 503;
+    throw err;
+  }
 
   for (let i = 0; i < MAX_ATTEMPTS; i++) {
+    const account = sel.account;
+    const uid = sel.uid; // 本次尝试占用的池记录；catch 里 sel 会被换号，finally 只放它
     tried.add(account.id);
     // 多账号下「这次实际用了哪个」只有这里知道，由 provider 上报给埋点。
     // 在别处猜（比如「池里的第一个」）在转移场景下必然记错。
@@ -223,6 +247,8 @@ async function send(payload, onChunk, opts = {}) {
 
     try {
       const result = await runOnce(account, payload, onChunk, opts);
+      // 成功喂池：清熔断/软退避/防误杀计数（最强恢复证据）
+      channelPool.noteSuccess(CHANNEL, account.id);
       // 请求成功就把上次的失败标记清掉。**不能只在换票成功时清**——那样
       // 一次瞬时失败（上游抖动的 403）会永远挂在账号上，用户看到的是早已
       // 自愈的旧错误（2026-10-02 实测：账号页显示的 403 其实几小时前就恢复了）。
@@ -234,14 +260,19 @@ async function send(payload, onChunk, opts = {}) {
       return result;
     } catch (e) {
       const code = Number(e.statusCode) || 0;
+      // 失败喂池：类别判定在 upstream-errors.classify，池动作按类别分发
+      channelPool.noteError(CHANNEL, account.id, { status: code, message: e.message, model });
       markFailure(account, e.message);
       errors.push({ account: account.nickname || account.uid || account.id, status: code || '-', error: e.message });
       // 流式已经吐过帧，客户端收到了半截输出，再换号会输出两遍
       if (e.sent) throw e;
       if (!retryable(code, e.message)) throw e;
-      const rest = nextAccount(tried);
-      if (!rest.length) break;
-      account = rest[0];
+      // 下一个候选仍经池选：刚失败的账号若进了冷却，这里自然跳过
+      sel = channelPool.pickCandidate(CHANNEL, usable, { exclude: tried, sessionKey, model });
+      if (!sel) break;
+    } finally {
+      // 每次尝试结束必须放还在途名额（pickCandidate 命中即占用）
+      channelPool.release(uid);
     }
   }
 

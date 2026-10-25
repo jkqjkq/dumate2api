@@ -16,6 +16,12 @@ const session = require('./session');
 const constants = require('./constants');
 const { normalizeError } = require('../errtext');
 const ledger = require('../checkin-ledger');
+// 选号接缝（集成阶段）：冷却/熔断/粘性/在途帽统一走池状态机。
+// 通道在池里的 uid 键位 = 'qoder:<id>'（channel-pool.js 统一裁决）。
+const channelPool = require('../channel-pool');
+const CHANNEL = 'qoder';
+// 出站代理工厂（E 包接线）：runOnce 按账号解析 agent
+const proxyAgent = require('../proxy-agent');
 
 /**
  * 预热**模型表**：runOnce 从同步缓存里取「该模型的最大上下文档位」（1M），
@@ -59,8 +65,17 @@ function pickAccount() {
   return a;
 }
 
-function nextAccount(exclude) {
-  return authStore.findUsable().filter((a) => !exclude.has(a.id));
+/**
+ * 业务码 105（Login expired）→ classify 的 401（session_dead）。
+ *
+ * Qoder 凭证失效不走 HTTP 401，而是 COSY 信封里的 105；池的防误杀计数
+ * 必须能吃到它，否则凭证死了账号永远健康、每次请求都要白撞一次。
+ * 放在喂池入口而不是改 classify——105 是 Qoder 通道的私有业务码，
+ * upstream-errors 是两条 COSY 通道共用的识别层，不认识通道私有码。
+ */
+function poolStatusOf(code) {
+  const n = Number(code) || 0;
+  return n === 105 ? 401 : n;
 }
 
 /**
@@ -192,6 +207,8 @@ async function runOnce(account, payload, onChunk, opts, meter) {
     'x-model-key': modelKey,
     'x-model-source': 'system',
   });
+  // 出站代理（E 包接线）：账号 proxy 字段 > 全局 DUMATE_PROXY，无代理 null 直连
+  const agent = proxyAgent.getAgentFor(account);
 
   const startedAt = Date.now();
   // 本条请求的 credits（上游 usage 直给）。流式路径逐帧扫、取最大值——
@@ -232,7 +249,7 @@ async function runOnce(account, payload, onChunk, opts, meter) {
         }
         sent = true;
         onChunk(inner);
-      }, { signal: ac.signal });
+      }, { signal: ac.signal, agent });
       if (firstErr) {
         const err = new Error(`qoder ${firstErr.code}: ${firstErr.message}`);
         err.statusCode = firstErr.code;
@@ -269,7 +286,7 @@ async function runOnce(account, payload, onChunk, opts, meter) {
       meter.settle(peakCredits);
       return res;
     }
-    const res = await chat.post(ep.ChatStreamURL, encBody, headers);
+    const res = await chat.post(ep.ChatStreamURL, encBody, headers, { agent });
     const es = chat.envelopeStatus(res.raw);
     if (es && es.code >= 400) {
       const err = new Error(`qoder ${es.code}: ${es.message}`);
@@ -334,11 +351,22 @@ function makeMeter(account, opts) {
 async function send(payload, onChunk, opts = {}) {
   const tried = new Set();
   const errors = [];
-  let account = pickAccount();
   const model = payload && payload.model ? String(payload.model).replace(/^qoder\//, '') : '';
   const startedAt = Date.now();
+  // 会话粘性 + 池选号（冷却/熔断/禁用/暂停/在途满跳过），见 channel-pool.js
+  const sessionKey = channelPool.sessionKeyOf(payload, opts);
+  const usable = authStore.findUsable();
+  if (!usable.length) throw new Error('Qoder 没有可用账号，请先添加一个');
+  let sel = channelPool.pickCandidate(CHANNEL, usable, { exclude: tried, sessionKey, model });
+  if (!sel) {
+    const err = new Error('Qoder 没有可用账号（全部处于冷却/禁用/在途满，可到管理端账号池复活）');
+    err.statusCode = 503;
+    throw err;
+  }
 
   for (let i = 0; i < MAX_ATTEMPTS; i++) {
+    const account = sel.account;
+    const uid = sel.uid; // 本次尝试占用的池记录；catch 里换号后 finally 只放它
     tried.add(account.id);
     if (opts.onAccount) {
       const name = account.nickname || account.uid || `账号 ${account.id}`;
@@ -348,6 +376,8 @@ async function send(payload, onChunk, opts = {}) {
     const meter = makeMeter(account, { ...opts, model, startedAt });
     try {
       const result = await runOnce(account, payload, onChunk, opts, meter);
+      // 成功喂池：清熔断/软退避/防误杀计数
+      channelPool.noteSuccess(CHANNEL, account.id);
       // 成功即清除上次的失败标记（与千问同一约定：一次瞬时失败不该永远挂着）
       if (account.lastError) {
         try { authStore.patch(account.id, { lastError: '' }); }
@@ -356,13 +386,16 @@ async function send(payload, onChunk, opts = {}) {
       return result;
     } catch (e) {
       const code = Number(e.statusCode) || 0;
+      // 失败喂池：105（Login expired）按 401 进防误杀计数，其余按 classify
+      channelPool.noteError(CHANNEL, account.id, { status: poolStatusOf(code), message: e.message, model });
       markFailure(account, e.message);
       errors.push({ account: account.nickname || account.uid || account.id, status: code || '网络错误', error: e.message });
       if (e.sent) throw e; // 流式已吐帧，不能再换号
       if (!retryable(code, e.message)) throw e;
-      const rest = nextAccount(tried);
-      if (!rest.length) break;
-      account = rest[0];
+      sel = channelPool.pickCandidate(CHANNEL, usable, { exclude: tried, sessionKey, model });
+      if (!sel) break;
+    } finally {
+      channelPool.release(uid);
     }
   }
 
