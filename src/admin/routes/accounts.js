@@ -4,6 +4,7 @@ const accounts = require('../../accounts');
 const web = require('../../dumate-web');
 const loginBrowser = require('../../login-browser');
 const webPool = require('../../web-pool');
+const accountPool = require('../../pool').pool;
 const taskRunner = require('../../task-runner');
 const taskScheduler = require('../../task-scheduler');
 const records = require('../../records');
@@ -1099,13 +1100,108 @@ const routes = [
     },
   },
   {
+    // 账号池运维端点（GAP F6a,随施工包 A）。惩罚态落在 data/pool-state.json
+    // （src/pool.js,跨进程共享）:这里的动作立即写盘,网关进程 5s 防抖落盘前会
+    // 按记录级 updated_at 吸纳本进程的更新,不会被覆盖。
+    //
+    // 动作语义:
+    //   freeze  冻结（hard 冷却,余额恢复可解冻）
+    //   revive  复活:清禁用+暂停+全部冷却+熔断+防误杀计数
+    //   pause   暂停选号（不动惩罚域,保活/签到照常）
+    //   resume  解除暂停
+    //   balance 手动余额刷新:快照写入 + 余额>0 解冻硬冷却（签到→解冻闭环的
+    //           手动等价,B 包把这条链路自动化）
+    method: 'POST',
+    path: '/pool/:id/freeze',
+    handler: ({ res, params, body }) => {
+      const acc = accounts.getRaw(params[0]);
+      if (!acc) return sendJSON(res, 404, { error: '账号不存在' });
+      const b = body || {};
+      const ms = Number(b.ms != null ? b.ms : (Number(b.minutes) || 0) * 60000);
+      if (!Number.isFinite(ms) || ms <= 0) return sendJSON(res, 400, { error: '缺少冻结时长（ms 或 minutes）' });
+      accountPool.freeze(acc.id, ms, String(b.reason || '人工冻结'));
+      require('../../admin/auth').audit('admin', 'pool_freeze', accounts.displayName(acc),
+        `${Math.round(ms / 60000)} 分钟 ${b.reason || ''}`);
+      return sendJSON(res, 200, { ok: true, state: accountPool.status(acc.id) });
+    },
+  },
+  {
+    method: 'POST',
+    path: '/pool/:id/revive',
+    handler: ({ res, params }) => {
+      const acc = accounts.getRaw(params[0]);
+      if (!acc) return sendJSON(res, 404, { error: '账号不存在' });
+      accountPool.revive(acc.id);
+      require('../../admin/auth').audit('admin', 'pool_revive', accounts.displayName(acc));
+      return sendJSON(res, 200, { ok: true, state: accountPool.status(acc.id) });
+    },
+  },
+  {
+    method: 'POST',
+    path: '/pool/:id/pause',
+    handler: ({ res, params }) => {
+      const acc = accounts.getRaw(params[0]);
+      if (!acc) return sendJSON(res, 404, { error: '账号不存在' });
+      accountPool.pause(acc.id);
+      require('../../admin/auth').audit('admin', 'pool_pause', accounts.displayName(acc));
+      return sendJSON(res, 200, { ok: true, state: accountPool.status(acc.id) });
+    },
+  },
+  {
+    method: 'POST',
+    path: '/pool/:id/resume',
+    handler: ({ res, params }) => {
+      const acc = accounts.getRaw(params[0]);
+      if (!acc) return sendJSON(res, 404, { error: '账号不存在' });
+      accountPool.resume(acc.id);
+      require('../../admin/auth').audit('admin', 'pool_resume', accounts.displayName(acc));
+      return sendJSON(res, 200, { ok: true, state: accountPool.status(acc.id) });
+    },
+  },
+  {
+    method: 'POST',
+    path: '/pool/:id/balance',
+    handler: async ({ res, params }) => {
+      const acc = accounts.getRaw(params[0]);
+      if (!acc) return sendJSON(res, 404, { error: '账号不存在' });
+      const r = await web.api.quotaOverview(acc.cookie);
+      if (!r.ok) return sendJSON(res, 502, { ok: false, error: r.error, expired: !!r.expired });
+      accountPool.setCredits(acc.id, r.left, r.total);
+      const { unfrozen } = accountPool.reenableIfCredits(acc.id, r.left, r.total);
+      // 余额顺手回写账号记录（仪表盘复用现有缓存口径）
+      accounts.patchInternal(acc.id, {
+        points: { left: r.left, total: r.total, used: r.used },
+        points_at: Date.now(),
+        last_error: '',
+      });
+      require('../../admin/auth').audit('admin', 'pool_balance_refresh',
+        accounts.displayName(acc), `left=${r.left}${unfrozen ? ',已解冻' : ''}`);
+      return sendJSON(res, 200, {
+        ok: true, left: r.left, total: r.total, unfrozen,
+        state: accountPool.status(acc.id),
+      });
+    },
+  },
+  {
     method: 'GET',
     path: '/pool',
     handler: ({ res }) => {
       // 账号池的运行态（token 缓存、成功/失败计数、冷却）只存在于网关进程内，
       // 管理端是另一个进程读不到。这里返回「配置 + 最近一次探测结果」，
       // 需要实时运行态就查网关的 /health。
+      //
+      // 惩罚态（冷却/熔断/禁用/余额快照）已随施工包 A 落盘到 pool-state.json,
+      // 管理端能直接读——先吸纳网关 5s 防抖内新写的内容再出视图。
       const gatewayPort = parseInt(process.env.DUMATE_WEB_GATEWAY_PORT || '9084', 10);
+      accountPool.reloadIfChanged();
+      const poolState = {
+        counts: accountPool.counts(),
+        entries: accounts.load().accounts.map((a) => ({
+          id: a.id,
+          name: accounts.displayName(a),
+          ...accountPool.status(a.id),
+        })),
+      };
       const list = accounts.load().accounts.map((a) => ({
         id: a.id,
         name: accounts.displayName(a),
@@ -1126,12 +1222,12 @@ const routes = [
           r.on('end', () => {
             let health = null;
             try { health = JSON.parse(d); } catch (e) { health = null; }
-            sendJSON(res, 200, { gateway_port: gatewayPort, gateway_online: true, health, accounts: list });
+            sendJSON(res, 200, { gateway_port: gatewayPort, gateway_online: true, health, accounts: list, pool_state: poolState });
           });
         },
       );
       req.on('error', () => sendJSON(res, 200, {
-        gateway_port: gatewayPort, gateway_online: false, health: null, accounts: list,
+        gateway_port: gatewayPort, gateway_online: false, health: null, accounts: list, pool_state: poolState,
       }));
       req.on('timeout', () => { req.destroy(); });
       req.end();
