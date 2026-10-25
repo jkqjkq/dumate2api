@@ -29,6 +29,10 @@ const crypto = require('crypto');
 const accounts = require('./accounts');
 const { classify } = require('./upstream-errors');
 const pool = require('./pool').pool;
+// per-account 出站代理（施工包 E 接线）：getAgentFor 按账号 proxy 字段 > 全局
+// DUMATE_PROXY 解析，无代理返回 null（直连）。账号配了代理就绝不回退直连——
+// 解析失败抛错走请求失败路径进冷却，静默回退等于把真实出口 IP 裸奔出去。
+const proxyAgent = require('./proxy-agent');
 
 const WEB_BASE = process.env.DUMATE_WEB_BASE || 'https://www.dumate.cn';
 const GATEWAY_HOST = process.env.DUMATE_GATEWAY_HOST || 'dumate-svc.baidu.com';
@@ -58,7 +62,9 @@ function stateOf(id) {
 // 不设限等于把上游（或中间人）的输出全部吃进内存。超限按连接失败处理。
 const MAX_JSON_RESP_BYTES = 8 * 1024 * 1024;
 
-function httpsJSON(hostname, path, method, headers, body, timeout = 30000) {
+// agent 参数：出站代理接线（proxy-agent.getAgentFor 的产物）。null/undefined
+// = 直连（Node 用默认全局 agent），传了就走 CONNECT 隧道。
+function httpsJSON(hostname, path, method, headers, body, timeout = 30000, agent = null) {
   return new Promise((resolve) => {
     const payload = body === undefined || body === null ? null : JSON.stringify(body);
     const req = https.request(
@@ -67,6 +73,7 @@ function httpsJSON(hostname, path, method, headers, body, timeout = 30000) {
         path,
         method,
         timeout,
+        ...(agent ? { agent } : {}),
         headers: {
           'Content-Type': 'application/json',
           Accept: 'application/json',
@@ -99,9 +106,16 @@ function httpsJSON(hostname, path, method, headers, body, timeout = 30000) {
   });
 }
 
+// 账号生效的出站 agent（null = 直连）。代理配置非法时抛错，调用方各自转成
+// status 0 的请求失败——走既有失败路径进熔断，绝不静默回退直连（E 包契约）。
+// 注意入参必须是**原始记录**（getRaw），toPublic 的 proxy 已脱敏连不了。
+function agentFor(account) {
+  return proxyAgent.getAgentFor(account);
+}
+
 // 取（或复用）某账号的 token。并发调用共享同一次刷新，避免同时打多个
 // token 请求——服务端虽然会缓存，但并发刷新没有意义。
-async function getToken(account, force = false) {
+async function getToken(account, force = false, agent = null) {
   const st = stateOf(account.id);
   const now = Date.now();
 
@@ -112,8 +126,14 @@ async function getToken(account, force = false) {
   if (st.refreshing) return st.refreshing;
 
   st.refreshing = (async () => {
+    let ag = agent;
+    if (ag === null) {
+      try { ag = agentFor(account); } catch (e) {
+        return { ok: false, error: `出站代理配置错误: ${e.message}`, expired: false };
+      }
+    }
     const r = await httpsJSON(WEB_BASE.replace(/^https?:\/\//, ''), '/api/dumate/app/token/get',
-      'GET', { Cookie: account.cookie }, null, TOKEN_TIMEOUT);
+      'GET', { Cookie: account.cookie }, null, TOKEN_TIMEOUT, ag);
 
     if (r.status !== 200 || !r.json || !r.json.result || !r.json.result.token) {
       const msg = r.json && r.json.message ? r.json.message : (r.raw || `HTTP ${r.status}`);
@@ -173,7 +193,11 @@ async function callModel(account, path, method, body, opts = {}) {
     return { ok: false, status: 0, error: '账号在途请求已达上限', busy: true, account };
   }
   try {
-    const t = await getToken(account, opts.forceToken);
+    let agent;
+    try { agent = agentFor(account); } catch (e) {
+      return { ok: false, status: 0, error: `出站代理配置错误: ${e.message}`, account };
+    }
+    const t = await getToken(account, opts.forceToken, agent);
     if (!t.ok) return { ok: false, status: 401, error: t.error, expired: t.expired, account };
 
     const r = await httpsJSON(GATEWAY_HOST, GATEWAY_PREFIX + path, method, {
@@ -181,7 +205,7 @@ async function callModel(account, path, method, body, opts = {}) {
       // 与桌面客户端一致：标记来源与账号域
       'X-Dumate-Client-Type': 'web',
       'X-Dumate-Account-Id': 'global',
-    }, body, opts.timeout || 600000);
+    }, body, opts.timeout || 600000, agent);
 
     // token 失效：强制刷一次再重试一次。不无限重试——真失效（cookie 过期）
     // 时重试再多次也没用，只会放大延迟。
@@ -210,8 +234,12 @@ async function callModelStream(account, path, method, body, onChunk, opts = {}) 
     return { ok: false, status: 0, error: '账号在途请求已达上限', busy: true, account, streamed: true };
   }
   try {
+    let agent;
+    try { agent = agentFor(account); } catch (e) {
+      return { ok: false, status: 0, error: `出站代理配置错误: ${e.message}`, account, streamed: true };
+    }
     return await new Promise((resolve) => {
-      getToken(account, opts.forceToken).then((t) => {
+      getToken(account, opts.forceToken, agent).then((t) => {
         if (!t.ok) return resolve({ ok: false, status: 401, error: t.error, expired: t.expired, account });
 
         const payload = JSON.stringify(body);
@@ -221,6 +249,7 @@ async function callModelStream(account, path, method, body, onChunk, opts = {}) 
             path: GATEWAY_PREFIX + path,
             method,
             timeout: opts.timeout || 600000,
+            ...(agent ? { agent } : {}),
             headers: {
               'Content-Type': 'application/json',
               Accept: 'text/event-stream',

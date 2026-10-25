@@ -162,6 +162,10 @@ function needsRefresh(a, skewMs = 24 * 3600 * 1000) {
  */
 async function exchange(a) {
   if (!a || !a.refreshToken) return { ok: false, error: '缺少 refreshToken' };
+  let agent = null;
+  try { agent = require('../proxy-agent').getAgentFor(a); } catch (e) {
+    return { ok: false, error: `出站代理配置错误: ${e.message}` };
+  }
   const host = a.apiHost || c.OAUTH_HOST;
   const body = {
     ClientID: c.CLIENT_ID,
@@ -170,7 +174,7 @@ async function exchange(a) {
     UserID: '',
   };
   const r = await c.request(host, c.EP_EXCHANGE, {
-    method: 'POST', body, headers: oauthHeaders(),
+    method: 'POST', body, headers: oauthHeaders(), agent,
   });
   if (r.status !== 200 || !r.data) {
     return { ok: false, error: `HTTP ${r.status} ${String(r.raw).slice(0, 120)}` };

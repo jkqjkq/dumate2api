@@ -69,8 +69,9 @@ const APP_VERSION = '0.1.45';
 const TIMEOUT_MS = 30000;
 const STREAM_TIMEOUT_MS = 600000;
 
-/** 统一发 JSON 请求。返回 { status, data, raw, error } */
-function request(host, path, { method = 'POST', body = null, headers = {}, timeout = TIMEOUT_MS } = {}) {
+/** 统一发 JSON 请求。返回 { status, data, raw, error }。
+ *  opts.agent 出站代理（E 包接线）：凭证请求与对话同出口，null = 直连。 */
+function request(host, path, { method = 'POST', body = null, headers = {}, timeout = TIMEOUT_MS, agent = null } = {}) {
   return new Promise((resolve) => {
     const u = new URL(host + path);
     const payload = body == null ? null : (typeof body === 'string' ? body : JSON.stringify(body));
@@ -78,6 +79,7 @@ function request(host, path, { method = 'POST', body = null, headers = {}, timeo
       hostname: u.hostname,
       path: u.pathname + u.search,
       method,
+      ...(agent ? { agent } : {}),
       headers: {
         ...headers,
         ...(payload ? { 'Content-Length': Buffer.byteLength(payload) } : {}),

@@ -213,8 +213,10 @@ function jwtExp(token) {
   } catch (e) { return null; }
 }
 
-/** 发一个 JSON 请求。统一用 StringDecoder——跨 chunk 的汉字逐块解码会变 U+FFFD */
-function requestJson(pathname, method, body, headers, timeout = 20000) {
+/** 发一个 JSON 请求。统一用 StringDecoder——跨 chunk 的汉字逐块解码会变 U+FFFD。
+ *  opts.agent 出站代理（E 包接线）：凭证请求与对话同出口，换 IP 出口不一致
+ *  本身就是风控信号。null = 直连。 */
+function requestJson(pathname, method, body, headers, timeout = 20000, opts = {}) {
   return new Promise((resolve) => {
     const payload = body == null ? null : JSON.stringify(body);
     const req = require('https').request({
@@ -226,6 +228,7 @@ function requestJson(pathname, method, body, headers, timeout = 20000) {
         ...(payload ? { 'Content-Length': Buffer.byteLength(payload) } : {}),
       },
       timeout,
+      ...(opts.agent ? { agent: opts.agent } : {}),
     }, (res) => {
       let buf = '';
       const { StringDecoder } = require('string_decoder');
@@ -256,13 +259,17 @@ function requestJson(pathname, method, body, headers, timeout = 20000) {
  */
 async function exchange(a) {
   if (!a || !a.refreshToken) return { ok: false, error: '缺少 refreshToken' };
+  let agent = null;
+  try { agent = require('../proxy-agent').getAgentFor(a); } catch (e) {
+    return { ok: false, error: `出站代理配置错误: ${e.message}` };
+  }
   const r = await requestJson(c.REFRESH_PATH, 'POST', { refresh_token: a.refreshToken, target: 'c' }, {
     'Content-Type': 'application/json',
     Accept: 'application/json',
     'User-Agent': c.USER_AGENT,
     'X-Request-Id': crypto.randomUUID(),
     'Login-Version': c.LOGIN_VERSION,
-  }, 30000);
+  }, 30000, { agent });
 
   const token = (r.data && (r.data.device_token || r.data.token)) || '';
   if (!token) {

@@ -8,8 +8,9 @@ const c = require('./constants');
 
 const TIMEOUT_MS = 20000;
 
-/** 发一个 JSON 请求，返回 { status, data, raw }。永不抛（网络错当 status=0） */
-function request(url, { method = 'GET', headers = {}, body = null, timeout = TIMEOUT_MS } = {}) {
+/** 发一个 JSON 请求，返回 { status, data, raw }。永不抛（网络错当 status=0）。
+ *  opts.agent 出站代理（E 包接线）：凭证/配额请求与对话同出口，null = 直连。 */
+function request(url, { method = 'GET', headers = {}, body = null, timeout = TIMEOUT_MS, agent = null } = {}) {
   return new Promise((resolve) => {
     let u;
     try { u = new URL(url); } catch (e) { return resolve({ status: 0, data: null, raw: '', error: e.message }); }
@@ -19,7 +20,10 @@ function request(url, { method = 'GET', headers = {}, body = null, timeout = TIM
       h['content-type'] = h['content-type'] || 'application/json';
       h['content-length'] = Buffer.byteLength(payload);
     }
-    const req = https.request({ hostname: u.hostname, path: u.pathname + u.search, method, headers: h, timeout }, (res) => {
+    const req = https.request({
+      hostname: u.hostname, path: u.pathname + u.search, method, headers: h, timeout,
+      ...(agent ? { agent } : {}),
+    }, (res) => {
       let b = '';
       res.on('data', (chunk) => { b += chunk; });
       res.on('end', () => {
@@ -147,11 +151,16 @@ async function fetchModels(account, { force = false } = {}) {
  */
 async function exchange(account) {
   if (!account || !account.refreshToken) return { ok: false, error: '缺少 refreshToken' };
+  let agent = null;
+  try { agent = require('../proxy-agent').getAgentFor(account); } catch (e) {
+    return { ok: false, error: `出站代理配置错误: ${e.message}` };
+  }
   const ep = c.endpointsOf(account.region);
   const r = await request(ep.RefreshEndpoint, {
     method: 'POST',
     headers: { 'User-Agent': 'qoder/1.0.0', 'Login-Version': c.LOGIN_VERSION },
     body: { refresh_token: account.refreshToken, target: 'c' },
+    agent,
   });
   if (r.status !== 200 || !r.data) {
     // refresh 失败通常是凭证本身失效（refresh token 过期/被吊销）——

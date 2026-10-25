@@ -223,8 +223,8 @@ function unwrap(raw) {
   return [s];
 }
 
-/** 发一次推理请求，返回 { status, headers, raw } */
-function post(url, body, headers) {
+/** 发一次推理请求，返回 { status, headers, raw }。opts.agent 出站代理（E 包接线） */
+function post(url, body, headers, opts = {}) {
   return new Promise((resolve, reject) => {
     const u = new URL(url);
     const req = https.request({
@@ -233,6 +233,7 @@ function post(url, body, headers) {
       method: 'POST',
       headers: { ...headers, 'Accept': 'text/event-stream', 'Content-Length': Buffer.byteLength(body) },
       timeout: TIMEOUT_MS,
+      ...(opts.agent ? { agent: opts.agent } : {}),
     }, (res) => {
       let buf = '';
       // 同 postStream：必须用 StringDecoder 保持跨 chunk 的解码状态，
@@ -261,8 +262,8 @@ function post(url, body, headers) {
   });
 }
 
-/** 流式：逐块回调内层 payload（含 [DONE]） */
-function postStream(url, body, headers, onChunk) {
+/** 流式：逐块回调内层 payload（含 [DONE]）。opts.agent 出站代理（E 包接线） */
+function postStream(url, body, headers, onChunk, opts = {}) {
   return new Promise((resolve, reject) => {
     const u = new URL(url);
     const req = https.request({
@@ -271,6 +272,7 @@ function postStream(url, body, headers, onChunk) {
       method: 'POST',
       headers: { ...headers, 'Accept': 'text/event-stream', 'Content-Length': Buffer.byteLength(body) },
       timeout: TIMEOUT_MS,
+      ...(opts.agent ? { agent: opts.agent } : {}),
     }, (res) => {
       let buf = '';
       // **必须用 StringDecoder**：TCP chunk 不按字符边界切，
