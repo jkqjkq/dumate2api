@@ -16,11 +16,12 @@
 //     src/reqlog.js 的 record（本包接线，F6e）。默认 true——保持既有日志
 //     形状，关掉是显式动作。
 //   - hiddenModels     要隐藏的模型名（精确匹配、大小写敏感、裸名）。
-//     消费接线点在 /v1/models 的输出侧（server.js——按 GAP 纪律本包不改
-//     server.js，由持有模型列表出口的后续包接线）。dumate 无 cn/global
-//     双域，裸名即全量 id，不做 codebuddy 的前缀归一化（N10 不应对齐）。
+//     消费接线点：/v1/models 与 /v1beta/models 的输出侧（server.js 调
+//     applyHiddenModels）。dumate 无 cn/global 双域，裸名即全量 id，不做
+//     codebuddy 的前缀归一化（N10 不应对齐）。
 //   - softCooldownMs   429 软冷却基数（<=0 或缺省 = 用调用方内置默认）。
-//     消费者：池状态机（GAP F1 / 施工包 A 合入后从这里读）。
+//     消费者：池状态机生产单例（pool.js 的 hotSoftCooldown 门控热读，
+//     测试池不读——保持单测对机器真实配置不敏感）。
 //
 // 落盘 data/livecfg.json（tmp+rename 原子写 + filelock 跨进程互斥，与
 // qoder/auth.js 同一套写纪律）。文件里只会有白名单键——磁盘上多出的键
@@ -148,9 +149,26 @@ function Store(patch) {
   });
 }
 
+/**
+ * 模型列表输出侧的隐藏过滤（hiddenModels 的消费接线点：/v1/models 与
+ * /v1beta/models）。rows 是 {id}（OpenAI 形态）/ {name:'models/<id>'}（Google
+ * 形态）/ 裸字符串，统一剥前缀取裸名后与 hiddenModels 精确比对（大小写敏感）。
+ * 返回新数组不改入参；配置读不到时原样返回——隐藏是可选能力，故障不放大。
+ */
+function applyHiddenModels(rows) {
+  let hidden;
+  try { hidden = Load().hiddenModels; } catch (e) { return rows; }
+  if (!Array.isArray(rows) || !hidden.length) return rows;
+  const bare = (id) => (id.startsWith('models/') ? id.slice('models/'.length) : id);
+  return rows.filter((r) => {
+    const id = typeof r === 'string' ? r : String((r && (r.id != null ? r.id : r.name)) || '');
+    return !hidden.includes(bare(id));
+  });
+}
+
 /** 仅供测试：把进程内缓存打回「未读过」状态 */
 function _resetForTest() {
   cache = { mtime: -1, snap: defaults() };
 }
 
-module.exports = { FILE, FIELDS, filePath, defaults, sanitize, Load, Store, _resetForTest };
+module.exports = { FILE, FIELDS, filePath, defaults, sanitize, Load, Store, applyHiddenModels, _resetForTest };

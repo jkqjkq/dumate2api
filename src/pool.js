@@ -84,7 +84,7 @@ const DEFAULTS = {
   breakerThreshold: 3,        // 连续失败多少次触发熔断
   breakerCooldownMs: 30 * 60 * 1000,       // 首次熔断时长
   breakerCooldownMaxMs: 6 * 60 * 60 * 1000, // 熔断指数退避封顶
-  softBaseMs: 5 * 60 * 1000,  // 软冷却基数（沿用旧 COOLDOWN_MS,行为不回退）
+  softBaseMs: 5 * 60 * 1000,  // 软冷却基数（沿用旧 COOLDOWN_MS,行为不回退）;生产单例被 livecfg.softCooldownMs 热覆盖（>0 时）
   softMaxMs: 2 * 60 * 60 * 1000,           // 软冷却退避封顶（defaultSoftRateMax）
   modelBlockBaseMs: 6 * 60 * 60 * 1000,    // 模型级负缓存首 TTL（11102 语义）
   modelBlockMaxMs: 24 * 60 * 60 * 1000,    // 模型级负缓存封顶
@@ -787,6 +787,7 @@ function createPool(opts = {}) {
 
 // 默认单例:web-pool（网关进程）与管理端共用同一份 pool-state.json。
 // flusher 周期 5s,进程退出由调用方调 close()（unref 过,不阻塞退出）。
-const pool = createPool({ file: STATE_FILE });
+// hotSoftCooldown:软冷却基数热读 livecfg（仅生产单例,测试池保持对机器配置不敏感）。
+const pool = createPool({ file: STATE_FILE, hotSoftCooldown: true });
 
 module.exports = { createPool, pool, DEFAULTS, STATE_FILE, msUntilNext4AM };

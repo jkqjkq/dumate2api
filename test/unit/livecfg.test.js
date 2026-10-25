@@ -81,6 +81,34 @@ test('Store 落盘且换进程视角可读（mtime 失效重读 = 跨进程热�
   assert.deepStrictEqual(cfg.hiddenModels, ['x']);
 });
 
+test('applyHiddenModels：/v1/models 与 /v1beta/models 输出侧过滤（hiddenModels 消费接线）', () => {
+  reset();
+  livecfg.Store({ hiddenModels: ['glm-5', 'qwen/secret'] });
+  // OpenAI 形态:{id} 精确比对
+  const openai = livecfg.applyHiddenModels([
+    { id: 'glm-5', object: 'model' },
+    { id: 'model-text', object: 'model' },
+    { id: 'qwen/secret', object: 'model' },
+    { id: 'qwen/pro', object: 'model' },
+  ]);
+  assert.deepStrictEqual(openai.map((m) => m.id), ['model-text', 'qwen/pro']);
+  // Google 形态:{name:'models/<id>'} 自剥前缀后比对裸名
+  const google = livecfg.applyHiddenModels([
+    { name: 'models/glm-5', displayName: 'GLM-5' },
+    { name: 'models/model-text', displayName: 'x' },
+  ]);
+  assert.deepStrictEqual(google.map((m) => m.name), ['models/model-text']);
+  // 大小写敏感:名单里是大写,小写 id 不受影响
+  reset();
+  livecfg.Store({ hiddenModels: ['GLM-5'] });
+  assert.strictEqual(livecfg.applyHiddenModels([{ id: 'glm-5' }]).length, 1);
+  // 空名单 / 非数组入参原样返回（隐藏是可选能力,故障不放大）
+  livecfg.Store({ hiddenModels: [] });
+  const rows = [{ id: 'glm-5' }];
+  assert.strictEqual(livecfg.applyHiddenModels(rows), rows);
+  assert.strictEqual(livecfg.applyHiddenModels('nope'), 'nope');
+});
+
 test('reqlog.record 联动（F6e）：开关关→不落 ip/ua，开→照常落', () => {
   reset();
   const file = path.join(reqlog.LOG_DIR, 'requests.jsonl');

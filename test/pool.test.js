@@ -122,6 +122,35 @@ test('软冷却有界退避:逐次翻倍、封顶;冷却中重复 429 不叠加'
   assert.equal(p.status('a').cooldown_until, before);
 });
 
+test('livecfg 热接线:hotSoftCooldown 门控下 softCooldownMs 覆盖软冷却基数', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dumate-pool-hotcfg-'));
+  const prevData = process.env.DUMATE_ADMIN_DATA;
+  process.env.DUMATE_ADMIN_DATA = dir;
+  const livecfg = require('../src/livecfg');
+  livecfg._resetForTest();
+  try {
+    livecfg.Store({ softCooldownMs: 100 });
+    const clock = makeClock();
+    // 门控池（生产单例形态）:livecfg >0 生效
+    const hot = createPool({ file: null, flushMs: 0, now: clock.now, hotSoftCooldown: true, softMaxMs: 100000 });
+    hot.noteError('a', { kind: 'soft' });
+    assert.equal(hot.status('a').cooldown_until - clock.now(), 100, '热配置基数 100ms 应生效');
+    // 未门控池（测试形态）:不读机器真实配置,仍用注入基数
+    const cold = createPool({ file: null, flushMs: 0, now: clock.now, softBaseMs: 1000, softMaxMs: 100000 });
+    cold.noteError('b', { kind: 'soft' });
+    assert.equal(cold.status('b').cooldown_until - clock.now(), 1000);
+    // 热配置归零/非法 = 回退内置默认
+    livecfg.Store({ softCooldownMs: 0 });
+    const hot2 = createPool({ file: null, flushMs: 0, now: clock.now, hotSoftCooldown: true });
+    hot2.noteError('c', { kind: 'soft' });
+    assert.equal(hot2.status('c').cooldown_until - clock.now(), 5 * 60 * 1000);
+  } finally {
+    livecfg._resetForTest();
+    if (prevData === undefined) delete process.env.DUMATE_ADMIN_DATA;
+    else process.env.DUMATE_ADMIN_DATA = prevData;
+  }
+});
+
 test('硬冷却:余额耗尽 → 冷却到下次签到窗口;成功不清硬冷却', () => {
   const clock = makeClock();
   const p = memPool(clock);

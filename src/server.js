@@ -27,6 +27,8 @@ const cors = require('./cors');
 const modelmap = require('./modelmap');
 const keysvc = require('./keys');
 const router = require('./upstream-router');
+// 热配置（F5）：/v1/models 与 /v1beta/models 输出侧的 hiddenModels 过滤
+const livecfg = require('./livecfg');
 // 启动接线（集成阶段）：池状态机恢复 / 热配置 / 出站代理 / 计量挂钩探活。
 // 保活排程不在这里启动——它由管理端进程经 task-scheduler 持有（见 boot.js）。
 const boot = require('./boot');
@@ -699,7 +701,7 @@ async function handleOpenAIModels(req, res) {
   const cfg = modelmap.load();
   const created = Math.floor(Date.now() / 1000);
   const upstream = new Set(cfg.upstream_models);
-  const data = cfg.exposed.map((id) => ({
+  let data = cfg.exposed.map((id) => ({
     id,
     object: 'model',
     created,
@@ -773,6 +775,11 @@ async function handleOpenAIModels(req, res) {
       }
     } catch (e) { /* 通道不可用，不列 */ }
   }
+
+  // hiddenModels 热配置（F5）：输出侧过滤。管理端 PUT 后下一次列表即新口径。
+  try {
+    data = livecfg.applyHiddenModels(data);
+  } catch (e) { /* 配置不可用按全量列表 */ }
 
   sendJSON(res, 200, { object: 'list', data });
 }
@@ -984,14 +991,15 @@ async function handleAnthropicCountTokens(req, res) {
 // ==================== Google Generative Language (v1beta) Compatible Endpoints ====================
 
 async function handleGoogleModels(req, res) {
-  sendJSON(res, 200, {
-    models: [
-      { name: 'models/glm-5', displayName: 'GLM-5', supportedGenerationMethods: ['generateContent', 'streamGenerateContent'] },
-      { name: 'models/model-text', displayName: 'DuMate text', supportedGenerationMethods: ['generateContent', 'streamGenerateContent'] },
-      { name: 'models/claude-3-5-sonnet-20241022', displayName: 'Claude 3.5 Sonnet (proxy)', supportedGenerationMethods: ['generateContent', 'streamGenerateContent'] },
-      { name: 'models/gpt-4o', displayName: 'GPT-4o (proxy)', supportedGenerationMethods: ['generateContent', 'streamGenerateContent'] },
-    ],
-  });
+  const models = [
+    { name: 'models/glm-5', displayName: 'GLM-5', supportedGenerationMethods: ['generateContent', 'streamGenerateContent'] },
+    { name: 'models/model-text', displayName: 'DuMate text', supportedGenerationMethods: ['generateContent', 'streamGenerateContent'] },
+    { name: 'models/claude-3-5-sonnet-20241022', displayName: 'Claude 3.5 Sonnet (proxy)', supportedGenerationMethods: ['generateContent', 'streamGenerateContent'] },
+    { name: 'models/gpt-4o', displayName: 'GPT-4o (proxy)', supportedGenerationMethods: ['generateContent', 'streamGenerateContent'] },
+  ];
+  // hiddenModels 热配置（F5）：与 /v1/models 同一过滤口径（applyHiddenModels
+  // 自剥 'models/' 前缀比对裸名，读不到配置时原样返回）
+  sendJSON(res, 200, { models: livecfg.applyHiddenModels(models) });
 }
 
 async function handleGoogleGenerateContent(req, res, isStream, pathModel) {
