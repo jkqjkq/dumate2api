@@ -141,6 +141,44 @@ const routes = [
       return sendJSON(res, 200, r);
     },
   },
+  // ── keepalive 保活与余额联动（施工包 B / GAP F2 的管理面）──
+  // 排程器本体在本进程（task-scheduler.schedule() 唤醒 keepalive.schedule()），
+  // 配置端点必须与排程同进程，改完 configure() 内部会立刻重排。
+  {
+    method: 'GET',
+    path: '/keepalive',
+    handler: ({ res }) => {
+      const keepalive = require('../../keepalive');
+      return sendJSON(res, 200, { ok: true, ...keepalive.snapshot() });
+    },
+  },
+  {
+    method: 'POST',
+    path: '/keepalive',
+    handler: ({ res, body }) => {
+      const keepalive = require('../../keepalive');
+      try {
+        keepalive.configure(body || {});
+      } catch (e) {
+        return sendJSON(res, 400, { ok: false, error: e.message });
+      }
+      const s = keepalive.snapshot();
+      require('../../admin/auth').audit('admin', 'keepalive_config',
+        s.enabled ? 'on' : 'off', `${s.hour}:${String(s.minute).padStart(2, '0')} jitter=${s.jitter_minutes}m`);
+      return sendJSON(res, 200, { ok: true, ...s });
+    },
+  },
+  {
+    // 立即跑一轮完整闭环（保活刷新 → 签到 → 查余额 → 解冻）
+    method: 'POST',
+    path: '/keepalive/run-now',
+    handler: async ({ res }) => {
+      const keepalive = require('../../keepalive');
+      const r = await keepalive.runOnce('manual');
+      require('../../admin/auth').audit('admin', 'keepalive_run', '', `${r.accounts || 0} 号，解冻 ${r.unfrozen_count || 0}`);
+      return sendJSON(res, 200, r);
+    },
+  },
 ];
 
 module.exports = { routes, schedule, state };

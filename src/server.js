@@ -27,6 +27,9 @@ const cors = require('./cors');
 const modelmap = require('./modelmap');
 const keysvc = require('./keys');
 const router = require('./upstream-router');
+// 启动接线（集成阶段）：池状态机恢复 / 热配置 / 出站代理 / 计量挂钩探活。
+// 保活排程不在这里启动——它由管理端进程经 task-scheduler 持有（见 boot.js）。
+const boot = require('./boot');
 
 const PROXY_PORT = parseInt(process.env.DUMATE2API_PORT || '9080', 10);
 const PROXY_HOST = process.env.DUMATE2API_HOST || '127.0.0.1';
@@ -1723,6 +1726,9 @@ async function start() {
   log('Starting dumate2api...');
   log(`Proxy will listen on ${PROXY_HOST}:${PROXY_PORT}`);
 
+  // 运行时模块启动接线（pool 恢复 / livecfg / 出站代理 / 计量探活），见 boot.js
+  try { boot.init({ log }); } catch (e) { log(`⚠ 启动接线异常（不阻断监听）: ${e.message}`); }
+
   // 只用网页凭证（默认）时跳过初始发现——桌面链路根本不参与，
   // 这次探测（要跑 PowerShell 查询，实测约 3 秒）纯属浪费启动时间。
   const sourceEnv = String(process.env.DUMATE_DUMATE_SOURCE || '').trim();
@@ -1866,6 +1872,12 @@ async function start() {
     log('  Codex:       Base URL = http://127.0.0.1:' + PROXY_PORT + '/v1' + (REQUIRE_KEY ? ', API Key = <你的 DUMATE2API_KEY 或登记 key>' : ', API Key = nokey'));
   });
 }
+
+// 优雅停止（集成阶段）：信号到来时把池状态与计量分桶刷盘再退。
+// SIGINT/SIGTERM 被接管后默认的立即退出没有了，shutdown 里显式 exit。
+process.once('SIGINT', () => { log('收到 SIGINT，刷盘退出…'); boot.shutdown('SIGINT', true); });
+process.once('SIGTERM', () => { log('收到 SIGTERM，刷盘退出…'); boot.shutdown('SIGTERM', true); });
+process.once('exit', () => { try { boot.shutdown('exit'); } catch (e) { /* 退出路径不再抛 */ } });
 
 start().catch(err => {
   console.error('Fatal:', err);

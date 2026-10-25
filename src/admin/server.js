@@ -28,6 +28,10 @@ const { routes: webAccountsRoutes } = require('./routes/accounts');
 const { routes: checkinRoutes } = require('./routes/checkin');
 const autotask = require('./routes/autotask');
 const taskScheduler = require('../task-scheduler');
+// 启动接线（集成阶段）：池状态机 / 热配置 / 计量挂钩与本进程优雅停止。
+// 保活排程随下方 taskScheduler.schedule() 在本进程唤醒（task-scheduler.js 内部
+// 调 keepalive.schedule()），网关进程不排——见 ../boot.js 文件头。
+const boot = require('../boot');
 
 const PORT = parseInt(process.env.DUMATE_ADMIN_PORT || '9081', 10);
 const HOST = process.env.DUMATE_ADMIN_HOST || '127.0.0.1';
@@ -177,6 +181,12 @@ function start() {
   autotask.schedule();
   // 任务轮询定时器同样只活在进程内，重启后按保存的配置重新排期
   taskScheduler.schedule();
+  // 运行时模块接线（池恢复 / livecfg / 计量探活），失败不阻断管理端启动
+  try { boot.init({ log }); } catch (e) { log(`⚠ 启动接线异常（不阻断启动）: ${e.message}`); }
+  // 优雅停止：保活排程与进行中的一轮、池状态、计量分桶落盘后再退
+  process.once('SIGINT', () => { log('收到 SIGINT，刷盘退出…'); boot.shutdown('SIGINT', true); });
+  process.once('SIGTERM', () => { log('收到 SIGTERM，刷盘退出…'); boot.shutdown('SIGTERM', true); });
+  process.once('exit', () => { try { boot.shutdown('exit'); } catch (e) { /* 退出路径不再抛 */ } });
   log('dumate2api admin starting...');
 
   if (process.argv.includes('--reset-admin')) {
