@@ -9,6 +9,7 @@ const path = require('path');
 const crypto = require('crypto');
 const filelock = require('./filelock');
 const fileperm = require('./fileperm');
+const { normalizeProxyUrl, redactProxyUrl } = require('./proxy-agent');
 
 const DATA_DIR = process.env.DUMATE_ADMIN_DATA || path.resolve(__dirname, '..', 'data');
 const FILE = 'web-accounts.json';
@@ -105,6 +106,9 @@ function toPublic(a) {
     cookie: undefined,
     cookie_len: (a.cookie || '').length,
     cookie_summary: cookieSummary(a.cookie),
+    // proxy 同 cookie 纪律：可能带 user:pass，对外只出脱敏形态（连接用
+    // 原始记录走 load()/getRaw()，见 proxy-agent.js 文件头）
+    proxy: a.proxy ? redactProxyUrl(a.proxy) : '',
     // 账号存活天数（从 created_at 算到今天）。仪表盘账号健康快照用——
     // 与「会员剩余天数」是两回事，那个是额度有效期，这是账号用了多久。
     // 没有 created_at（很早以前加的账号）就 null，界面显示 —
@@ -152,6 +156,16 @@ function getRaw(id) {
   return load().accounts.find((a) => a.id === Number(id)) || null;
 }
 
+/**
+ * 账号出站代理字段（施工包 E）：空串=继承全局默认（DUMATE_PROXY /
+ * setGlobalProxy），非空=按账号覆盖。校验与归一化收敛在 proxy-agent.js，
+ * 保存时就暴露配置错误，而不是等请求打出去才发现。
+ */
+function normalizeProxyField(v) {
+  if (v === undefined || v === null || v === '') return '';
+  return normalizeProxyUrl(String(v));
+}
+
 function create(opts = {}) {
   // 跨进程互斥（filelock.js）：签到/积分回写（管理端）与网关网页链路并发改
   // 同一个文件，无锁 RMW 会互相覆盖。锁内先失效缓存再重读。
@@ -181,6 +195,7 @@ function create(opts = {}) {
       created_at: now,
       updated_at: now,
       enabled: opts.enabled !== false,
+      proxy: normalizeProxyField(opts.proxy),
       // 上游返回的身份信息，首次调接口后回填
       uid: '',
       nickname: '',
@@ -219,6 +234,7 @@ function update(id, patch = {}) {
     if (!a) return null;
     if (patch.name !== undefined) a.name = String(patch.name).trim() || a.name;
     if (patch.enabled !== undefined) a.enabled = !!patch.enabled;
+    if (patch.proxy !== undefined) a.proxy = normalizeProxyField(patch.proxy);
     if (patch.cookie !== undefined) {
       const c = normalizeCookie(patch.cookie);
       const sum = cookieSummary(c);
