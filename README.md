@@ -1,5 +1,7 @@
 # dumate2api
 
+> 架构与代码详解见 [ARCHITECTURE.md](ARCHITECTURE.md)。
+
 ![license](https://img.shields.io/badge/license-MIT-green)
 ![node](https://img.shields.io/badge/node-%3E%3D18-brightgreen)
 ![platform](https://img.shields.io/badge/platform-Windows-blue)
