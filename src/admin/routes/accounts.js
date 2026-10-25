@@ -10,6 +10,8 @@ const taskScheduler = require('../../task-scheduler');
 const records = require('../../records');
 const ledger = require('../../checkin-ledger');
 const pointsAgg = require('../../points-agg');
+// 余额变动流水（施工包 C）：签到与手动刷新查到的余额都在这里留痕
+const balanceHist = require('../../balance-hist');
 const { sendJSON } = require('../router');
 
 // 登录链接。百度 SSO 的登录页，登录后 cookie 落在 .baidu.com 域，
@@ -228,6 +230,11 @@ async function doCheckin(account) {
     const grant = await recordAutoGrant(account, account._pointsBefore);
     if (grant) ret.auto_grant = grant;
 
+    // 余额流水观测（web 键位 = 裸 String(id)）：已签到分支的当前值也是一次
+    // 真实观测，基线比对留给 balance-hist
+    if (Number.isFinite(cur)) {
+      try { balanceHist.observe({ account: String(account.id), channel: 'web', balance: cur, source: 'checkin' }); } catch (e) { /* 记账失败不影响签到 */ }
+    }
     records.append({
       type: 'checkin', account_id: account.id, account: accounts.displayName(account),
       ok: true, result: 'already', total_times: info.total_times,
@@ -276,6 +283,10 @@ async function doCheckin(account) {
       channel: 'dumate', account_id: account.id, account: accounts.displayName(account),
       at: Date.now(), credits: pd.delta, source: 'claim',
     });
+    // 余额流水观测（web 键位 = 裸 String(id)）：签到后的真实余额
+    if (Number.isFinite(pd.after)) {
+      try { balanceHist.observe({ account: String(account.id), channel: 'web', balance: pd.after, source: 'checkin' }); } catch (e) { /* 记账失败不影响签到 */ }
+    }
   }
   return {
     id: account.id, name: accounts.displayName(account), ok: res.ok, error: res.error, info,
@@ -1168,6 +1179,8 @@ const routes = [
       if (!r.ok) return sendJSON(res, 502, { ok: false, error: r.error, expired: !!r.expired });
       accountPool.setCredits(acc.id, r.left, r.total);
       const { unfrozen } = accountPool.reenableIfCredits(acc.id, r.left, r.total);
+      // 余额流水观测（C 包挂钩）：手动刷新点，web 键位 = 裸 String(id)
+      try { balanceHist.observe({ account: String(acc.id), channel: 'web', balance: r.left, source: 'manual' }); } catch (e) { /* 记账失败不影响刷新 */ }
       // 余额顺手回写账号记录（仪表盘复用现有缓存口径）
       accounts.patchInternal(acc.id, {
         points: { left: r.left, total: r.total, used: r.used },

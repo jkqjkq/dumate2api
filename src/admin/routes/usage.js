@@ -9,6 +9,7 @@
 const reqlog = require('../../reqlog');
 const accounts = require('../../accounts');
 const web = require('../../dumate-web');
+const usageAgg = require('../../usage-agg');
 const { normalize, belongs, effChannel, LABELS } = require('../../channels');
 const { sendJSON } = require('../router');
 
@@ -252,6 +253,24 @@ const routes = [
             ? 'TRAE Work 的积分在自己的池子里（见仪表盘的 TRAE 额度卡），这里只统计经网关转发的 Token 与请求数。'
             : 'Token 与请求数来自本地网关日志；积分消耗来自上游计费记录，两者口径不同（不同模型单价不同）。',
       });
+    },
+  },
+  {
+    // 长期用量分桶（施工包 C / GAP F3）：usage-agg 的聚合快照。与 /overview 的
+    // 区别是数据源——这里读分桶账本（明细滚走后趋势仍在），不现扫 jsonl。
+    // 参数：hours（回看小时数）/ from / to（毫秒）/ channel（精确匹配）。
+    method: 'GET',
+    path: '/agg',
+    handler: ({ res, req }) => {
+      const q = (k) => decodeURIComponent((req.url.match(new RegExp(`[?&]${k}=([^&]*)`)) || [])[1] || '');
+      const snap = usageAgg.snapshot({
+        hours: parseInt(q('hours'), 10) || 0,
+        from: Number(q('from')) || 0,
+        to: Number(q('to')) || 0,
+        channel: q('channel') || '',
+      });
+      require('../auth').audit('admin', 'usage_agg_read', q('channel') || 'all', `hours=${q('hours') || 'all'}`);
+      return sendJSON(res, 200, { ok: true, ...snap });
     },
   },
 ];

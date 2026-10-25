@@ -8,6 +8,8 @@ const fs = require('fs');
 const path = require('path');
 const discovery = require('../../discovery');
 const pointsAgg = require('../../points-agg');
+// 余额变动流水（施工包 C / GAP F4）：时间线/曲线/速率三个只读视图
+const balanceHist = require('../../balance-hist');
 const { sendJSON } = require('../router');
 
 const CACHE_TTL_MS = 60 * 1000;
@@ -228,6 +230,55 @@ const routes = [
         no_credential: withPoints.filter((a) => a.state === 'no_credential').length,
         unknown: withPoints.filter((a) => a.state === 'unknown').length,
       });
+    },
+  },
+  {
+    // 余额时间线（施工包 C / GAP F6d）：流水行最新在前。参数：account
+    // （池 uid：web 裸 id，其余 channel:id）/ source / from / to / limit。
+    method: 'GET',
+    path: '/balance-timeline',
+    handler: ({ res, req }) => {
+      const q = (k) => decodeURIComponent((req.url.match(new RegExp(`[?&]${k}=([^&]*)`)) || [])[1] || '');
+      const r = balanceHist.timeline({
+        account: q('account') || null,
+        source: q('source') || null,
+        from: Number(q('from')) || 0,
+        to: Number(q('to')) || 0,
+        limit: parseInt(q('limit'), 10) || 200,
+      });
+      require('../auth').audit('admin', 'balance_timeline_read', q('account') || 'all', `${r.rows.length} 行`);
+      return sendJSON(res, 200, { ok: true, ...r });
+    },
+  },
+  {
+    // 余额曲线：升序采样点，超点数等步长降采样（画图用）。
+    method: 'GET',
+    path: '/balance-curve',
+    handler: ({ res, req }) => {
+      const q = (k) => decodeURIComponent((req.url.match(new RegExp(`[?&]${k}=([^&]*)`)) || [])[1] || '');
+      const r = balanceHist.curve({
+        account: q('account') || null,
+        from: Number(q('from')) || 0,
+        to: Number(q('to')) || 0,
+        maxPoints: parseInt(q('maxPoints'), 10) || 400,
+      });
+      require('../auth').audit('admin', 'balance_curve_read', q('account') || 'all', `${r.total} 点`);
+      return sendJSON(res, 200, { ok: true, ...r });
+    },
+  },
+  {
+    // 消耗速率：窗口内带符号 Delta 汇总（consumed / gained / 每小时）。
+    method: 'GET',
+    path: '/balance-rate',
+    handler: ({ res, req }) => {
+      const q = (k) => decodeURIComponent((req.url.match(new RegExp(`[?&]${k}=([^&]*)`)) || [])[1] || '');
+      const hours = parseInt(q('hours'), 10) || 0;
+      const r = balanceHist.rate({
+        account: q('account') || null,
+        windowMs: hours > 0 ? hours * 3600000 : (Number(q('windowMs')) || 86400000),
+      });
+      require('../auth').audit('admin', 'balance_rate_read', q('account') || 'all', `窗口 ${Math.round(r.window_ms / 3600000)}h`);
+      return sendJSON(res, 200, { ok: true, ...r });
     },
   },
 ];

@@ -51,6 +51,9 @@
 //   DUMATE_ADMIN_DATA                                数据目录（store 读取）
 const { readJSON, writeJSON } = require('./admin/store');
 const accounts = require('./accounts');
+// 余额变动流水（施工包 C）：保活查到的每个余额都过一遍 observe——
+// 变动留痕、首见建基线，面板余额时间线/曲线的数据源就在这里。
+const balanceHist = require('./balance-hist');
 
 const CONFIG_FILE = 'keepalive.json';
 const DEFAULT_HOUR = parseInt(process.env.DUMATE_KEEPALIVE_HOUR || '22', 10);
@@ -432,10 +435,16 @@ async function balancePhase(units, cfg, token) {
       const u = units[i];
       let b;
       try { b = await u.ad.balance(u.a); } catch (e) { b = { ok: false, error: e.message }; }
+      const remain = b && typeof b.remain === 'number' && Number.isFinite(b.remain) ? b.remain : null;
+      // 余额流水观测（C 包挂钩）：查到了就记，变动与否由 balance-hist 的
+      // 基线比对决定；uid 已是统一键位（web 裸 id，其余 channel:id）
+      if (b && b.ok && remain != null) {
+        try { balanceHist.observe({ account: u.uid, channel: u.ad.channel, balance: remain, source: 'keepalive' }); } catch (e) { /* 记账失败不影响保活 */ }
+      }
       rows[i] = {
         channel: u.ad.channel, uid: u.uid, name: u.name,
         ok: !!(b && b.ok),
-        remain: b && typeof b.remain === 'number' && Number.isFinite(b.remain) ? b.remain : null,
+        remain,
         error: (b && b.error) || '',
       };
       if (!(await sleepCtx(cfg.per_account_delay_ms, token))) return;
