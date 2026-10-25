@@ -8,6 +8,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const filelock = require('./filelock');
+const fileperm = require('./fileperm');
 
 const DATA_DIR = process.env.DUMATE_ADMIN_DATA || path.resolve(__dirname, '..', 'data');
 const FILE = 'web-accounts.json';
@@ -37,7 +38,10 @@ function save(data) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
   const target = filePath();
   const tmp = `${target}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(data, null, 2), 'utf8');
+  // 权限收紧（fileperm.js）：cookie 明文落盘是既有取舍（上游要原样取用），
+  // 至少把文件收窄到当前用户，不让同机其他账户直接读到
+  fs.writeFileSync(tmp, JSON.stringify(data, null, 2), { encoding: 'utf8', mode: 0o600 });
+  fileperm.harden(tmp);
   fs.renameSync(tmp, target);
   cache = { mtime: mtimeOf(), data };
   return data;

@@ -16,6 +16,7 @@ const crypto = require('crypto');
 const c = require('./constants');
 const { explainError } = require('../errtext');
 const filelock = require('../filelock');
+const fileperm = require('../fileperm');
 
 const FILE = 'qwenwork-accounts.json';
 
@@ -45,7 +46,9 @@ function save(data) {
   fs.mkdirSync(dataDir(), { recursive: true });
   const target = filePath();
   const tmp = `${target}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(data, null, 2), 'utf8');
+  // 权限收紧（fileperm.js）：token 与明文手机号只留在当前用户可读的文件里
+  fs.writeFileSync(tmp, JSON.stringify(data, null, 2), { encoding: 'utf8', mode: 0o600 });
+  fileperm.harden(tmp);
   fs.renameSync(tmp, target);
   cache = { mtime: fs.statSync(target).mtimeMs, data };
   return data;

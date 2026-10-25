@@ -9,6 +9,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const filelock = require('./filelock');
+const fileperm = require('./fileperm');
 
 const DATA_DIR = process.env.DUMATE_ADMIN_DATA || path.resolve(__dirname, '..', 'data');
 const FILE = 'keys.json';
@@ -39,7 +40,10 @@ function save(data) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
   const target = filePath();
   const tmp = `${target}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(data, null, 2), 'utf8');
+  // 权限收紧（fileperm.js）：key 哈希与名单不属于公开数据，POSIX 创建即
+  // 0600，Windows 收紧目录 ACL（每进程一次）
+  fs.writeFileSync(tmp, JSON.stringify(data, null, 2), { encoding: 'utf8', mode: 0o600 });
+  fileperm.harden(tmp);
   fs.renameSync(tmp, target);
   cache = { mtime: mtimeOf(), data };
   return data;

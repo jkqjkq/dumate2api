@@ -1,6 +1,7 @@
 // src/admin/store.js - JSON / JSONL 持久化（对应参考 server/db.py）
 const fs = require('fs');
 const path = require('path');
+const fileperm = require('../fileperm');
 
 const ROOT = path.resolve(__dirname, '..', '..');
 const DATA_DIR = process.env.DUMATE_ADMIN_DATA || path.join(ROOT, 'data');
@@ -24,16 +25,23 @@ function readJSON(name, fallback) {
 
 // 原子写：先落 .tmp 再 rename。直接 writeFileSync 一旦中途被 kill，
 // 下次启动读到半个 JSON，用户表/配置全丢且没有可恢复的副本。
+// 权限收紧（fileperm.js）：这里写的有口令哈希（admin-users.json）与会话
+// 签名密钥（admin.secret），POSIX 创建即 0600，Windows 收紧目录 ACL。
 function writeJSON(name, data) {
   const target = dataPath(name);
   const tmp = `${target}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(data, null, 2), 'utf8');
+  fs.writeFileSync(tmp, JSON.stringify(data, null, 2), { encoding: 'utf8', mode: 0o600 });
+  fileperm.harden(tmp);
   fs.renameSync(tmp, target);
   return data;
 }
 
 function appendJSONL(name, obj) {
-  fs.appendFileSync(dataPath(name), `${JSON.stringify(obj)}\n`, 'utf8');
+  const target = dataPath(name);
+  fs.appendFileSync(target, `${JSON.stringify(obj)}\n`, 'utf8');
+  // 审计流水含来源 IP 与操作者，收窄到当前用户（Windows 上仅首次触发
+  // 目录 ACL 收紧，开销可忽略）
+  fileperm.harden(target);
 }
 
 function readJSONL(name, opts = {}) {
