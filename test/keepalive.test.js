@@ -207,6 +207,25 @@ test('ctx 可取消：stop() 立即中断进行中的一轮', async () => {
   assert.strictEqual(keepalive.state.running, false);
 });
 
+test('幂等：进行中的一轮期间重复触发不双跑（already_running）', async () => {
+  let refreshCount = 0;
+  const adapters = [fakeAdapter({
+    accounts: [{ id: 1 }],
+    refresh: async () => {
+      refreshCount++;
+      await new Promise((r) => setTimeout(r, 150));
+      return { ok: true };
+    },
+  })];
+  const p1 = keepalive.runOnce('test', { adapters, pool: { entries: () => [] }, per_account_delay_ms: 0, checkin: false });
+  // 第一轮仍在跑（refresh 还没返回）时再触发:必须整轮跳过,不得驱动第二轮
+  const second = await keepalive.runOnce('test', { adapters, pool: { entries: () => [] }, per_account_delay_ms: 0, checkin: false });
+  assert.deepStrictEqual(second, { skipped: 'already_running' });
+  await p1;
+  assert.strictEqual(refreshCount, 1, '重复触发不得驱动第二轮');
+  assert.strictEqual(keepalive.state.running, false);
+});
+
 test('sleepCtx：等满返回 true，取消立即返回 false', async () => {
   const token = keepalive.internals.makeToken();
   const t0 = Date.now();
