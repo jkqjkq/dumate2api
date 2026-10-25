@@ -94,9 +94,13 @@ async function runTask(account, task) {
       max_tokens: 64,
     });
     modelMs = Date.now() - t0;
+    // 任务链路也喂状态机:任务与用户转发用同一批账号,这里绕过了故障转移层,
+    // 成败必须显式喂入（401 进防误杀计数、5xx 进熔断、成功清计数）
     if (!r.ok) {
+      pool.markFailure(account.id, { status: r.status || 0, message: r.error || `HTTP ${r.status}`, model: 'model-text' });
       return { ok: false, task_id: task.task_id, title: task.title, error: `发消息失败：${r.error || ('HTTP ' + r.status)}`, model_ms: modelMs, ms: Date.now() - startedAt };
     }
+    pool.markSuccess(account.id);
     via = 'query-then-complete';
   }
 

@@ -484,5 +484,7 @@ function forget(id) {
 module.exports = {
   getToken, callWithFailover, callStreamWithFailover, callModel, callModelStream,
   pick, snapshot, probe, forget,
+  // 状态机喂入（task-runner 等绕过故障转移层的直连调用方也要喂,漏喂=状态机失明）
+  markSuccess, markFailure,
   GATEWAY_HOST, GATEWAY_PREFIX, stateOf,
 };
