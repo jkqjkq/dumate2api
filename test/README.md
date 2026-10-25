@@ -6,7 +6,7 @@
 ## 怎么跑
 
 ```bash
-npm test            # = node --test "test/*.test.js"，只跑 *.test.js
+npm test            # = node --test "test/*.test.js" "test/unit/*.test.js"（顶层 + test/unit/）
 npm run test:smoke  # 真机冒烟（smoke.js，需 9080 活网关、耗真实积分，不属自动化门禁）
 ```
 
@@ -28,7 +28,8 @@ node --test test/filelock.test.js
 | `test/smoke.js`、`test/verify-*.js`、`test/probe-*.js` | 真机门禁与探针（**需活网关或真机凭证**） | 手动 / npm run test:smoke |
 | `test/_archive/`、`test/mock-upstream.js` | 存档与常驻 mock 进程 | 不属单测 |
 
-注意：新单测必须落在 `test/` 顶层且以 `.test.js` 结尾。**不要**用
+注意：新单测落在 `test/` 顶层或 `test/unit/` 且以 `.test.js` 结尾（两处都在
+`npm test` 的 glob 里）。**不要**用
 `node --test test/`（显式目录形态会把目录里所有 .js 当测试执行，
 smoke/verify 探针会被误跑——它们出网耗积分）。
 

@@ -144,8 +144,10 @@ Node 自动补位——两个实测坑都写在头注释）。
 
 ## 5. 测试基座
 
-`npm test` = `node --test "test/*.test.js"`（**必须用 glob 形态**——显式目录
-形态会把 smoke/verify 探针一起执行）。约定与夹具见 `test/README.md`：
+`npm test` = `node --test "test/*.test.js" "test/unit/*.test.js"`（**必须用
+glob 形态**——显式目录形态会把 smoke/verify 探针一起执行；`test/unit/`
+是后补进 glob 的，D 包 23+ 例曾因漏接线从未被跑过）。约定与夹具见
+`test/README.md`：
 
 - `test/<模块>.test.js`：离线单测（node:test + assert/strict），新模块随包 TDD；
 - `test/helpers/`：`tmpdata`（临时 data 目录 + 模块重载——env 在 require 时
@@ -153,7 +155,11 @@ Node 自动补位——两个实测坑都写在头注释）。
 - `test/smoke.js`（`npm run test:smoke`）与 `verify-*` / `probe-*`：真机门禁，
   需活网关、耗真实积分，**不属自动化门禁**；
 - 存量模块已覆盖：cors / filelock / jsonl / fileperm / offthread（安全修复
-  五件套）+ points-agg / errtext / upstream-errors / cosy / model-info。
+  五件套）+ points-agg / errtext / upstream-errors / cosy / model-info；
+  新模块随包同交付：pool / sticky / keepalive / usage-agg / balance-hist /
+  reqlog-hook / livecfg / qoder-grants / upstream-router / proxy-agent，
+  另有 test/integration.test.js 集成验收（启动链 / 选号状态机 / 代理挂接
+  端到端）。
 
 ## 6. 文档地图
 
