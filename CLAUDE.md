@@ -102,6 +102,40 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 `node test/verify-qoder-read-idle.js`（5 项：沉默被掐、正常流不误杀、全零走首字节、
 postStream 同语义、`0` 关闭）。
 
+**限流是「稍后再来」，不是「服务坏了」——按 429 处置，绝不能进熔断（2026-10-27 修，可用性级）。**
+`upstream-errors.classify` 原来只认 HTTP 429 为 `soft`，而 Qoder 的限流是
+**HTTP 403 + 信封 `code 10605`**（`subCode` 为 `RESOURCE_LIMIT` / `CALL_COUNT_LIMIT`，
+带 `isQueued:true` / `serviceAvailable:false`），落进了「其余 403」→ `breaker` 分支。
+熔断的退避是 **30 分钟起步、每次翻倍到 6 小时**，而限流条件上游自己说得很清楚：
+`retryAfterSeconds:30` / `waitTime:66`。实测放大效果（离线复现）：两个账号各被限流
+3 次 → `pick()` 连续返回 `null`，整个池被封 **30 分钟**，期间所有请求都是
+「Qoder 没有可用账号」——这就是用户报的「Qoder 用不了」，而账号本身完全健康。
+
+四条不变量，改动时别破坏：
+
+1. **判据先于状态码**：`isThrottle()` 用**完整错误串**匹配（限流信号常藏在嵌套 JSON
+   的第 150 字符之后，按 `message.slice(0,200)` 判会时灵时不灵），命中即 `kind:'soft'`，
+   **必须排在 401/402/403/5xx 那些分支之前**。`qoder upstream read idle` 同样是限流
+   （排队挂起的另一种形态），一并算进来。
+2. **冷却时长按上游给的来**（`throttleRetryMs`，`retryAfterSeconds` 与 `waitTime` 取大，
+   因为后者才是队列里的实际预估）；取不到才回落 5 分钟基数。夹在 `[1s, softMaxMs]`。
+   按上游时长冷却时**不递增 `soft_streak`**——时长是上游定的，不是「又超速一次」的证据。
+3. **403 的限流必须可换号**（`qoder/index.js` 的 `retryable`）：排队粒度是
+   **(账号, 模型)**，实测同一分钟一个账号的 `dfmodel` 排 2410 位、另一个账号的
+   `gfmodel` 直接 200。旧判据只看一组模型/权限文案，限流落到「不可换号」分支，
+   第二个账号白放着。
+4. **下游拿到 429，不是 403/502/503**：Codex / Claude Code 对 429 会自动退避重试，
+   对 403/502 只当硬失败。全部尝试都是限流、或池里只剩限流软冷却时，都回 429
+   （`channelPool.availability()` 用 `softOnly` + `nextInMs` 区分「限流冷却」与
+   「禁用/熔断/在途满」，后者仍是 503）。
+
+离线验证：`node test/verify-qoder-throttle.js`（27 项：限流识别、`retryAfterSeconds`/
+`waitTime` 取值、classify 分类边界、池不再放大成熔断、30 秒后恢复、换号、下游 429）。
+顺带修掉 `test/verify-qoder-error-surface.js` 的非隔离问题：它会造 429/5xx 惩罚态，
+原来写的是真实 `data/pool-state.json`，429 那条把账号冷却 5 分钟后，后面所有用例都
+选不到账号（**该文件在修之前就已经是 11 项全红**）。现在它自带 `DUMATE_POOL_STATE`
+临时文件、每个用例前 `pool.revive()` 重置。
+
 **`cosy.encode` 是同步的，它一慢就「假死」整个网关（2026-10-03 修，性能级）。**
 自定义 base64 编码在 `runOnce` 里**直接同步调用**，所以它的耗时会**阻塞事件循环**：
 期间 `/health` 不响应、其他通道的请求全部排队、进程 CPU 跑满却**不崩也不打日志**。
@@ -520,7 +554,7 @@ DUMATE2API_PORT=9082 node src/server.js
 `account-context` 交叉验证还原真实 daily、真实归零如实上报并标 retried、
 免费扣完转付费不误判）。
 
-**Qoder 专项**（两个都离线，不需要起服务）：
+**Qoder 专项**（都离线，不需要起服务）：
 
 - `node test/verify-qoder-cosy.js`——签名算法，用**参考实现（Go）生成的确定性测试向量**
   逐字节比对（Encode / AES-128-CBC / MD5 / 身份 JSON 的 key 字母序），22 项。
@@ -531,6 +565,13 @@ DUMATE2API_PORT=9082 node src/server.js
 - `node test/verify-qoder-grants.js`——积分批次账本：到期时刻推导（RELATIVE_DAYS /
   缺字段 / 领取失败）、幂等（同 grantId 不重复写）、时间窗与账号过滤、正好到期的边界、
   「amount 是领取额不是剩余额」的数据缺口。
+- `node test/verify-qoder-throttle.js`——限流处置：`isThrottle` 识别、`retryAfterSeconds`/
+  `waitTime` 取大、classify 分类边界（限流→soft，模型不可用仍是 model）、池不再把 30 秒
+  放大成 30 分钟、重试时刻到点即恢复、403 限流换号、全部限流时下游 429。
+- `node test/verify-qoder-read-idle.js`——读空闲超时（见上文）。
+- `node test/verify-qoder-error-surface.js`——上游失败必须报错而不是静默空回答。
+  **自带临时池文件**（`DUMATE_POOL_STATE`）：它会造 429/5xx 惩罚态，写真实池会让
+  后续用例选不到账号。
 
 **`node test/qoder-cli.js` 是不开管理端也能验证 Qoder 通道的入口**（与 `traework-login.js` 同定位）：
 `login [cn|global]` 生成授权链接 → `status` → `models`（带倍率排序）→ `quota` →

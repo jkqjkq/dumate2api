@@ -48,6 +48,21 @@ test('classify: 429 → soft', () => {
   assert.equal(classify({ status: 429, message: 'rate limited' }).kind, 'soft');
 });
 
+// 上游主动给的排队限流（COSY 通道的 10605）本质是 429 语义，不是服务故障。
+// 旧实现落进「其余 403」→ breaker，30 分钟起步的退避把上游 30 秒的条件
+// 放大成本地半小时封禁（实测两个账号各被限流 3 次即全池不可用）。
+test('classify: COSY 限流（403 + 10605/RESOURCE_LIMIT）→ soft，且带 retryAfterMs', () => {
+  const msg = 'qoder 403: {"code":"10605","message":"{\\"isQueued\\":true,\\"retryAfterSeconds\\":30,\\"subCode\\":\\"RESOURCE_LIMIT\\"}"}';
+  const cls = classify({ status: 403, message: msg, model: 'dfmodel' });
+  assert.equal(cls.kind, 'soft');
+  assert.equal(cls.retryAfterMs, 30000);
+  // read idle（排队挂起的另一种形态）同样是 soft
+  assert.equal(classify({ status: 0, message: 'qoder upstream read idle (120000ms)' }).kind, 'soft');
+  // 不带限流信号的 403 仍然是 breaker，模型不可用仍然是 model
+  assert.equal(classify({ status: 403, message: 'forbidden' }).kind, 'breaker');
+  assert.equal(classify({ status: 403, message: 'Model is not available for this user' }).kind, 'model');
+});
+
 test('classify: 401 → session_dead（防误杀类）', () => {
   assert.equal(classify({ status: 401, message: 'token expired' }).kind, 'session_dead');
 });
@@ -120,6 +135,32 @@ test('软冷却有界退避:逐次翻倍、封顶;冷却中重复 429 不叠加'
   const before = p.status('a').cooldown_until;
   p.noteError('a', { kind: 'soft' });
   assert.equal(p.status('a').cooldown_until, before);
+});
+
+test('软冷却:上游给了 retryAfterMs 就按它,不套基数、不递增 streak', () => {
+  const clock = makeClock();
+  const p = memPool(clock, { softBaseMs: 300_000, softMaxMs: 7_200_000 });
+
+  p.noteError('a', { kind: 'soft', message: 'queue', retryAfterMs: 30_000 });
+  assert.equal(p.status('a').cooldown_until - clock.now(), 30_000, '应按上游的 30s 冷却');
+  assert.equal(p.status('a').soft_streak, 0, '上游定的时长不是「又超速一次」的证据');
+  assert.equal(p.status('a').cool_kind, 'soft');
+
+  // 到点即恢复
+  clock.advance(30_001);
+  assert.equal(p.pick(['a']), 'a');
+
+  // 过大/过小的值被夹进 [1s, softMaxMs]
+  const p2 = memPool(clock, { softBaseMs: 300_000, softMaxMs: 7_200_000 });
+  p2.noteError('b', { kind: 'soft', message: 'queue', retryAfterMs: 1 });
+  assert.equal(p2.status('b').cooldown_until - clock.now(), 1_000);
+  p2.noteError('c', { kind: 'soft', message: 'queue', retryAfterMs: 99 * 3600_000 });
+  assert.equal(p2.status('c').cooldown_until - clock.now(), 7_200_000);
+
+  // 没有 retryAfterMs 时仍走基数（429 的老行为不变）
+  const p3 = memPool(clock, { softBaseMs: 300_000, softMaxMs: 7_200_000 });
+  p3.noteError('d', { kind: 'soft', message: 'too many requests' });
+  assert.equal(p3.status('d').cooldown_until - clock.now(), 300_000);
 });
 
 test('livecfg 热接线:hotSoftCooldown 门控下 softCooldownMs 覆盖软冷却基数', () => {

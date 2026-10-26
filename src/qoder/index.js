@@ -15,6 +15,7 @@ const authStore = require('./auth');
 const session = require('./session');
 const constants = require('./constants');
 const { normalizeError } = require('../errtext');
+const { isThrottle } = require('../upstream-errors');
 const ledger = require('../checkin-ledger');
 // 选号接缝（集成阶段）：冷却/熔断/粘性/在途帽统一走池状态机。
 // 通道在池里的 uid 键位 = 'qoder:<id>'（channel-pool.js 统一裁决）。
@@ -86,12 +87,19 @@ function poolStatusOf(code) {
  *
  * Qoder 特有：**额度耗尽时请求会挂起（不报错）**，所以这里看不到 402；
  * 真正会看到的是 `Login expired`（105，凭证失效，换号有用）与模型不可用。
+ *
+ * **限流（10605 + RESOURCE_LIMIT / CALL_COUNT_LIMIT）必须换号**：
+ * 排队的粒度是 (账号, 模型)，两个账号的队列位置不同——实测同一分钟，
+ * 一个账号的 dfmodel 在排 2410 位，另一个账号的 gfmodel 直接 200。
+ * 旧判据只看 403 + 一组模型/权限文案，限流落到「不可换号」分支，
+ * 于是第二个账号白放着、用户拿一个 403。
  */
 function retryable(code, message) {
   const n = Number(code);
   if (!Number.isFinite(n) || n === 0) return true; // 网络错误/超时：换号试一次
   if (n === 401 || n === 402 || n === 429) return true;
   if (n === 105) return true; // Login expired：凭证失效，换号有用
+  if (isThrottle(message)) return true; // 上游排队/限流：换号可能落到没排队的那个
   if (n === 403) {
     return /not available|无权限|无权访问|login expired|expired/i.test(String(message || ''));
   }
@@ -358,11 +366,7 @@ async function send(payload, onChunk, opts = {}) {
   const usable = authStore.findUsable();
   if (!usable.length) throw new Error('Qoder 没有可用账号，请先添加一个');
   let sel = channelPool.pickCandidate(CHANNEL, usable, { exclude: tried, sessionKey, model });
-  if (!sel) {
-    const err = new Error('Qoder 没有可用账号（全部处于冷却/禁用/在途满，可到管理端账号池复活）');
-    err.statusCode = 503;
-    throw err;
-  }
+  if (!sel) throw noAccountError(usable, model);
 
   for (let i = 0; i < MAX_ATTEMPTS; i++) {
     const account = sel.account;
@@ -386,14 +390,27 @@ async function send(payload, onChunk, opts = {}) {
       return result;
     } catch (e) {
       const code = Number(e.statusCode) || 0;
+      const throttled = isThrottle(e.message);
       // 失败喂池：105（Login expired）按 401 进防误杀计数，其余按 classify
       channelPool.noteError(CHANNEL, account.id, { status: poolStatusOf(code), message: e.message, model });
       markFailure(account, e.message);
-      errors.push({ account: account.nickname || account.uid || account.id, status: code || '网络错误', error: e.message });
+      errors.push({ account: account.nickname || account.uid || account.id, status: code || '网络错误', error: e.message, throttled });
       if (e.sent) throw e; // 流式已吐帧，不能再换号
       if (!retryable(code, e.message)) throw e;
       sel = channelPool.pickCandidate(CHANNEL, usable, { exclude: tried, sessionKey, model });
-      if (!sel) break;
+      if (!sel) {
+        // 还试过的账号之外已经没有可选的了：若剩下的全是限流软冷却，
+        // 用 429 如实告诉客户端「等一下再来」，而不是 503「通道没有账号」。
+        const av = channelPool.availability(CHANNEL, usable, { model });
+        if (av.softOnly && av.nextInMs > 0 && errors.every((x) => x.throttled)) {
+          const e2 = new Error(`Qoder 上游限流，全部账号排队中（${Math.ceil(av.nextInMs / 1000)} 秒后可重试）`);
+          e2.statusCode = 429;
+          e2.throttled = true;
+          e2.retryAfterMs = av.nextInMs;
+          throw e2;
+        }
+        break;
+      }
     } finally {
       channelPool.release(uid);
     }
@@ -406,10 +423,36 @@ async function send(payload, onChunk, opts = {}) {
     return `${x.account}(${x.status}${m ? ': ' + m.slice(0, 120) : ''})`;
   };
   const err = new Error(`Qoder 所有账号均失败：${errors.map(brief).join('；')}`);
-  // 状态码 0 = 网络层失败（连接被拒/中断/首字节超时）。映射成 502 让客户端
-  // 知道是上游不可用，而不是把 0 原样回出去（0 会被某些客户端当成「无错误」）。
-  err.statusCode = Number(errors[errors.length - 1].status) || 502;
+  // 全部失败原因都是**限流**时回 429：客户端（Codex / Claude Code）对 429 会
+  // 自动退避重试，对 403/502 只会当硬失败。上游的条件本来就是「稍后再来」。
+  if (errors.length && errors.every((x) => x.throttled)) {
+    err.statusCode = 429;
+    err.throttled = true;
+  } else {
+    // 状态码 0 = 网络层失败（连接被拒/中断/首字节超时）。映射成 502 让客户端
+    // 知道是上游不可用，而不是把 0 原样回出去（0 会被某些客户端当成「无错误」）。
+    err.statusCode = Number(errors[errors.length - 1].status) || 502;
+  }
   throw err;
+}
+
+/**
+ * 选不到账号时的错误。**限流软冷却要与「禁用/熔断/在途满」区分**：
+ * 前者是上游让我们等几十秒（429 + 可重试），后者要人介入（503）。
+ * 混成一句话时用户只看到「Qoder 没有可用账号」，而账号本身完全健康。
+ */
+function noAccountError(usable, model) {
+  const av = channelPool.availability(CHANNEL, usable, { model });
+  if (!av.usable && av.softOnly && av.nextInMs > 0) {
+    const err = new Error(`Qoder 上游限流，全部账号排队中（${Math.ceil(av.nextInMs / 1000)} 秒后可重试）`);
+    err.statusCode = 429;
+    err.throttled = true;
+    err.retryAfterMs = av.nextInMs;
+    return err;
+  }
+  const err = new Error('Qoder 没有可用账号（全部处于冷却/禁用/在途满，可到管理端账号池复活）');
+  err.statusCode = 503;
+  return err;
 }
 
 /**

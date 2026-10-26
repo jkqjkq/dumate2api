@@ -115,13 +115,17 @@ function envelopeStatus(raw) {
 // 怎么办」——错误类别决定账号池动作,替代 web-pool 旧的一律 markFailure。
 // 类别与 src/pool.js 的冷却域一一对应（对齐 codebuddyManager 的错误策略）:
 //
-//   soft         429 限流 → 账号级软冷却（有界指数退避,冷却中不叠加）
+//   soft         429 限流 / COSY 排队限流（10605 + RESOURCE_LIMIT 等）→ 账号级
+//                软冷却（有界指数退避,冷却中不叠加;上游给了 retryAfterSeconds
+//                就按它,不再套基数——见 THROTTLE_TEXT 的注释）
 //   hard         402/余额耗尽文案 → 硬冷却到下一次签到窗口（次日 04:00）
 //   model        403+模型不可用文案 → (账号,模型) 级负缓存,切模型即可用
 //   session_dead 401 → 登录态疑似失效,连续计数达阈值才禁用（防误杀:
 //                网络抖动/refresh 竞态会临时性触发 401,一次就杀号会误杀,
 //                对齐 codebuddy 的 12153 sessionDeadThreshold 缓冲模式）
 //   breaker      5xx / 网络层失败 / 其余 403 → 熔断计数（连续失败指数退避）
+//                **限流不进这里**：它带自己的重试时刻，按熔断处置会把上游
+//                30 秒的条件放大成本地 30 分钟封禁（2026-10-27 修）
 //   null         其余 4xx → 请求本身的问题,换账号也一样失败,不惩罚账号
 //
 // 保守原则:拿不准的类别宁可少惩罚。401 也可能是上游闪断,所以走「连续计数」
@@ -134,6 +138,52 @@ const HARD_TEXT = /(余额|积分)[^\n]{0,8}(不足|耗尽|用完)|insufficient[
 const MODEL_TEXT = /model[^\n]{0,40}(not available|not found|not exist|unsupported)|模型[^\n]{0,12}(不可用|不存在|不支持)/i;
 
 /**
+ * COSY 上游的**排队/限流**信号（千问与 Qoder 共用一套协议栈）。
+ *
+ * 实测形状（2026-10-23~26，Qoder）：
+ *   {"code":"10605","message":"{\"isQueued\":true,\"modelKey\":\"dfmodel\",
+ *    \"queueCount\":0,\"queueType\":\"p3\",\"retryAfterSeconds\":30,
+ *    \"serviceAvailable\":false,\"subCode\":\"RESOURCE_LIMIT\"}"}
+ * 另有 subCode=CALL_COUNT_LIMIT（queueCount 上千）与「先响应后沉默」的
+ * 读空闲超时（chat.js 自己造的串）。
+ *
+ * **这不是服务故障，是「现在别来」**——上游每次都明说 `retryAfterSeconds`
+ * （实测 30 / 66 秒）。按熔断处置会把它放大成 30 分钟封禁：两次用户请求
+ * 就能把整个账号池打进 30~6 小时的冷却，而真实条件 30 秒后就恢复了，
+ * 客户端看到的是「Qoder 用不了」。
+ */
+const THROTTLE_TEXT = /RESOURCE_LIMIT|CALL_COUNT_LIMIT|"isQueued"\s*:\s*true|"serviceAvailable"\s*:\s*false|qoder upstream read idle/i;
+
+/** 这条错误串是不是上游在说「排队/限流，稍后重试」 */
+function isThrottle(message) {
+  return THROTTLE_TEXT.test(String(message == null ? '' : message));
+}
+
+/**
+ * 从限流错误串里取上游给的「多久后再来」（毫秒）。取不到返回 null——
+ * **不编一个默认值**，由调用方决定回落口径（池的软冷却基数）。
+ * 上游两个字段都可能出现：`retryAfterSeconds`（RESOURCE_LIMIT）与
+ * `waitTime`（CALL_COUNT_LIMIT，同为秒）。
+ */
+function throttleRetryMs(message) {
+  const s = String(message == null ? '' : message);
+  // 上游把内层错误当**字符串**塞进信封，所以实际串里是 `\"retryAfterSeconds\":30`
+  // （转义过的引号）。反斜杠可有可无，两种编码都要认，否则取不到时长。
+  const re = /\\?"(?:retryAfterSeconds|waitTime)\\?"\s*:\s*(\d+(?:\.\d+)?)/gi;
+  // 两个字段可能同时出现（实测 CALL_COUNT_LIMIT：retryAfterSeconds=30、
+  // waitTime=66）。取**较大的**那个——waitTime 是队列里的实际预估，
+  // 只按 30s 回来必然还在队里；两者取大不会把冷却做得比上游要求更短。
+  let best = 0;
+  let m;
+  while ((m = re.exec(s)) !== null) {
+    const sec = Number(m[1]);
+    if (Number.isFinite(sec) && sec > best) best = sec;
+  }
+  if (!(best > 0)) return null;
+  return Math.round(best * 1000);
+}
+
+/**
  * 把一次上游错误归入池处置类别。
  *
  * @param {{status?:number, code?:unknown, message?:string, model?:string}|string|Error|null} err
@@ -142,18 +192,30 @@ const MODEL_TEXT = /model[^\n]{0,40}(not available|not found|not exist|unsupport
  *   缺了它 403 模型错误会退化成熔断计数（集成阶段校准——此前 classify
  *   把 model 丢掉，web 通道的模型级负缓存实际从未生效过）。
  * @returns {{kind:'soft'|'hard'|'model'|'session_dead'|'breaker'|null,
- *            status:number, message:string, model?:string}}
+ *            status:number, message:string, model?:string, retryAfterMs?:number}}
+ *   retryAfterMs 只有限流（soft）且上游明确给了时长时才带。
  */
 function classify(err) {
   if (err == null) return { kind: null, status: 0, message: '' };
   if (typeof err === 'string') err = { status: 0, message: err };
   else if (err instanceof Error) err = { status: 0, message: err.message };
   const status = Math.max(0, Math.floor(Number(err.status) || 0));
-  const message = String(err.message || err.error || '').slice(0, 200);
+  // 判据用**完整串**：限流信号藏在嵌套 JSON 深处（`RESOURCE_LIMIT` 常在第
+  // 150 字符之后），按 200 字截断后再匹配会时灵时不灵。
+  const full = String(err.message || err.error || '');
+  const message = full.slice(0, 200);
   const base = { kind: null, status, message };
   if (err.model) base.model = String(err.model).slice(0, 100);
 
   if (status === 429) return { ...base, kind: 'soft' };
+  // 限流先于 403/5xx 判：它本质是 429 语义（「稍后再来」），不是服务坏了。
+  // 顺序很关键——放后面就会被下面那条 403/5xx 的 breaker 分支吃掉。
+  if (isThrottle(full)) {
+    const out = { ...base, kind: 'soft' };
+    const ms = throttleRetryMs(full);
+    if (ms) out.retryAfterMs = ms;
+    return out;
+  }
   if (status === 401) return { ...base, kind: 'session_dead' };
   if (status === 402 || HARD_TEXT.test(message)) return { ...base, kind: 'hard' };
   if (status === 403 && MODEL_TEXT.test(message)) return { ...base, kind: 'model' };
@@ -162,4 +224,6 @@ function classify(err) {
   return base;
 }
 
-module.exports = { payloadError, envelopeStatus, classify };
+module.exports = {
+  payloadError, envelopeStatus, classify, isThrottle, throttleRetryMs, THROTTLE_TEXT,
+};

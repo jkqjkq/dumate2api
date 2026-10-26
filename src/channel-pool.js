@@ -18,7 +18,7 @@
 // 在途帽：命中即 pool.acquire，调用方请求结束后必须 release——防单账号
 // 被打爆触发风控，与 web-pool 的 callModel 同一纪律。
 const crypto = require('crypto');
-const { pool } = require('./pool');
+const { pool, DEFAULTS } = require('./pool');
 const { createSticky } = require('./sticky');
 const { classify } = require('./upstream-errors');
 
@@ -120,6 +120,44 @@ function release(uid) {
   try { pool.release(uid); } catch (e) { /* 释放失败不影响请求结果 */ }
 }
 
+/**
+ * `pickCandidate` 返回 null 时，给调用方一个**准确的原因**。
+ *
+ * 为什么不复用一句「没有可用账号」：不可用的成因决定客户端该做什么——
+ *  - 软冷却（限流）→ 应该回 429，客户端会自动退避重试；
+ *     报成 503 会被当成「通道挂了」，用户看到的就是「Qoder 用不了」，
+ *     而真实条件是上游让我们等 30 秒。
+ *  - 硬冷却/熔断/禁用/暂停/在途满 → 503，这些要人去管理端处理或等更久。
+ *
+ * @returns {{usable:boolean, nextInMs:number, softOnly:boolean, busy:boolean}}
+ *   nextInMs 最早恢复的冷却剩余毫秒（没有可恢复的冷却时为 0）
+ */
+function availability(channel, candidates, opts = {}) {
+  const list = (candidates || []).filter((a) => a && a.id !== undefined);
+  const maxInFlight = Number(opts.inFlightMax) > 0 ? Number(opts.inFlightMax) : DEFAULTS.inFlightMax;
+  let nextInMs = 0;
+  let softOnly = true;
+  let busy = false;
+  let seen = 0;
+  for (const a of list) {
+    const uid = uidOf(channel, a.id);
+    let st = null;
+    try { st = pool.status(uid); } catch (e) { continue; }
+    if (!st) continue;
+    seen++;
+    const modelCooled = !!(opts.model && (st.model_cooldowns || []).some((m) => m.model === opts.model));
+    if (st.state === 'healthy' && !st.floor_blocked && !modelCooled) {
+      if ((st.in_flight || 0) >= maxInFlight) { busy = true; softOnly = false; continue; }
+      return { usable: true, nextInMs: 0, softOnly: false, busy };
+    }
+    if (!st.cooling) { softOnly = false; continue; }          // disabled / paused / 保底拦截
+    if (st.cool_kind !== 'soft') softOnly = false;            // breaker / hard
+    const ms = Math.max(0, (st.cool_remaining_s || 0) * 1000);
+    if (ms > 0 && (!nextInMs || ms < nextInMs)) nextInMs = ms;
+  }
+  return { usable: false, nextInMs, softOnly: seen > 0 && list.length > 0 && softOnly, busy };
+}
+
 /** 成功喂池（清熔断/软退避/防误杀计数） */
 function noteSuccess(channel, id) {
   try { pool.noteSuccess(uidOf(channel, id)); } catch (e) { /* 喂池失败不影响请求 */ }
@@ -144,6 +182,6 @@ function _stickySize() { return sticky.size(); }
 function _stickyClear() { sticky.clear(); }
 
 module.exports = {
-  uidOf, sessionKeyOf, pickCandidate, release, noteSuccess, noteError,
+  uidOf, sessionKeyOf, pickCandidate, availability, release, noteSuccess, noteError,
   _stickySize, _stickyClear,
 };

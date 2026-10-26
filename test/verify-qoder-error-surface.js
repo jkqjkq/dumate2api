@@ -12,11 +12,24 @@
 //
 // 离线：打桩 chat.postStream / auth / session / credits，不需要账号与网络。
 const assert = require('assert');
+const os = require('os');
+const path = require('path');
+const fs = require('fs');
+
+// 池状态必须隔离。本文件会制造 429（→ 账号级软冷却）与 5xx（→ 熔断计数）
+// 两个惩罚态：写进真实 data/pool-state.json 会污染正在运行的网关，而且
+// 冷却态会在用例之间残留——429 那条把账号冷却 5 分钟后，「正常流」及其
+// 之后的用例就选不到账号了（此前一直是红的，只是没人跑）。必须在 require
+// 之前设：池单例是模块加载时按这个路径建的。
+const TMP_STATE = path.join(os.tmpdir(), `dumate-qoder-error-surface-${process.pid}.json`);
+process.env.DUMATE_POOL_STATE = TMP_STATE;
+
 const auth = require('../src/qoder/auth');
 const session = require('../src/qoder/session');
 const chat = require('../src/qoder/chat');
 const credits = require('../src/qoder/credits');
 const qoder = require('../src/qoder/index');
+const { pool } = require('../src/pool');
 
 const ACCOUNT = {
   id: 9901, uid: 'uid-test', nickname: '测试账号', region: 'cn',
@@ -52,6 +65,13 @@ async function collect(fn) {
   return { chunks, error };
 }
 
+/** 每个用例前清掉上一个用例留下的冷却/熔断——否则用例之间互相污染 */
+function resetPool() {
+  for (const id of [ACCOUNT.id, ACCOUNT2.id]) {
+    try { pool.revive(`qoder:${id}`); } catch (e) { /* 无记录也可是正常 */ }
+  }
+}
+
 (async () => {
   console.log('== provider_error 帧 ==');
   chat.postStream = async (url, body, headers, onChunk) => {
@@ -68,6 +88,7 @@ async function collect(fn) {
   check('错误帧不转发给客户端', () => assert.strictEqual(r.chunks.length, 0, JSON.stringify(r.chunks)));
 
   console.log('');
+  resetPool();
   console.log('== HTTP 429 + 非 SSE 错误体 ==');
   chat.postStream = async (url, body, headers, onChunk) => {
     // 真实 postStream 即使一帧 data 都没有，流尾也会补 [DONE]
@@ -80,6 +101,7 @@ async function collect(fn) {
   check('message 带上游原文', () => assert.ok(/Too many requests/.test(r.error.message), r.error && r.error.message));
 
   console.log('');
+  resetPool();
   console.log('== 200 + 纯 provider_error 体（没有 data: 行）==');
   chat.postStream = async (url, body, headers, onChunk) => {
     onChunk('[DONE]');
@@ -93,6 +115,7 @@ async function collect(fn) {
   check('200 错误体：错误原因来自原始 body', () => assert.ok(/All backends failed/.test(r.error.message), r.error && r.error.message));
 
   console.log('');
+  resetPool();
   console.log('== 正常流不受影响 ==');
   chat.postStream = async (url, body, headers, onChunk) => {
     onChunk(JSON.stringify({ choices: [{ delta: { content: '好' } }] }));
@@ -108,6 +131,7 @@ async function collect(fn) {
   });
 
   console.log('');
+  resetPool();
   console.log('== 换号：首个账号 429，第二个成功 ==');
   auth.findUsable = () => [ACCOUNT, ACCOUNT2];
   session.ensureAccount = async (a) => a;
@@ -129,6 +153,7 @@ async function collect(fn) {
   session.ensureAccount = async () => ACCOUNT;
 
   console.log('');
+  resetPool();
   console.log('== 换号：首个账号回 provider_error，第二个成功 ==');
   auth.findUsable = () => [ACCOUNT, ACCOUNT2];
   session.ensureAccount = async (a) => a;
@@ -151,6 +176,7 @@ async function collect(fn) {
   session.ensureAccount = async () => ACCOUNT;
 
   console.log('');
+  resetPool();
   console.log('== 模型名解析（缓存为空时补拉）==');
   // 缓存为空 + 名字是显示名 → 补拉后解析成内部 key
   let fetched = 0;
@@ -172,6 +198,8 @@ async function collect(fn) {
   check('onModel 上报实际 key', () => assert.strictEqual(gotModel, 'gfmodel', String(gotModel)));
 
   console.log('');
+  try { pool.close(); } catch (e) { /* 忽略 */ }
+  try { fs.unlinkSync(TMP_STATE); } catch (e) { /* 不存在 */ }
   if (failures) { console.log(`${failures} 项失败`); process.exit(1); }
   console.log('全部通过');
   process.exit(0);

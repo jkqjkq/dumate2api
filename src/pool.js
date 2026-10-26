@@ -210,10 +210,30 @@ function createPool(opts = {}) {
   // 热路径:状态机喂入
   // ---------------------------------------------------------------------------
 
-  function applySoftCooldown(e, now, reason) {
-    // 已在有效软冷却中:不推进/不延长——重试与并发兜底探测不得把冷却越堆越厚
-    // （对齐 CooldownSoftRate:这是「全池被推到封顶」教训的直接防回归）
+  /**
+   * 软冷却。
+   *
+   * 默认按「基数 × 2^streak」有界退避（429 挡的是「你打太快了」，指数增长
+   * 让持续超速的账号越退越久）。但上游主动给了重试时刻时**按它来**：
+   * COSY 通道（千问 / Qoder）的排队限流每次都带 `retryAfterSeconds`
+   * （实测 30 / 66 秒），套 5 分钟基数会把一个 30 秒的条件放大到 5 分钟
+   * 以上，两次请求就能把整个池打进长时间不可用（用户侧就是「通道用不了」）。
+   *
+   * 已在有效软冷却中仍然不推进/不延长——重试与并发兜底探测不得把冷却
+   * 越堆越厚（对齐 CooldownSoftRate：这是「全池被推到封顶」教训的直接防回归）。
+   */
+  function applySoftCooldown(e, now, reason, retryAfterMs) {
     if (e.cooldown.kind === 'soft' && e.cooldown.until > now) return;
+    let d;
+    const explicit = Number(retryAfterMs);
+    if (Number.isFinite(explicit) && explicit > 0) {
+      // 上游明说了多久：夹在 [1s, 软冷却封顶] 之间。不递增 soft_streak——
+      // 时长是上游定的，不是「我们又超速了一次」的累计证据。
+      d = Math.min(Math.max(explicit, 1000), o.softMaxMs);
+      e.cooldown = { kind: 'soft', until: now + d, reason };
+      e.model_cooldowns = {};
+      return;
+    }
     // 热配置软冷却基数（D 包 livecfg ↔ 本模块对接）:>0 生效,<=0/读不到 =
     // 内置默认。仅生产单例开启（hotSoftCooldown）,测试池不读机器真实配置;
     // 错误路径调用频率低,每次现读 mtime 换取管理端 PUT 后下一个 429 即新口径。
@@ -225,7 +245,7 @@ function createPool(opts = {}) {
       } catch (err) { /* livecfg 不可用按内置默认 */ }
     }
     const shift = Math.min(e.soft_streak, 16); // 防大 streak 溢出
-    const d = Math.min(base * Math.pow(2, shift), o.softMaxMs);
+    d = Math.min(base * Math.pow(2, shift), o.softMaxMs);
     e.soft_streak++;
     e.cooldown = { kind: 'soft', until: now + d, reason };
     e.model_cooldowns = {}; // 账号级冷却清模型级豁免,防上一次豁免泄漏
@@ -282,7 +302,7 @@ function createPool(opts = {}) {
     const kind = info && info.kind;
     const reason = clampMsg(info && info.message);
     let disabledNow = false;
-    if (kind === 'soft') applySoftCooldown(e, now, reason);
+    if (kind === 'soft') applySoftCooldown(e, now, reason, info.retryAfterMs);
     else if (kind === 'hard') applyHardCooldown(e, now, reason, info.durationMs);
     else if (kind === 'model') applyModelBlock(e, now, info.model, reason);
     else if (kind === 'session_dead') disabledNow = applySessionDead(e, now);
