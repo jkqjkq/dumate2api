@@ -152,7 +152,19 @@ const MODEL_TEXT = /model[^\n]{0,40}(not available|not found|not exist|unsupport
  * 就能把整个账号池打进 30~6 小时的冷却，而真实条件 30 秒后就恢复了，
  * 客户端看到的是「Qoder 用不了」。
  */
-const THROTTLE_TEXT = /RESOURCE_LIMIT|CALL_COUNT_LIMIT|"isQueued"\s*:\s*true|"serviceAvailable"\s*:\s*false|qoder upstream read idle/i;
+const THROTTLE_TEXT = /RESOURCE_LIMIT|CALL_COUNT_LIMIT|"isQueued"\s*:\s*true|"serviceAvailable"\s*:\s*false|qoder upstream (queued|read idle)/i;
+
+/**
+ * 「排队挂起」类：上游接了请求却没内容，由 chat.js 的计时器主动断开
+ * （`queued` = 连真实内容都没来；`read idle` = 有内容后长时间沉默）。
+ *
+ * 这类失败**几乎与账号健康无关**——实测同一账号挂起一次后，紧接着的
+ * 5 次请求全部成功。所以不能按软冷却的 5 分钟基数处置（那会让两个账号
+ * 互相把对方挡在门外，用户看到的是「全部账号排队中（300 秒后可重试）」），
+ * 给一个只够防连打的短冷却，然后立刻换号/重试才是对的。
+ */
+const QUEUE_HANG_TEXT = /qoder upstream (queued|read idle)/i;
+const QUEUE_HANG_COOLDOWN_MS = 5000;
 
 /** 这条错误串是不是上游在说「排队/限流，稍后重试」 */
 function isThrottle(message) {
@@ -214,6 +226,8 @@ function classify(err) {
     const out = { ...base, kind: 'soft' };
     const ms = throttleRetryMs(full);
     if (ms) out.retryAfterMs = ms;
+    // 上游没给时长（排队挂起是自己掐的）：用短冷却，别套 5 分钟基数。
+    else if (QUEUE_HANG_TEXT.test(full)) out.retryAfterMs = QUEUE_HANG_COOLDOWN_MS;
     return out;
   }
   if (status === 401) return { ...base, kind: 'session_dead' };

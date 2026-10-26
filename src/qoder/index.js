@@ -329,8 +329,17 @@ async function runOnce(account, payload, onChunk, opts, meter) {
   }
 }
 
-/** 一次请求最多试几个账号。Qoder 签名是纯本地计算，代价低，可以放宽到 3 */
-const MAX_ATTEMPTS = 3;
+/**
+ * 一次请求最多尝试几次。
+ *
+ * 每次尝试不一定是不同账号：上游排队是**请求级随机**的（实测同一账号挂起
+ * 一次后紧接着的 5 次请求全部成功），所以「换号」不是唯一出路，等掉那几秒
+ * 的短冷却再打同一个号往往就过了。MAX_ATTEMPTS 是总尝试次数上限，
+ * 排队类失败会把 `tried` 清空重新轮询（见循环里的 transientOnly 分支）。
+ */
+const MAX_ATTEMPTS = 4;
+/** 排队挂起后，最多愿意等多久再重试（ms）。池给的排队冷却默认 5s，留点余量 */
+const QUEUE_WAIT_MS = Math.max(0, parseInt(process.env.DUMATE_QODER_QUEUE_WAIT_MS || '6000', 10) || 6000);
 
 /**
  * 发对话请求。主账号失败且错误「换号有救」时，按可用列表顺序转移。
@@ -399,17 +408,25 @@ async function send(payload, onChunk, opts = {}) {
       if (!retryable(code, e.message)) throw e;
       sel = channelPool.pickCandidate(CHANNEL, usable, { exclude: tried, sessionKey, model });
       if (!sel) {
-        // 还试过的账号之外已经没有可选的了：若剩下的全是限流软冷却，
-        // 用 429 如实告诉客户端「等一下再来」，而不是 503「通道没有账号」。
+        // 账号都轮过一遍了。**排队类失败不要就此收工**：它跟账号健康无关，
+        // 唯一的原因是上游这一条被随机排掉。等掉池给的短冷却（默认 5s）、
+        // 清空 exclude 再轮询一次，往往就过了。
+        const transientOnly = errors.every((x) => x.throttled || x.status === '网络错误');
         const av = channelPool.availability(CHANNEL, usable, { model });
-        if (av.softOnly && av.nextInMs > 0 && errors.every((x) => x.throttled)) {
-          const e2 = new Error(`Qoder 上游限流，全部账号排队中（${Math.ceil(av.nextInMs / 1000)} 秒后可重试）`);
-          e2.statusCode = 429;
-          e2.throttled = true;
-          e2.retryAfterMs = av.nextInMs;
-          throw e2;
+        const canWait = transientOnly && i < MAX_ATTEMPTS - 1
+          && av.softOnly && av.nextInMs > 0 && av.nextInMs <= QUEUE_WAIT_MS;
+        if (canWait) {
+          await sleep(av.nextInMs);
+          tried.clear();
+          sel = channelPool.pickCandidate(CHANNEL, usable, { exclude: tried, sessionKey, model });
         }
-        break;
+        if (!sel) {
+          const av2 = channelPool.availability(CHANNEL, usable, { model });
+          if (av2.softOnly && av2.nextInMs > 0 && errors.every((x) => x.throttled)) {
+            throw throttleError(av2.nextInMs);
+          }
+          break;
+        }
       }
     } finally {
       channelPool.release(uid);
@@ -443,17 +460,26 @@ async function send(payload, onChunk, opts = {}) {
  */
 function noAccountError(usable, model) {
   const av = channelPool.availability(CHANNEL, usable, { model });
-  if (!av.usable && av.softOnly && av.nextInMs > 0) {
-    const err = new Error(`Qoder 上游限流，全部账号排队中（${Math.ceil(av.nextInMs / 1000)} 秒后可重试）`);
-    err.statusCode = 429;
-    err.throttled = true;
-    err.retryAfterMs = av.nextInMs;
-    return err;
-  }
+  if (!av.usable && av.softOnly && av.nextInMs > 0) return throttleError(av.nextInMs);
   const err = new Error('Qoder 没有可用账号（全部处于冷却/禁用/在途满，可到管理端账号池复活）');
   err.statusCode = 503;
   return err;
 }
+
+/**
+ * 429：上游在排队/限流，让客户端等一会儿重试。
+ * Codex 与 Claude Code 对 429 会自动退避重试，对 403/502 只当硬失败，
+ * 所以这个状态码本身就是「还可救」的信号。
+ */
+function throttleError(nextInMs) {
+  const err = new Error(`Qoder 上游限流，全部账号排队中（${Math.ceil(nextInMs / 1000)} 秒后可重试）`);
+  err.statusCode = 429;
+  err.throttled = true;
+  err.retryAfterMs = nextInMs;
+  return err;
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, Math.max(0, Number(ms) || 0)));
 
 /**
  * 模型列表：问服务端，失败回落静态表。

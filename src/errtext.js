@@ -39,6 +39,9 @@ const NET_ERRORS = [
   // 读空闲（qoder/chat.js 的 read idle）：请求被上游排队挂起、先响应后沉默，
   // 网关等满 READ_IDLE_MS 主动断开——不掐的话要挂到中间层 360s 才报 aborted。
   [/qoder upstream read idle/i, '上游排队挂起，长时间无数据（限流，已主动断开）'],
+  // 排队 ack：上游先回一帧空内容、之后一直没有真实内容（CONTENT_MS 到点断开）。
+  // 这是「被排队」最常见的形态，且只花了 30 秒就识别出来。
+  [/qoder upstream queued/i, '上游排队中（长时间没有内容，已主动断开）'],
   // 响应流在传完之前被掐断。上游主动断开、中间设备超时、进程被杀都会触发
   [/^aborted$/i, '上游连接中断'],
   [/^socket hang up$/i, '上游连接被挂断'],

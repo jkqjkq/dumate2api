@@ -25,9 +25,12 @@ const https = require('https');
 const { EventEmitter } = require('events');
 
 const CHAT_PATH = require.resolve('../src/qoder/chat.js');
-function loadChat(readIdle, firstByte) {
+function loadChat(readIdle, firstByte, contentMs) {
   process.env.DUMATE_QODER_READ_IDLE_MS = String(readIdle);
   process.env.DUMATE_QODER_FIRST_BYTE_MS = String(firstByte);
+  // 第 3 参不传则用模块默认（30s）——老用例不受影响
+  if (contentMs !== undefined) process.env.DUMATE_QODER_CONTENT_MS = String(contentMs);
+  else delete process.env.DUMATE_QODER_CONTENT_MS;
   delete require.cache[CHAT_PATH];
   return require('../src/qoder/chat.js');
 }
@@ -56,6 +59,16 @@ https.request = function mockedRequest(opts, cb) {
 
 const URL_STR = 'https://qoder-mock.invalid/api/chat/completions';
 const FRAME = 'data: {"body":"{}"}\n\n';
+// 真实内容帧（有 choices/delta）——用来验证「有内容后排队计时器必须被撤销」
+const CONTENT_FRAME = 'data: {"body":"{\\"choices\\":[{\\"delta\\":{\\"content\\":\\"hi\\"}}]}"}\n\n';
+// 排队时上游先回的两种「假内容」（2026-10-27 实测）：
+//   1. 限流信封；2. 首帧空 delta（正常流的第一帧也是这个形状）
+const THROTTLE_FRAME = 'data: ' + JSON.stringify({
+  body: JSON.stringify({ code: '403', message: JSON.stringify({ code: '10605', subCode: 'RESOURCE_LIMIT' }) }),
+}) + '\n\n';
+const EMPTY_DELTA_FRAME = 'data: ' + JSON.stringify({
+  body: JSON.stringify({ choices: [{ delta: { content: '', reasoning_content: '', role: 'assistant' }, index: 0 }] }),
+}) + '\n\n';
 
 // chat.js 的计时器都 unref 了：mock 里没有别的句柄撑住事件循环，
 // 不留一个 ref 的空转 interval，进程会在计时器触发前直接退出。
@@ -132,6 +145,50 @@ async function main() {
     const r = await timed(chat2.post(URL_STR, '{}', {}));
     assert.strictEqual(r.ok, true, `被误杀: ${r.err}`);
     assert.strictEqual(r.v.status, 200);
+  });
+
+  // ---- 排队 ack（2026-10-27 新增的「无内容」计时器）----
+  //
+  // 上游排队时**不是不出数据**：它很快回一帧空的 `data: {"body":"{}"}`，
+  // 把首字节计时器清掉，然后沉默到读空闲的 120s。所以判据要放在「有没有
+  // 真实内容」上，而不是「有没有字节」。
+  const chat3 = loadChat(800, 200, 300); // 读空闲 800ms、首字节 200ms、无内容上限 300ms
+  await check('F. postStream：只有空 ack 帧 → 由「无内容」计时器断开（不用等读空闲）', async () => {
+    script = (req, res) => { res.emit('data', Buffer.from(FRAME)); };
+    const r = await timed(chat3.postStream(URL_STR, '{}', {}, () => {}));
+    assert.strictEqual(r.ok, false, '应被排队计时器断开');
+    assert.match(String(r.err && r.err.message), /queued/, `错误串不对: ${r.err}`);
+    assert.ok(r.ms >= 250 && r.ms <= 700, `断开耗时 ${r.ms}ms 不在 [250, 700]（应在 300ms 附近，而不是读空闲的 800ms）`);
+  });
+
+  await check('G. postStream：真实内容帧之后沉默 → 排队计时器被撤销，由读空闲收尾', async () => {
+    script = (req, res) => { res.emit('data', Buffer.from(CONTENT_FRAME)); };
+    const r = await timed(chat3.postStream(URL_STR, '{}', {}, () => {}));
+    assert.strictEqual(r.ok, false, '应被读空闲断开');
+    assert.match(String(r.err && r.err.message), /read idle/, `错误串不对（排队计时器误杀）: ${r.err}`);
+    assert.ok(r.ms >= 700, `排队计时器不该提前掐（耗时 ${r.ms}ms）`);
+  });
+
+  await check('H. post：只有空 ack 帧 → 同样由「无内容」计时器断开', async () => {
+    script = (req, res) => { res.emit('data', Buffer.from(FRAME)); };
+    const r = await timed(chat3.post(URL_STR, '{}', {}));
+    assert.strictEqual(r.ok, false, '应被排队计时器断开');
+    assert.match(String(r.err && r.err.message), /queued/, `错误串不对: ${r.err}`);
+  });
+
+  await check('I. 限流信封（403/10605）不算内容 → 排队计时器照常断开', async () => {
+    script = (req, res) => { res.emit('data', Buffer.from(THROTTLE_FRAME)); };
+    const r = await timed(chat3.postStream(URL_STR, '{}', {}, () => {}));
+    assert.strictEqual(r.ok, false, '应被排队计时器断开');
+    assert.match(String(r.err && r.err.message), /queued/,
+      `排队限流信封不该被当内容（那会让请求白等读空闲）: ${r.err}`);
+  });
+
+  await check('J. 首帧空 delta（正常流也这么开头）不算内容 → 仍由排队计时器断开', async () => {
+    script = (req, res) => { res.emit('data', Buffer.from(EMPTY_DELTA_FRAME)); };
+    const r = await timed(chat3.postStream(URL_STR, '{}', {}, () => {}));
+    assert.strictEqual(r.ok, false, '应被排队计时器断开');
+    assert.match(String(r.err && r.err.message), /queued/, `错误串不对: ${r.err}`);
   });
 
   console.log(`\n通过 ${pass} 项，失败 ${fail} 项`);

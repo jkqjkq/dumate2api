@@ -152,10 +152,19 @@ function assert(name, cond, detail) {
     r1.text.includes('response.failed'), '没有 response.failed —— 就是本次要修的 bug');
   assert('responses: 终结事件的 status 是 failed',
     /"status":"failed"/.test(r1.text), '未标 failed');
-  assert('responses: 带 upstream_error 错误码',
-    r1.text.includes('upstream_error'), '错误码缺失');
+  // 错误码从上游真实状态码推导（2026-10-27）：429 → rate_limit_exceeded，
+  // 其余 → server_error。此前的硬编码 upstream_error 不是 OpenAI/Responses 的
+  // 标准取值，且会把「排队限流」和「上游挂了」混成同一个码。
+  assert('responses: 带标准错误码（server_error / rate_limit_exceeded）',
+    /"error":\{"code":"(server_error|rate_limit_exceeded)"/.test(r1.text),
+    '错误码缺失或不是标准取值');
+  assert('responses: error.message 带上游真实原因',
+    /"error":\{"code":"[^"]+","message":"[^"]{8,}"/.test(r1.text),
+    '错误原因是空或用通用文案');
   assert('responses: 首帧确实发出去了（response.created）',
     r1.text.includes('response.created'), '首帧丢失');
+
+  const preMode = (process.env.FAKE_QODER_MODE || 'post') === 'pre';
 
   // --- Anthropic 路径 ---
   const r2 = await post('/v1/messages', {
@@ -163,16 +172,28 @@ function assert(name, cond, detail) {
     messages: [{ role: 'user', content: 'hi' }],
   });
   assert('anthropic: HTTP 200', r2.status === 200, `实际 ${r2.status}`);
-  assert('anthropic: 流里有 message_stop 终结事件',
-    r2.text.includes('message_stop'), '没有 message_stop —— 裸关闭');
-  assert('anthropic: 流里有 message_delta（收尾 usage）',
-    r2.text.includes('message_delta'), '缺 message_delta');
+  // 两种模式期望不同（2026-10-27 起）：
+  //   post：已经吐过内容 → 协议上收不回去，按 message_delta + message_stop 正常收尾
+  //   pre ：一个内容块都没发出去 → 发 Anthropic 的 `event: error`，
+  //         否则 Claude Code 会把它当成一次「合法的空回合」而不重试
+  if (preMode) {
+    assert('anthropic: 首帧前失败 → 发 event: error（不是伪装成空回答）',
+      r2.text.includes('event: error'), '缺少 error 事件 —— 客户端会把空回答当成功');
+    assert('anthropic: error 事件带真实原因',
+      /"type":"error"[\s\S]{0,200}"message":"[^"]{8,}"/.test(r2.text), 'error 事件没有 message');
+    assert('anthropic: 不应再发 message_stop（那等于告诉客户端「回合正常结束」）',
+      !r2.text.includes('message_stop'), '仍然发了一个正常的空回合收尾');
+  } else {
+    assert('anthropic: 流里有 message_stop 终结事件',
+      r2.text.includes('message_stop'), '没有 message_stop —— 裸关闭');
+    assert('anthropic: 流里有 message_delta（收尾 usage）',
+      r2.text.includes('message_delta'), '缺 message_delta');
+  }
 
   // --- OpenAI 路径（无翻译器）---
   // 两种模式期望不同，这**正是**设计意图：
   //   post：已吐帧 → 头已发，只能把错误帧 + [DONE] 写进流再关
   //   pre ：没吐帧 → 头未发，回正经的 402 JSON（比写进流更规范）
-  const preMode = (process.env.FAKE_QODER_MODE || 'post') === 'pre';
   const r3 = await post('/v1/chat/completions', {
     model: 'qoder/qfmodel', stream: true,
     messages: [{ role: 'user', content: 'hi' }],

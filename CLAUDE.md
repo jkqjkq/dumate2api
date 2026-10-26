@@ -99,8 +99,42 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 全零字节仍由首字节超时（`DUMATE_QODER_FIRST_BYTE_MS`，默认 60000）兜底——**读空闲必须大于
 首字节，否则两计时器抢跑**。错误串由 `errtext.js` 翻译成「上游排队挂起，长时间无数据」。
 注意 `chat.js` 在模块加载时读一次环境变量就定死。离线验证：
-`node test/verify-qoder-read-idle.js`（5 项：沉默被掐、正常流不误杀、全零走首字节、
-postStream 同语义、`0` 关闭）。
+`node test/verify-qoder-read-idle.js`（10 项：沉默被掐、正常流不误杀、全零走首字节、
+postStream 同语义、`0` 关闭，以及排队「假内容」的五条——见下一段）。
+
+**排队时上游会先回「假内容」，首字节计时器被它清掉——真正起作用的是
+「无内容」计时器（2026-10-27 修，这才是『对话一直转圈』的直接原因）。**
+实测排队时上游**不是不出数据**，而是先回两种「假内容」之一，然后沉默：
+
+1. **限流信封**：`{"code":"403","message":"{\"code\":\"10605\",…\"subCode\":\"RESOURCE_LIMIT\"}"}`
+   （走 `runOnce` 时会被 `payloadError` 立刻认出来，代价 ~0.5s）；
+2. **首帧空 delta**：`{"choices":[{"delta":{"content":"","reasoning_content":"","role":"assistant"}}]}`
+   ——正常流的**第一帧也是这个形状**，所以不能把它当内容。
+
+两者都会清掉 `armFirstByte`，于是只剩 120 秒的 `armReadIdle` 兜底：每次排队白等
+两分钟，两个账号就是四分钟，客户端早就自己超时了。
+
+判据改成「有没有**真实内容**」（`isRealContent`：有正文 / 思维链 / 工具调用 /
+finish_reason / usage，**错误信封明确不算**）。`armContentDeadline` 只在还没
+转发过真实内容时计时，一旦有内容立刻撤销（长回答完全不受影响）。阈值默认
+**30 秒**（`DUMATE_QODER_CONTENT_MS`），依据是埋点实测：Qoder 成功请求的首字
+p50=1.8s / p90=4.4s / p99=11.9s / 最大 35.1s（1029 条），30 秒只误杀 0.3% 的慢请求，
+却把排队失败的代价从 120 秒降到 30 秒（实测把阈值压到 8s 时，排队请求稳定在
+8.0~8.0s 断开）。`post`（非流式）用同一判据（`hasPayload`）。
+
+**排队挂起不该冷却账号 5 分钟，也不该换一次号就收工。**
+实测同一账号挂起一次后，紧接着的 5 次请求**全部成功**——排队是**请求级随机**的，
+与账号健康无关。所以：
+
+- `classify` 给 `qoder upstream queued` / `read idle` 一个 **5 秒**的短冷却
+  （`QUEUE_HANG_COOLDOWN_MS`），而不是软冷却默认的 5 分钟基数。否则两个账号
+  会互相把对方挡在门外，用户看到的是「全部账号排队中（300 秒后可重试）」。
+- `send()` 在**账号都轮过一遍**且失败全是瞬时类（限流/网络）时，会等掉池给的
+  短冷却（`DUMATE_QODER_QUEUE_WAIT_MS`，默认 6000）、清空 `tried` 再轮询一次
+  （`MAX_ATTEMPTS` 因此从 3 提到 4）。只换号不重试的话，按实测约 40% 的挂起率，
+  两个账号各挂一次就必然失败。
+
+两条底线没变：**下游拿 429**（客户端自动退避重试），**绝不把限流记成熔断**。
 
 **限流是「稍后再来」，不是「服务坏了」——按 429 处置，绝不能进熔断（2026-10-27 修，可用性级）。**
 `upstream-errors.classify` 原来只认 HTTP 429 为 `soft`，而 Qoder 的限流是
@@ -129,7 +163,7 @@ postStream 同语义、`0` 关闭）。
    （`channelPool.availability()` 用 `softOnly` + `nextInMs` 区分「限流冷却」与
    「禁用/熔断/在途满」，后者仍是 503）。
 
-离线验证：`node test/verify-qoder-throttle.js`（27 项：限流识别、`retryAfterSeconds`/
+离线验证：`node test/verify-qoder-throttle.js`（25 项：限流识别、`retryAfterSeconds`/
 `waitTime` 取值、classify 分类边界、池不再放大成熔断、30 秒后恢复、换号、下游 429）。
 顺带修掉 `test/verify-qoder-error-surface.js` 的非隔离问题：它会造 429/5xx 惩罚态，
 原来写的是真实 `data/pool-state.json`，429 那条把账号冷却 5 分钟后，后面所有用例都
@@ -567,8 +601,9 @@ DUMATE2API_PORT=9082 node src/server.js
   「amount 是领取额不是剩余额」的数据缺口。
 - `node test/verify-qoder-throttle.js`——限流处置：`isThrottle` 识别、`retryAfterSeconds`/
   `waitTime` 取大、classify 分类边界（限流→soft，模型不可用仍是 model）、池不再把 30 秒
-  放大成 30 分钟、重试时刻到点即恢复、403 限流换号、全部限流时下游 429。
-- `node test/verify-qoder-read-idle.js`——读空闲超时（见上文）。
+  放大成 30 分钟、重试时刻到点即恢复、403 限流换号、全部限流时下游 429、
+  排队挂起用 5 秒短冷却、账号轮完一遍后等冷却重试同一账号。
+- `node test/verify-qoder-read-idle.js`——读空闲与「无内容」两个计时器（10 项，见上文）。
 - `node test/verify-qoder-error-surface.js`——上游失败必须报错而不是静默空回答。
   **自带临时池文件**（`DUMATE_POOL_STATE`）：它会造 429/5xx 惩罚态，写真实池会让
   后续用例选不到账号。
@@ -692,6 +727,27 @@ Claude Code ── Anthropic ───────┼──→ 网关 :9080 ─�
 `FAKE_QODER_MODE=post|pre` 两种错误形态——`post` 是「先吐一帧再报错」（与
 `err.sent` 同形），`pre` 是「一帧都不吐就报错」（模拟额度耗尽）。
 
+**失败原因必须一路传到客户端，不能在中途被抹成一句通用文案（2026-10-27 修）。**
+两个翻译器各自丢过一次，症状都是「用户只知道失败了，不知道为什么」：
+
+- `translateStreamToResponses`（Codex）原来硬编码
+  `error: { code: 'upstream_error', message: 'upstream stream error' }` 且 `finish(502)`。
+  改成一透传 `e.message`、状态码透传（`429` → `code: 'rate_limit_exceeded'`，
+  其余 `server_error`）。否则排队限流、额度耗尽、凭证失效在 Codex 里长得一模一样。
+- `translateStreamToAnthropic`（Claude Code）在**一个内容块都没发出去**时，
+  原来收成「正常但空」的 `message_delta` + `message_stop`（0 token）。Claude Code
+  会把它当成一次合法的空回合，**不重试**，用户看到的是「模型什么都不回答」。
+  现在改发 Anthropic SSE 的 `event: error`
+  （`{type:'error', error:{type: anthErrorType(status, message), message}}`）：
+  429/529/排队挂起 → `rate_limit_error` / `overloaded_error`（客户端会退避重试），
+  401/403/400 各按自己的类型。**已经吐过内容时不走这条**——协议上收不回去，
+  只能按 `message_delta` + `message_stop` 正常收尾。
+
+离线验证：`node test/unit/stream-error-surface.test.js`（3 项，锁定 Responses
+那条的真实 message 与状态码）。Anthropic 那条是 `server.js` 内的脚本函数、
+不可 require，靠实机验证（喂一个不存在的模型名，应看到 `event: error` +
+真实 message）。
+
 **上游转发只回调一次。** `forwardToUpstream` 用 `settled` 标志 + `once()` 包装；`collectAndFinish` 把 `end`/`aborted`/`error` 三路收拢到同一入口。上游 socket 出错时 Node 会同时触发 error 与后续事件，重复回调会让响应被写两次、客户端永久挂在半开的流上（表现为「输出突然停止」）。
 
 **模型名兜底是唯一可行的容错。** 上游真实模型只有 `model-text` / `model-artifact-validate` / `glm-5`，传别的名字硬性报 `api not registered`。`mapModel` 查不到一律回落 `fallback`（默认 `model-text`），改 `data/model-map.json` 的 `fallback` 会影响全部未知模型名。
@@ -751,6 +807,8 @@ Claude Code ── Anthropic ───────┼──→ 网关 :9080 ─�
 | `DUMATE_TRAEWORK_REPAIR_RETRY` | `1` | 「播报即收尾」的重试次数上限。`0` 关闭整个修复（见上文 TRAE 段落） |
 | `DUMATE_TRAEWORK_HOLD_CAP` | `600` | 正文缓冲门的阈值（字符）。超过就转直发，避免长回答被扣住等判定 |
 | `DUMATE_QODER_FIRST_BYTE_MS` | `60000` | Qoder 上游**首字节**超时（ms），挡「连响应头都不给」的挂起。`0` 关闭 |
+| `DUMATE_QODER_CONTENT_MS` | `30000` | Qoder 上游**无内容**超时（ms）：排队时上游先回一个空 ack 帧再沉默，首字节计时器会被它清掉，只有这个计时器能识别（见上文）。只在**还没转发过任何真实内容**时计时，有内容即撤销。`0` 关闭 |
+| `DUMATE_QODER_QUEUE_WAIT_MS` | `6000` | 账号都轮过一遍、且失败全是限流/网络时，最多愿意等多久再重试（ms）。要大于排队冷却（5s）才走得通。`0` = 不等待直接回 429 |
 | `DUMATE_QODER_READ_IDLE_MS` | `120000` | Qoder 上游**读空闲**超时（ms），每块数据重置，挡「先响应后沉默」的限流排队（见上文）。**必须大于首字节超时**，否则两计时器抢跑。`0` 关闭 |
 | `DUMATE_DUMATE_SOURCE` | 未设（`web`） | 搭子凭证来源。未设 = **只用网页凭证**（桌面链路不参与，跳过启动那次约 3 秒的探测；池子不可用时路由层直接拒绝并说明原因，不静默退回桌面链路）。设 `auto`（别名 `desktop`）= 桌面优先、不可用时回落网页池。**无法识别的值按 `web` 处理并在启动日志告警** |
 | `DUMATE_WEB_FALLBACK` | 未设（开启） | 设 `0` 关闭「桌面凭证不可用时回落到网页池」（见上文回落机制）。关闭后桌面凭证失效即请求全失败 |

@@ -76,6 +76,14 @@ check('502 + RESOURCE_LIMIT → soft（状态码不改变判据）', () => {
 check('status=0 + read idle → soft', () => {
   assert.strictEqual(classify({ status: 0, message: READ_IDLE }).kind, 'soft');
 });
+check('排队挂起用短冷却（5s），不套 5 分钟基数', () => {
+  // 上游没给时长时，read idle / queued 都是「这一条被排掉了」，与账号健康无关
+  for (const m of [READ_IDLE, 'qoder upstream queued (no content in 30000ms)']) {
+    const c = classify({ status: 0, message: m });
+    assert.strictEqual(c.kind, 'soft');
+    assert.strictEqual(c.retryAfterMs, 5000, m);
+  }
+});
 check('403 模型不可用仍然是 model（没被限流规则吃掉）', () => {
   assert.strictEqual(classify({ status: 403, message: MODEL_GONE, model: 'dfmodel' }).kind, 'model');
 });
@@ -164,11 +172,15 @@ session.cachedModels = () => MODELS;
 session.fetchModels = async () => ({ ok: true, error: '', models: MODELS });
 credits.capture = () => {};                 // 不写真实积分账本
 
-/** 让 postStream 按「当前账号的 accessToken → 剧本」返回：'throttle' | 'readidle' | 'ok' */
+/** 让 postStream 按「当前账号的 accessToken → 剧本」返回：'throttle' | 'readidle' | 'ok'
+ *  剧本可以是数组，按该账号的第 N 次调用依次取（用于验证「重试同一账号」）。 */
 let scripts = {};
 let currentToken = '';
+let callsByToken = {};
 chat.postStream = async (url, body, headers, onChunk) => {
-  const plan = scripts[currentToken] || 'ok';
+  const n = (callsByToken[currentToken] = (callsByToken[currentToken] || 0) + 1);
+  let plan = scripts[currentToken] || 'ok';
+  if (Array.isArray(plan)) plan = plan[n - 1] || plan[plan.length - 1] || 'ok';
   if (plan === 'throttle') {
     const err = new Error(THROTTLE_RESOURCE);
     err.statusCode = 403;
@@ -184,6 +196,12 @@ chat.postStream = async (url, body, headers, onChunk) => {
   onChunk('[DONE]');
   return { status: 200, headers: {}, raw: '' };
 };
+
+function resetCase(plan) {
+  channelPool._stickyClear();
+  callsByToken = {};
+  scripts = plan;
+}
 
 (async () => {
   // runOnce 内部会经 ensureAccount 取账号——用 accessToken 标记「这一轮是谁」
@@ -244,6 +262,20 @@ chat.postStream = async (url, body, headers, onChunk) => {
     assert.strictEqual(stA.cool_kind, 'soft', 'read idle 应进软冷却');
     assert.strictEqual(stA.breaker_fails, 0, 'read idle 不该累计熔断');
     pool.revive('qoder:901');
+  });
+
+  await checkAsync('排队挂起后等掉短冷却、重试同一账号 → 成功（不必两轮都无法命中）', async () => {
+    // 上游排队是**请求级随机**的（实测同一账号挂起一次后紧接着 5 次全成功），
+    // 所以「A 挂起 → B 挂起 → 等 5 秒 → 再打 A」应当能过。
+    resetCase({ ta: ['readidle', 'ok'], tb: ['readidle'] });
+    const t0 = Date.now();
+    const r = await require('../src/qoder').send(payload, () => {}, { sessionKey: 'case-e' });
+    const spent = Date.now() - t0;
+    assert.strictEqual(r.status, 200);
+    assert.ok(spent >= 4000, '应先等掉排队冷却（约 5s），实际 ' + spent + 'ms');
+    const { pool } = require('../src/pool');
+    pool.revive('qoder:901');
+    pool.revive('qoder:902');
   });
 
   session.ensureAccount = async (store, acc) => acc;

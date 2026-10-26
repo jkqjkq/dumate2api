@@ -1509,7 +1509,23 @@ function translateStreamToAnthropic(upstreamRes, res, originalModel, onDone) {
     w.end();
   });
 
-  upstreamRes.on('error', () => {
+  upstreamRes.on('error', (e) => {
+    // 一个内容块都没发出去 = 上游在出内容之前就死了（限流 / 额度 / 网关错）。
+    // **不能**收成一个「正常但空」的 message_delta + message_stop：Claude Code
+    // 会把它当成一次合法的空回合，不重试，用户看到的就是「模型什么都不回答」。
+    // Anthropic 的 SSE 有专门的 `error` 事件，客户端据此抛错并按退避重试。
+    const nothingSent = blockIndex < 0 && !toolBuf.size && !hasText;
+    if (nothingSent) {
+      const msg = String((e && e.message) || 'upstream error');
+      sendEvent('error', {
+        type: 'error',
+        error: { type: anthErrorType(e && e.statusCode, msg), message: msg },
+      });
+      finish(Number(e && e.statusCode) || 502);
+      w.end();
+      return;
+    }
+    // 已经吐过内容：协议上收不回去了，只能按正常收尾（客户端已有部分输出）
     sendEvent('message_delta', {
       type: 'message_delta',
       delta: { stop_reason: mapFinishReason(lastFinishReason), stop_sequence: null },
@@ -1519,6 +1535,24 @@ function translateStreamToAnthropic(upstreamRes, res, originalModel, onDone) {
     finish(502);
     w.end();
   });
+}
+
+/**
+ * Anthropic SSE 错误事件的 `type`。取值来自 Anthropic 的错误类型枚举——
+ * 客户端（Anthropic SDK / Claude Code）按它决定是否重试：`rate_limit_error`
+ * 与 `overloaded_error` 会退避重试，`invalid_request_error` 不会。
+ */
+function anthErrorType(status, message) {
+  const n = Number(status) || 0;
+  if (n === 429) return 'rate_limit_error';
+  if (n === 401) return 'authentication_error';
+  if (n === 403) return 'permission_error';
+  if (n === 404) return 'not_found_error';
+  if (n === 400 || n === 422) return 'invalid_request_error';
+  if (n === 529) return 'overloaded_error';
+  // 上游排队挂起（自造的串）也是「稍后再来」，按过载处理让客户端重试
+  if (/queued|read idle|timeout/i.test(String(message || ''))) return 'overloaded_error';
+  return 'api_error';
 }
 
 // ==================== Server ====================
