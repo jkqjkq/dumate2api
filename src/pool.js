@@ -251,6 +251,32 @@ function createPool(opts = {}) {
     e.model_cooldowns = {}; // 账号级冷却清模型级豁免,防上一次豁免泄漏
   }
 
+  /**
+   * 模型级软冷却：上游的排队是 **(账号, 模型)** 粒度（信封带 modelKey），
+   * 一个模型排长队不该把整个账号封掉。
+   *
+   * 实测代价（2026-10-27）：dfmodel 排 4697 位（waitTime 7015 秒）→ 账号级
+   * 软冷却 7015 秒 → 同一账号的 qfmodel（上游直接 200）也全部被本地拒掉，
+   * 用户看到的就是「Qoder 整条通道用不了」，而账号本身完全健康。
+   *
+   * 时长同样夹在 [1s, 软冷却封顶]：上游的 waitTime 是它自己队列的估算，
+   * 队列随时在变，照单全收会把一个模型锁死两小时。
+   */
+  function applyModelSoftCooldown(e, now, model, reason, retryAfterMs) {
+    if (!model) return applySoftCooldown(e, now, reason, retryAfterMs);
+    const explicit = Number(retryAfterMs);
+    const d = Number.isFinite(explicit) && explicit > 0
+      ? Math.min(Math.max(explicit, 1000), o.softMaxMs)
+      : Math.min(o.softBaseMs, o.softMaxMs);
+    const prev = e.model_cooldowns[model];
+    e.model_cooldowns[model] = {
+      // 已在冷却中不缩短（并发兜底探测不得把冷却削薄）
+      until: Math.max(now + d, (prev && prev.until) || 0),
+      reason: clampMsg(reason),
+      hits: ((prev && prev.hits) || 0) + 1,
+    };
+  }
+
   function applyHardCooldown(e, now, reason, durationMs) {
     const d = Number.isFinite(durationMs) && durationMs > 0 ? durationMs : msUntilNext4AM(now);
     e.cooldown = { kind: 'hard', until: now + d, reason };
@@ -302,7 +328,11 @@ function createPool(opts = {}) {
     const kind = info && info.kind;
     const reason = clampMsg(info && info.message);
     let disabledNow = false;
-    if (kind === 'soft') applySoftCooldown(e, now, reason, info.retryAfterMs);
+    if (kind === 'soft') {
+      // scope==='model'：上游只排这个模型的队，别把账号整体封掉
+      if (info && info.scope === 'model') applyModelSoftCooldown(e, now, info.model, reason, info.retryAfterMs);
+      else applySoftCooldown(e, now, reason, info && info.retryAfterMs);
+    }
     else if (kind === 'hard') applyHardCooldown(e, now, reason, info.durationMs);
     else if (kind === 'model') applyModelBlock(e, now, info.model, reason);
     else if (kind === 'session_dead') disabledNow = applySessionDead(e, now);

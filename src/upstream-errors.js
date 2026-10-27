@@ -152,7 +152,23 @@ const MODEL_TEXT = /model[^\n]{0,40}(not available|not found|not exist|unsupport
  * 就能把整个账号池打进 30~6 小时的冷却，而真实条件 30 秒后就恢复了，
  * 客户端看到的是「Qoder 用不了」。
  */
-const THROTTLE_TEXT = /RESOURCE_LIMIT|CALL_COUNT_LIMIT|"isQueued"\s*:\s*true|"serviceAvailable"\s*:\s*false|qoder upstream (queued|read idle)/i;
+// 引号前可能有一个转义反斜杠（上游把内层错误当字符串塞进信封，实测串里是
+// `\"isQueued\":true`）——写成 `"isQueued"` 是匹配不到的，只能靠 subCode
+// 兜住。两条都要能命中，否则 subCode 一改名就漏。
+const THROTTLE_TEXT = /RESOURCE_LIMIT|CALL_COUNT_LIMIT|\\?"isQueued\\?"\s*:\s*true|\\?"serviceAvailable\\?"\s*:\s*false|qoder upstream (queued|read idle)/i;
+
+/** 信封里带 modelKey = 这条限流是**某个模型**的排队，不是整条通道 */
+const MODEL_QUEUE_TEXT = /\\?"modelKey\\?"/i;
+
+/**
+ * 排队冷却的**上限**。上游按自己的队列长度算 `waitTime`（实测 queueCount
+ * 4697 → waitTime 7015 秒），照单全收等于把账号封近两小时，而队列随时在变。
+ * 取一个「够久以防止空转、又短到能自己恢复」的窗口。
+ */
+const THROTTLE_MAX_MS = Math.max(
+  1000,
+  parseInt(process.env.DUMATE_THROTTLE_MAX_MS || '600000', 10) || 600000,
+);
 
 /**
  * 「排队挂起」类：上游接了请求却没内容，由 chat.js 的计时器主动断开
@@ -204,8 +220,11 @@ function throttleRetryMs(message) {
  *   缺了它 403 模型错误会退化成熔断计数（集成阶段校准——此前 classify
  *   把 model 丢掉，web 通道的模型级负缓存实际从未生效过）。
  * @returns {{kind:'soft'|'hard'|'model'|'session_dead'|'breaker'|null,
- *            status:number, message:string, model?:string, retryAfterMs?:number}}
+ *            status:number, message:string, model?:string, retryAfterMs?:number,
+ *            scope?:'model'}}
  *   retryAfterMs 只有限流（soft）且上游明确给了时长时才带。
+ *   scope==='model' 表示这条限流只针对**这个模型**（上游信封带 modelKey），
+ *   池应做模型级冷却而不是账号级——否则一个模型排队会封掉整条通道。
  */
 function classify(err) {
   if (err == null) return { kind: null, status: 0, message: '' };
@@ -225,9 +244,14 @@ function classify(err) {
   if (isThrottle(full)) {
     const out = { ...base, kind: 'soft' };
     const ms = throttleRetryMs(full);
-    if (ms) out.retryAfterMs = ms;
+    if (ms) out.retryAfterMs = Math.min(ms, THROTTLE_MAX_MS);
     // 上游没给时长（排队挂起是自己掐的）：用短冷却，别套 5 分钟基数。
     else if (QUEUE_HANG_TEXT.test(full)) out.retryAfterMs = QUEUE_HANG_COOLDOWN_MS;
+    // **排队的粒度是 (账号, 模型)**（信封带 modelKey，实测同一分钟一个账号的
+    // dfmodel 排 4697 位、另一个账号的 qfmodel 直接 200）。按账号级冷却会把
+    // 没排队的模型一起封掉——用户配的是 dfmodel，于是连 qfmodel 都用不了，
+    // 表现就是「Qoder 整条通道打不开」。带 modelKey 时降级为模型级冷却。
+    if (base.model && MODEL_QUEUE_TEXT.test(full)) out.scope = 'model';
     return out;
   }
   if (status === 401) return { ...base, kind: 'session_dead' };

@@ -238,11 +238,16 @@ const READ_IDLE_MS = parseInt(process.env.DUMATE_QODER_READ_IDLE_MS || '120000',
 // 客户端早就超时了。
 //
 // 判据换成「有没有**真正的内容帧**」：只在还没转发过任何 payload 时计时，
-// 一旦有内容立刻清掉（长回答不受影响）。阈值取 30s 的依据是埋点实测——
+// 一旦有内容立刻清掉（长回答不受影响）。阈值取 12s 的依据是埋点实测——
 // Qoder 成功请求的首字 p50=1.8s、p90=4.4s、p99=11.9s、最大 35.1s
-// （1029 条），30s 只会误杀 0.3% 的慢请求，却把排队失败的代价从 120s 降到 30s。
-// DUMATE_QODER_CONTENT_MS 可调，0 关闭。
-const CONTENT_MS = parseInt(process.env.DUMATE_QODER_CONTENT_MS || '30000', 10);
+// （1029 条）：12s 刚好盖住 p99，误杀约 1% 的慢请求，而误杀后会换号重试，
+// 代价远小于「排队时干等」。排队请求是**完全无内容**的（实测压到 8s 时
+// 稳定在 8.0s 断开），所以压短不会漏判。
+//
+// 阈值直接决定用户感知的最坏等待：两个账号串行时 30s×2=60s（客户端多半
+// 已经超时），12s×2=24s。2026-10-27 实测一次排队卡了 33s，用户侧就是
+// 「点了没反应」。DUMATE_QODER_CONTENT_MS 可调，0 关闭。
+const CONTENT_MS = parseInt(process.env.DUMATE_QODER_CONTENT_MS || '12000', 10);
 
 /** 排队的「无内容」计时器；返回 clear()，转发第一帧真实内容后调用 */
 function armContentDeadline(req) {

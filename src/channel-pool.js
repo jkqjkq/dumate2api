@@ -145,10 +145,19 @@ function availability(channel, candidates, opts = {}) {
     try { st = pool.status(uid); } catch (e) { continue; }
     if (!st) continue;
     seen++;
-    const modelCooled = !!(opts.model && (st.model_cooldowns || []).some((m) => m.model === opts.model));
+    const mc = opts.model ? (st.model_cooldowns || []).find((m) => m.model === opts.model) : null;
+    const modelCooled = !!mc;
     if (st.state === 'healthy' && !st.floor_blocked && !modelCooled) {
       if ((st.in_flight || 0) >= maxInFlight) { busy = true; softOnly = false; continue; }
       return { usable: true, nextInMs: 0, softOnly: false, busy };
+    }
+    // 账号健康、只是**这个模型**在排队：属于「稍后再来」（429 + 可重试），
+    // 不是通道故障（503）。少了这条分支，模型级冷却会掉进下面的
+    // `!st.cooling` → softOnly=false，客户端拿到 503 直接放弃重试。
+    if (modelCooled && st.state === 'healthy' && !st.floor_blocked) {
+      const ms = Math.max(0, (mc.until || 0) - Date.now());
+      if (ms > 0 && (!nextInMs || ms < nextInMs)) nextInMs = ms;
+      continue;
     }
     if (!st.cooling) { softOnly = false; continue; }          // disabled / paused / 保底拦截
     if (st.cool_kind !== 'soft') softOnly = false;            // breaker / hard

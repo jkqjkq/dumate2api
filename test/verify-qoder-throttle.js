@@ -51,6 +51,10 @@ async function checkAsync(label, fn) {
 // 实测抓包原文（内层 JSON 被当字符串塞进信封，引号是转义过的）
 const THROTTLE_RESOURCE = 'qoder 403: {"code":"10605","message":"{\\"isQueued\\":true,\\"modelKey\\":\\"dfmodel\\",\\"queueCount\\":0,\\"queueType\\":\\"p3\\",\\"retryAfterSeconds\\":30,\\"serviceAvailable\\":false,\\"subCode\\":\\"RESOURCE_LIMIT\\",\\"waitTime\\":30}","subCode":"RESOURCE_LIMIT"}';
 const THROTTLE_CALLCOUNT = 'qoder 403: {"code":"10605","message":"{\\"isQueued\\":true,\\"modelKey\\":\\"dfmodel\\",\\"queueCount\\":2410,\\"queueType\\":\\"p3\\",\\"retryAfterSeconds\\":30,\\"serviceAvailable\\":true,\\"subCode\\":\\"CALL_COUNT_LIMIT\\",\\"waitTime\\":66}","subCode":"CALL_COUNT_LIMIT"}';
+// 2026-10-27 实测形态：DeepSeek-Flash 排 4697 位。waitTime 7015 **由冷却
+// 时长反推**（pool-state 里 until 比 now 晚 7015 秒；retryAfterSeconds=30
+// 只能给出 30000ms，7015000ms 只可能来自 waitTime×1000）。
+const THROTTLE_BIGQUEUE = 'qoder 403: {"code":"10605","message":"{\\"isQueued\\":true,\\"modelKey\\":\\"dfmodel\\",\\"queueCount\\":4697,\\"queueType\\":\\"p3\\",\\"retryAfterSeconds\\":30,\\"serviceAvailable\\":true,\\"subCode\\":\\"CALL_COUNT_LIMIT\\",\\"waitTime\\":7015}","subCode":"CALL_COUNT_LIMIT"}';
 const READ_IDLE = 'qoder upstream read idle (120000ms)';
 const MODEL_GONE = 'qoder 403: {"code":"403","message":"Model is not available for this user"}';
 
@@ -101,10 +105,11 @@ check('限流信号在 200 字之后也能识别（用完整串判）', () => {
 
 console.log('');
 console.log('== 3. 池：限流不再放大成 30 分钟封禁 ==');
-check('连续 3 次限流 → 软冷却 30s（不是 30min 熔断）', () => {
+check('连续 3 次限流（无模型信息）→ 软冷却 30s（不是 30min 熔断）', () => {
   let now = 1_000_000;
   const pool = createPool({ file: null, now: () => now });
-  const cls = classify({ status: 403, message: THROTTLE_RESOURCE, model: 'dfmodel' });
+  // 不带 model：池拿不到 (账号,模型) 二元组，只能退回账号级冷却
+  const cls = classify({ status: 403, message: THROTTLE_RESOURCE });
   for (let i = 0; i < 3; i++) pool.noteError('qoder:1', cls);
   const st = pool.status('qoder:1');
   assert.strictEqual(st.cool_kind, 'soft', '应为软冷却，实际 ' + st.cool_kind);
@@ -146,6 +151,55 @@ check('异常的 retryAfterMs 被夹进 [1s, 封顶]', () => {
   const pool2 = createPool({ file: null, now: () => now });
   pool2.noteError('a:1', { kind: 'soft', message: 'x', retryAfterMs: 99 * 3600 * 1000 }); // 太大
   assert.ok(pool2.status('a:1').cool_remaining_s <= 2 * 3600, '应被 softMaxMs 封顶');
+});
+
+console.log('');
+console.log('== 3b. 排队是 (账号, 模型) 粒度：不封整条通道 ==');
+// 2026-10-27 用户报「Qoder 整条通道用不了、网页版却正常」的直接原因：
+// dfmodel 排 4697 位 → 账号级软冷却 7015 秒 → **同一账号的 qfmodel**
+// （上游直接 200）也被本地拒掉，客户端每次重试都在 4ms 内拿到 429。
+check('排队信号带 modelKey → classify 标 scope=model', () => {
+  const c = classify({ status: 403, message: THROTTLE_CALLCOUNT, model: 'dfmodel' });
+  assert.strictEqual(c.kind, 'soft');
+  assert.strictEqual(c.scope, 'model');
+  assert.strictEqual(c.model, 'dfmodel');
+});
+check('不带 model 时退回账号级（池无法按模型隔离）', () => {
+  const c = classify({ status: 403, message: THROTTLE_CALLCOUNT });
+  assert.strictEqual(c.kind, 'soft');
+  assert.strictEqual(c.scope, undefined);
+});
+check('dfmodel 排队不封账号：qfmodel 仍可选', () => {
+  let now = 1_000_000;
+  const pool = createPool({ file: null, now: () => now });
+  pool.noteError('qoder:1', classify({ status: 403, message: THROTTLE_CALLCOUNT, model: 'dfmodel' }));
+  const st = pool.status('qoder:1');
+  assert.strictEqual(st.cool_kind, '', '账号本身不该被冷却，实际 ' + st.cool_kind);
+  assert.ok((st.model_cooldowns || []).some((m) => m.model === 'dfmodel'), 'dfmodel 应进模型级冷却');
+  assert.strictEqual(pool.pick(['qoder:1'], { model: 'dfmodel' }), null, '排队的模型应被跳过');
+  assert.strictEqual(pool.pick(['qoder:1'], { model: 'qfmodel' }), 'qoder:1', '别的模型仍可用');
+});
+check('排队时长被 THROTTLE_MAX_MS 封顶（7015 秒 → 10 分钟）', () => {
+  const c = classify({ status: 403, message: THROTTLE_BIGQUEUE, model: 'dfmodel' });
+  assert.strictEqual(c.kind, 'soft');
+  assert.ok(c.retryAfterMs <= 600000, '应封顶 600000ms，实际 ' + c.retryAfterMs);
+  let now = 1_000_000;
+  const pool = createPool({ file: null, now: () => now });
+  pool.noteError('qoder:1', c);
+  const mc = pool.status('qoder:1').model_cooldowns.find((m) => m.model === 'dfmodel');
+  assert.ok(mc, '应有 dfmodel 的模型级冷却');
+  assert.ok(mc.until - now <= 600000, '模型级冷却也该封顶，实际 ' + (mc.until - now));
+});
+check('账号健康、仅模型排队 → availability 报 softOnly（下游 429 而不是 503）', () => {
+  const channelPoolLocal = require('../src/channel-pool');
+  // channel-pool 用的是单例池（已重定向到临时文件），直接在单例上造状态
+  const { pool: single } = require('../src/pool');
+  single.noteError('qoder:901', classify({ status: 403, message: THROTTLE_CALLCOUNT, model: 'dfmodel' }));
+  const av = channelPoolLocal.availability('qoder', [{ id: 901 }], { model: 'dfmodel' });
+  assert.strictEqual(av.usable, false);
+  assert.strictEqual(av.softOnly, true, '模型排队属于「稍后再来」，不是通道故障');
+  assert.ok(av.nextInMs > 0, '应给出重试时刻');
+  single.revive('qoder:901');
 });
 
 console.log('');
@@ -216,10 +270,10 @@ function resetCase(plan) {
     const r = await require('../src/qoder').send(payload, (c) => chunks.push(c), { sessionKey: 'case-a' });
     assert.strictEqual(r.status, 200);
     assert.ok(chunks.some((c) => c.includes('pong')), '应从 B 拿到正文');
-    // A 进软冷却（30s），B 健康
+    // A 的 gfmodel 进模型级冷却（账号本身不封——排队是 (账号,模型) 粒度），B 健康
     const stA = require('../src/pool').pool.status('qoder:901');
-    assert.strictEqual(stA.cool_kind, 'soft');
-    assert.ok(stA.cool_remaining_s <= 30, 'A 的冷却应是上游给的 30s，实际 ' + stA.cool_remaining_s);
+    assert.ok((stA.model_cooldowns || []).some((m) => m.model === 'gfmodel'), 'A 的 gfmodel 应进模型级冷却');
+    assert.strictEqual(stA.cool_kind, '', '账号本身不该被冷却，实际 ' + stA.cool_kind);
     require('../src/pool').pool.revive('qoder:901');
   });
 
