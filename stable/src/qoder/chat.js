@@ -221,8 +221,107 @@ function armFirstByte(req) {
   return () => clearTimeout(timer);
 }
 
-/** 发一次推理请求，返回 { status, headers, raw } */
-function post(url, body, headers) {
+// 读空闲超时。首字节超时挡不住另一种限流形态（2026-10-23~24 实测）：上游**先
+// 发响应头甚至一帧数据**，然后长时间沉默——排队期间连接挂着不关闭，最后由
+// 中间层在 ~360s 处掐断，客户端只能拿到无信息的 `aborted`（详见 errtext.js）。
+// 正常推理的 SSE 持续出帧、每次到达都会重置计时器，所以这个上限只杀「沉默」；
+// 上游限流排队（RESOURCE_LIMIT + isQueued）最多沉默 READ_IDLE_MS 就被主动断开，
+// 交给上层换号或如实报错，客户端不用陪跑到被掐。
+// DUMATE_QODER_READ_IDLE_MS 可调，0 关闭。必须大于首字节超时，否则两计时器抢跑。
+const READ_IDLE_MS = parseInt(process.env.DUMATE_QODER_READ_IDLE_MS || '120000', 10);
+
+// 「排队 ack」超时（2026-10-27 加，这才是排队时真正起作用的那个计时器）。
+//
+// 实测（2026-10-27）上游排队时**不是不出数据**：它很快回一帧空内容
+// （`data: {"body":"{}"}` 之类，`unwrap` 会丢掉），把**首字节**计时器清掉，
+// 然后沉默到读空闲的 120s。于是每次排队都要白等两分钟——两个账号就是四分钟，
+// 客户端早就超时了。
+//
+// 判据换成「有没有**真正的内容帧**」：只在还没转发过任何 payload 时计时，
+// 一旦有内容立刻清掉（长回答不受影响）。阈值取 12s 的依据是埋点实测——
+// Qoder 成功请求的首字 p50=1.8s、p90=4.4s、p99=11.9s、最大 35.1s
+// （1029 条）：12s 刚好盖住 p99，误杀约 1% 的慢请求，而误杀后会换号重试，
+// 代价远小于「排队时干等」。排队请求是**完全无内容**的（实测压到 8s 时
+// 稳定在 8.0s 断开），所以压短不会漏判。
+//
+// 阈值直接决定用户感知的最坏等待：两个账号串行时 30s×2=60s（客户端多半
+// 已经超时），12s×2=24s。2026-10-27 实测一次排队卡了 33s，用户侧就是
+// 「点了没反应」。DUMATE_QODER_CONTENT_MS 可调，0 关闭。
+const CONTENT_MS = parseInt(process.env.DUMATE_QODER_CONTENT_MS || '12000', 10);
+
+/** 排队的「无内容」计时器；返回 clear()，转发第一帧真实内容后调用 */
+function armContentDeadline(req) {
+  if (!(CONTENT_MS > 0)) return () => {};
+  const timer = setTimeout(() => {
+    req.destroy(new Error(`qoder upstream queued (no content in ${CONTENT_MS}ms)`));
+  }, CONTENT_MS);
+  if (typeof timer.unref === 'function') timer.unref();
+  return () => clearTimeout(timer);
+}
+
+/** 给请求挂一个「读空闲」计时器；note() 在每块数据到达时重置，clear() 收尾调用 */
+function armReadIdle(req) {
+  if (!(READ_IDLE_MS > 0)) return { note: () => {}, clear: () => {} };
+  let timer = null;
+  const arm = () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      req.destroy(new Error(`qoder upstream read idle (${READ_IDLE_MS}ms)`));
+    }, READ_IDLE_MS);
+    if (timer.unref) timer.unref();
+  };
+  arm();
+  return { note: arm, clear: () => clearTimeout(timer) };
+}
+
+/**
+ * 这个内层 payload 算不算**真实内容**（用来撤销「排队」计时器）。
+ *
+ * 实测（2026-10-27）排队时上游会先回两种「假内容」，两者都不能算：
+ *   1. 错误信封：`{"code":"403","message":"{\"code\":\"10605\",…RESOURCE_LIMIT…}"}`
+ *      排队限流就是它，之后连接沉默；
+ *   2. 首帧空 delta：`{"choices":[{"delta":{"content":"","reasoning_content":"",
+ *      "role":"assistant"}}],…}`——正常流的**第一帧**也是这个形状，但正常流
+ *      紧接着就有内容，所以不能把它当内容，否则排队时计时器被它清掉。
+ *
+ * 判据：有正文 / 有思维链 / 有工具调用 / 有 finish_reason / 有 usage。
+ * 错误信封明确不算。
+ */
+function isRealContent(inner) {
+  let o;
+  try { o = JSON.parse(inner); } catch (e) { return false; }
+  if (!o || typeof o !== 'object') return false;
+  if (payloadError(o)) return false;
+  const ch = (o.choices || [])[0];
+  if (!ch) return false;
+  const d = ch.delta || ch.message || {};
+  if (d.content) return true;
+  if (d.reasoning_content) return true;
+  if (Array.isArray(d.tool_calls) && d.tool_calls.length) return true;
+  if (ch.finish_reason) return true;
+  return !!o.usage;
+}
+
+/**
+ * 这段字节里有没有真实内容（`post` 用）。行可能被 TCP chunk 切开，这种情形
+ * 下这一块判不出、下一块补齐后就能判出，不会把有内容的请求误判成排队。
+ */
+function hasPayload(text) {
+  const s = String(text || '');
+  const at = s.indexOf('data:');
+  if (at < 0) return false;
+  for (const line of s.slice(at).split('\n')) {
+    const t = line.trim();
+    if (!t.startsWith('data:')) continue;
+    const raw = t.slice(5).trim();
+    if (!raw || raw === '[DONE]') continue;
+    for (const inner of unwrap(raw)) if (isRealContent(inner)) return true;
+  }
+  return false;
+}
+
+/** 发一次推理请求，返回 { status, headers, raw }。opts.agent 出站代理（E 包接线） */
+function post(url, body, headers, opts = {}) {
   return new Promise((resolve, reject) => {
     const u = new URL(url);
     const req = https.request({
@@ -231,25 +330,36 @@ function post(url, body, headers) {
       method: 'POST',
       headers: { ...headers, Accept: 'text/event-stream', 'Content-Length': Buffer.byteLength(body) },
       timeout: TIMEOUT_MS,
+      ...(opts.agent ? { agent: opts.agent } : {}),
     }, (res) => {
       let buf = '';
+      let sawContent = false;
       const dec = new StringDecoder('utf8');
-      res.on('data', (x) => { clearFb(); buf += dec.write(x); });
-      res.on('end', () => { clearFb(); buf += dec.end(); resolve({ status: res.statusCode, headers: res.headers, raw: buf }); });
-      res.on('error', (e) => { clearFb(); reject(e); });
+      res.on('data', (x) => {
+        clearFb(); idle.note();
+        const text = dec.write(x);
+        buf += text;
+        // 只有**真实内容**才算撤销排队计时器（空 ack 不算，见 hasPayload 注释）
+        if (!sawContent && hasPayload(text)) { sawContent = true; clearContent(); }
+      });
+      res.on('end', () => { clearFb(); clearContent(); idle.clear(); buf += dec.end(); resolve({ status: res.statusCode, headers: res.headers, raw: buf }); });
+      res.on('error', (e) => { clearFb(); clearContent(); idle.clear(); reject(e); });
     });
     // 计时器**从请求写出时开始**，不是从响应头开始：上游被限流时可能连响应头
     // 都不给，那种情况下 socket 空闲超时（600s）才会兜底，而客户端早就断了。
     let clearFb = () => {};
+    let clearContent = () => {};
     clearFb = armFirstByte(req);
-    req.on('error', (e) => { clearFb(); reject(e); });
+    clearContent = armContentDeadline(req);
+    const idle = armReadIdle(req);
+    req.on('error', (e) => { clearFb(); clearContent(); idle.clear(); reject(e); });
     req.on('timeout', () => { req.destroy(new Error('qoder upstream timeout')); });
     req.write(body);
     req.end();
   });
 }
 
-/** 流式：逐块回调内层 payload（含 [DONE]） */
+/** 流式：逐块回调内层 payload（含 [DONE]）。opts.agent 出站代理（E 包接线） */
 function postStream(url, body, headers, onChunk, opts = {}) {
   return new Promise((resolve, reject) => {
     const u = new URL(url);
@@ -270,6 +380,7 @@ function postStream(url, body, headers, onChunk, opts = {}) {
       method: 'POST',
       headers: { ...headers, Accept: 'text/event-stream', 'Content-Length': Buffer.byteLength(body) },
       timeout: TIMEOUT_MS,
+      ...(opts.agent ? { agent: opts.agent } : {}),
     }, (res) => {
       status = res.statusCode;
       respHeaders = res.headers;
@@ -286,10 +397,15 @@ function postStream(url, body, headers, onChunk, opts = {}) {
         if (!t.startsWith('data:')) return;
         const raw = t.slice(5).trim();
         if (raw === '[DONE]') { onChunk('[DONE]'); return; }
-        for (const inner of unwrap(raw)) onChunk(inner);
+        const inner = unwrap(raw);
+        // 只有**真实内容**才撤销「排队」计时器：错误信封与空 delta 首帧都
+        // 不算（排队时上游正是先回这两种，然后沉默，见 isRealContent 注释）
+        if (inner.length && inner.some((x) => isRealContent(x))) clearContent();
+        for (const x of inner) onChunk(x);
       };
       res.on('data', (chunk) => {
         clearFb();
+        idle.note();
         if (aborted) return;
         const text = dec.write(chunk);
         buf += text;
@@ -303,6 +419,8 @@ function postStream(url, body, headers, onChunk, opts = {}) {
       });
       res.on('end', () => {
         clearFb();
+        clearContent();
+        idle.clear();
         if (aborted) { settle(resolve, abortedResult()); return; }
         buf += dec.end();
         // 收尾：最后一帧常不带换行；且上游不发 [DONE]，要自己补
@@ -312,14 +430,21 @@ function postStream(url, body, headers, onChunk, opts = {}) {
       });
       res.on('error', (e) => {
         clearFb();
+        clearContent();
+        idle.clear();
         if (aborted) settle(resolve, abortedResult()); else settle(reject, e);
       });
     });
     // 与 post 同理：从请求写出时开始计时，覆盖「连响应头都不给」的挂起
     let clearFb = () => {};
+    let clearContent = () => {};
     clearFb = armFirstByte(req);
+    clearContent = armContentDeadline(req);
+    const idle = armReadIdle(req);
     req.on('error', (e) => {
       clearFb();
+      clearContent();
+      idle.clear();
       if (aborted) settle(resolve, abortedResult()); else settle(reject, e);
     });
     req.on('timeout', () => { req.destroy(new Error('qoder upstream timeout')); });
@@ -331,6 +456,8 @@ function postStream(url, body, headers, onChunk, opts = {}) {
       const onAbort = () => {
         aborted = true;
         clearFb();
+        clearContent();
+        idle.clear();
         try { req.destroy(); } catch (e) { /* 已结束 */ }
       };
       if (opts.signal.aborted) onAbort();

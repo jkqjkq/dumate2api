@@ -1,50 +1,46 @@
 快照指纹 sha256（stable/src 下 49 个 .js，按路径+内容计算）：
-7c931419dfbabf2104bbeaa01440f7981222a9cbb7f7b8351ef88e1c6014ef98
+a49c6d16db547b5e8589b107d1fa5e69e7bdfde3d07598dcaf976da408a07f68
 
 指纹算法：
   对 stable/src 下所有 .js 文件，按相对路径排序（`/` 分隔），
   拼接 [相对路径 + LF + 文件内容]，以 UTF-8 编码后取 sha256。
   本次已用该算法实算，可复核。
 
-来源：main 分支合并提交 60ad161（merge(dev)：签到详情按月/按年查看）
+来源：main 分支提交 977723d（fix(qoder)：排队按 (账号,模型) 粒度冷却）
   快照文件随后以 chore(stable) 单独提交。
 
-文件数：48 → 49（新增 checkin-ledger.js，无删除）。内容变更 2 个，+20 / −1。
+文件数：49 → 49（无增删）。内容变更 2 个。
 
-本次同步的改动（按影响面排序）：
+本次同步的改动：
 
-  checkin-ledger.js（新增）—— **统一签到账本**（data/checkin-ledger.jsonl）。
-    三条通道的签到历史可得性完全不同：搭子上游 sign_in_days 只给当月、
-    TRAE 上游完全没有历史、Qoder 只有积分批次（一次签到可能领多个活动）。
-    所以「某天某账号签到了」单独记一份，按 channel + 账号 + 日期幂等。
-    **只从功能上线时开始有数据，不编造历史**——管理端接口会返回覆盖起点。
-    日期用**本地时区**（不能用 toISOString，UTC+8 凌晨会被算成前一天）。
+  upstream-errors.js —— 排队信封带 modelKey 时标 scope:'model'（但本快照
+    没有账号池，见下）；冷却时长封顶 DUMATE_THROTTLE_MAX_MS（默认 10 分钟）；
+    修正 THROTTLE_TEXT 的转义引号匹配——原写法 `"isQueued"\s*:\s*true`
+    匹配不到真实串里的 `\"isQueued\":true`（引号前有转义反斜杠），
+    该分支从未命中过，一直靠 subCode 兜底。
 
-  qoder/index.js —— checkinAndSave 成功后写签到账本（claim / already 两种来源）。
-    写失败不影响签到本身。
+  qoder/chat.js —— CONTENT_MS 默认 30s → 12s（排队「无内容」判定阈值）。
+    两个账号串行时用户感知的最坏等待从 60s 降到 24s；12s 覆盖埋点
+    实测 p99=11.9s，误杀约 1%，且误杀后会换号重试。
 
-  traework/checkin.js —— checkinAndSave 的两条成功路径都写签到账本
-    （已签记 already，领取记 claim 并带实际到账差值）。
+**本次未同步的部分（如实标注，别当成已完成）**：
+  stable/src/qoder/index.js 仍是**账号池接入之前**的版本（只 require
+  ../errtext 与 ../checkin-ledger，没有 channel-pool）。所以 977723d 里
+  「模型级冷却——一个模型排队不再封掉整条通道」在这份快照里**不适用**：
+  本快照没有账号池，也就没有「账号级 7015 秒封禁」这个问题，它失败时
+  是直接报错而不是进入长冷却。
+  要让它也用上账号池，需要把 pool.js / channel-pool.js / sticky.js /
+  filelock.js / fileperm.js / livecfg.js / proxy-agent.js 等一并同步，
+  属于一次独立的架构同步，本次**未执行**。
 
-  不在本快照内（纯管理端 / 前端 / 测试，网关不加载）：
-    src/admin/routes/checkin.js（签到详情接口）、
-    web/src/components/CheckinDetailCard.vue、web/src/api/checkin.ts、
-    web/src/views/PointsView.vue、test/verify-checkin-detail.js。
+验证记录（2026-10-27，全部实测）：
 
-验证记录（2026-10-22，全部实测）：
-
-  - **逐字节比对**：闭包 49 = 快照 49，内容全部一致；反向检查无多余文件
-  - **node --check**：49 个文件全部通过
-  - **独立启动**（临时端口 19099，DUMATE_ADMIN_DATA=<repo>/data，
-    DUMATE_AUTOSTART=off）：
-      /health → 四条通道 ready；Qoder 模型表 11 个、TRAE 50 个
-      进程存活，日志零 Error
-  - **离线回归**：22 个离线测试全过，其中新增
-      verify-checkin-detail（22 项：账本按天幂等、本地日期、搭子四类来源合并、
-      失败签到不计入、Qoder 领取批次与跨年过滤、TRAE lastCheckin、
-      覆盖范围、千问办公 400）
-  - **管理端**（临时端口 19093）：/api/admin/checkin/detail 已挂载
-    （无会话 401、未知子路径 404），web/dist 正常服务
+  - 逐字节比对：两个文件与 src 完全一致（cmp -s 通过）
+  - node --check：两文件均通过
+  - 独立启动（临时端口 19099，DUMATE_ADMIN_DATA=<repo>/data，
+    DUMATE_AUTOSTART=off）：三条直连通道 ready（QwenWork / TRAE / Qoder），
+    listening on 127.0.0.1:19099 正常，无 Error
+  - 指纹实算：FILES=49，SHA256=a49c6d16…
   - **未启动 9080**：本次只更新快照文件，9080 保持停止状态
 
 启动方式（沿用）：
@@ -54,10 +50,11 @@
   且 9083 管理端读的是 <repo>/data、看不到 9080 的流量。
 
 上一版快照来源：
-  41863ef（merge(dev)：code review 修复——错误帧识别 / 上游中止 / 错误埋点），
-  指纹 8a4ce323…
+  60ad161（merge(dev)：签到详情按月/按年查看），指纹 7c931419…
 
 更早：
+  41863ef（merge(dev)：code review 修复——错误帧识别 / 上游中止 / 错误埋点），
+    指纹 8a4ce323…
   6007f0d（merge(dev)：Qoder 错误面 + 模型表预热），指纹 dc89567a…
   132e744（merge(dev)：流式 usage 帧与首字耗时埋点补齐 + 默认网页凭证），
     指纹 c7a3c059…
