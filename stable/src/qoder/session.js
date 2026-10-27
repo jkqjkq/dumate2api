@@ -8,8 +8,9 @@ const c = require('./constants');
 
 const TIMEOUT_MS = 20000;
 
-/** 发一个 JSON 请求，返回 { status, data, raw }。永不抛（网络错当 status=0） */
-function request(url, { method = 'GET', headers = {}, body = null, timeout = TIMEOUT_MS } = {}) {
+/** 发一个 JSON 请求，返回 { status, data, raw }。永不抛（网络错当 status=0）。
+ *  opts.agent 出站代理（E 包接线）：凭证/配额请求与对话同出口，null = 直连。 */
+function request(url, { method = 'GET', headers = {}, body = null, timeout = TIMEOUT_MS, agent = null } = {}) {
   return new Promise((resolve) => {
     let u;
     try { u = new URL(url); } catch (e) { return resolve({ status: 0, data: null, raw: '', error: e.message }); }
@@ -19,7 +20,10 @@ function request(url, { method = 'GET', headers = {}, body = null, timeout = TIM
       h['content-type'] = h['content-type'] || 'application/json';
       h['content-length'] = Buffer.byteLength(payload);
     }
-    const req = https.request({ hostname: u.hostname, path: u.pathname + u.search, method, headers: h, timeout }, (res) => {
+    const req = https.request({
+      hostname: u.hostname, path: u.pathname + u.search, method, headers: h, timeout,
+      ...(agent ? { agent } : {}),
+    }, (res) => {
       let b = '';
       res.on('data', (chunk) => { b += chunk; });
       res.on('end', () => {
@@ -55,6 +59,12 @@ const MODELS_CACHE_MS = parseInt(process.env.DUMATE_QODER_MODELS_CACHE_MS || '30
 //   2. **cn / global 跨区串表**：两个区域的模型集本来就不同（账号也不通用）。
 const modelsCache = new Map(); // `${region}:${uid}` -> { at, data }
 
+// 出站 agent（E 包收口补点）：模型表/额度/签到/用户信息与对话同出口。
+// 配置非法向上抛（调用方转各自失败形状），绝不静默回退直连。
+function agentOf(account) {
+  return require('../proxy-agent').getAgentFor(account);
+}
+
 function modelsCacheKey(account) {
   const region = c.normalizeRegion(account && account.region);
   const who = (account && (account.uid || account.id)) || '';
@@ -75,9 +85,12 @@ async function fetchModels(account, { force = false } = {}) {
   }, account.machineId || '', account.machineToken || '', account.machineType || '5');
   const headers = cosy.buildHeaders(sess, ep.ModelsPathSig, '', 'application/json', { 'accept-encoding': 'identity' });
   const u = new URL(ep.ModelListURL);
+  let agent;
+  try { agent = agentOf(account); } catch (e) { return { ok: false, error: e.message, models: [] }; }
   const r = await new Promise((resolve) => {
     const req = require('https').request({
       hostname: u.hostname, path: u.pathname + u.search, method: 'GET', headers, timeout: 20000,
+      ...(agent ? { agent } : {}),
     }, (res) => {
       let b = ''; res.on('data', (x) => { b += x; }); res.on('end', () => resolve({ status: res.statusCode, raw: b }));
     });
@@ -147,11 +160,16 @@ async function fetchModels(account, { force = false } = {}) {
  */
 async function exchange(account) {
   if (!account || !account.refreshToken) return { ok: false, error: '缺少 refreshToken' };
+  let agent = null;
+  try { agent = require('../proxy-agent').getAgentFor(account); } catch (e) {
+    return { ok: false, error: `出站代理配置错误: ${e.message}` };
+  }
   const ep = c.endpointsOf(account.region);
   const r = await request(ep.RefreshEndpoint, {
     method: 'POST',
     headers: { 'User-Agent': 'qoder/1.0.0', 'Login-Version': c.LOGIN_VERSION },
     body: { refresh_token: account.refreshToken, target: 'c' },
+    agent,
   });
   if (r.status !== 200 || !r.data) {
     // refresh 失败通常是凭证本身失效（refresh token 过期/被吊销）——
@@ -193,18 +211,18 @@ async function ensureAccount(authStore, account) {
   return authStore.get(account.id) || { ...account, ...r.patch };
 }
 
-/** 取用户信息（登录后 / 补昵称时用） */
-async function fetchUserInfo(token, region) {
+/** 取用户信息（登录后 / 补昵称时用）。opts.agent 出站代理（E 包收口补点） */
+async function fetchUserInfo(token, region, opts = {}) {
   const ep = c.endpointsOf(region);
-  const r = await request(ep.UserinfoBase, { headers: bearerHeaders(token) });
+  const r = await request(ep.UserinfoBase, { headers: bearerHeaders(token), agent: opts.agent || null });
   if (r.status !== 200 || !r.data) return null;
   return r.data;
 }
 
-/** 取套餐信息 */
-async function fetchPlan(token, region) {
+/** 取套餐信息。opts.agent 出站代理（E 包收口补点） */
+async function fetchPlan(token, region, opts = {}) {
   const ep = c.endpointsOf(region);
-  const r = await request(ep.PlanEndpoint, { headers: bearerHeaders(token) });
+  const r = await request(ep.PlanEndpoint, { headers: bearerHeaders(token), agent: opts.agent || null });
   if (r.status !== 200 || !r.data) return null;
   return r.data;
 }
@@ -220,9 +238,9 @@ async function fetchPlan(token, region) {
  * 实测（2026-10-02）：新账号 userQuota 与 addOnQuota 都是 0，
  * 此时聊天请求**会挂起不返回**（既不报错也不超时失败），必须先签到领积分。
  */
-async function fetchQuota(token, region) {
+async function fetchQuota(token, region, opts = {}) {
   const ep = c.endpointsOf(region);
-  const r = await request(ep.QuotaEndpoint, { headers: bearerHeaders(token, { 'cosy-clienttype': c.CHECKIN_CLIENT_TYPE }) });
+  const r = await request(ep.QuotaEndpoint, { headers: bearerHeaders(token, { 'cosy-clienttype': c.CHECKIN_CLIENT_TYPE }), agent: opts.agent || null });
   if (r.status !== 200 || !r.data) return { ok: false, error: r.error || `HTTP ${r.status}` };
   const bucket = (o) => {
     if (!o || typeof o !== 'object') return null;
@@ -250,9 +268,9 @@ function num(v) {
  *
  * 幂等：已领的活动 claimStatus 不是 CLAIMABLE，会跳过；重复调用不会重复领。
  */
-async function listCampaigns(token, region) {
+async function listCampaigns(token, region, opts = {}) {
   const ep = c.endpointsOf(region);
-  const r = await request(ep.CampaignsBase, { headers: bearerHeaders(token, { 'cosy-clienttype': c.CHECKIN_CLIENT_TYPE }) });
+  const r = await request(ep.CampaignsBase, { headers: bearerHeaders(token, { 'cosy-clienttype': c.CHECKIN_CLIENT_TYPE }), agent: opts.agent || null });
   if (r.status !== 200 || !r.data) return { ok: false, error: r.error || `HTTP ${r.status}`, campaigns: [] };
   return {
     ok: true,
@@ -277,8 +295,8 @@ async function listCampaigns(token, region) {
  * 官方活动描述写着 Daily reset: 10:00 (UTC+8)，与本项目记载一致，
  * 不是 00:00。查不到时返回 null，界面显示「—」而不是编一个。
  */
-async function checkinStatus(token, region) {
-  const list = await listCampaigns(token, region);
+async function checkinStatus(token, region, opts = {}) {
+  const list = await listCampaigns(token, region, opts);
   if (!list.ok) return { ok: false, error: list.error, checkedIn: null, nextAt: null, pending: null };
 
   const camps = list.campaigns || [];
@@ -310,13 +328,14 @@ async function checkinStatus(token, region) {
   };
 }
 
-async function claimCampaign(token, region, campaignId) {
+async function claimCampaign(token, region, campaignId, opts = {}) {
   const ep = c.endpointsOf(region);
   const url = `${ep.CampaignsBase}/${encodeURIComponent(campaignId)}/claim`;
   const r = await request(url, {
     method: 'POST',
     headers: bearerHeaders(token, { 'cosy-clienttype': c.CHECKIN_CLIENT_TYPE }),
     body: {},
+    agent: opts.agent || null,
   });
   if (r.status !== 200 || !r.data) return { ok: false, error: r.error || `HTTP ${r.status}`, raw: r.raw };
   const d = r.data;
@@ -329,6 +348,13 @@ async function claimCampaign(token, region, campaignId) {
     status: d.status || '',
     benefit: d.benefit || null,
     replayed: d.replayed === true,
+    // **grantId 是本地批次账本的幂等键**（grants.record 靠它去重）。响应原文
+    // d.grantId 存在（benefit 里部分活动形态也带）。此前没有带出，
+    // fromClaim 恒返 ''、record 以空键拒写——过期提醒自 2026-10-02 起实际
+    // 无数据源（P0-1）。两个位置都试，缺失如实空串（不编造）。
+    grantId: d.grantId || (d.benefit && d.benefit.grantId) || '',
+    // campaignKey 优先取领取响应，列表条目（camp.campaignKey）由调用方兜底
+    campaignKey: d.campaignKey || (d.benefit && d.benefit.campaignKey) || '',
     // grantedAt 是服务端给的领取时刻（ISO）；缺失时由调用方用本地时间兜底
     grantedAt: d.grantedAt || '',
     // 有效期：mode=RELATIVE_DAYS + days=30 是最常见形态
@@ -346,18 +372,29 @@ async function claimCampaign(token, region, campaignId) {
  *
  * @param {object} [opts.account] 账号对象。给了就顺手把每个批次写进本地账本
  *   （src/qoder/grants.js）——**过期提醒靠它**，因为上游没有逐批余额接口。
+ *   同时也是出站代理的解析来源（E 包收口补点）：签到全链路与对话同出口，
+ *   代理配置非法时以首次网络动作的失败收场，不回退直连。
  */
 async function checkin(token, region, opts = {}) {
-  const before = await fetchQuota(token, region);
-  const list = await listCampaigns(token, region);
+  let agent = null;
+  try { agent = opts.account ? agentOf(opts.account) : null; } catch (e) {
+    return { ok: false, error: e.message, claimed: [] };
+  }
+  const before = await fetchQuota(token, region, { agent });
+  const list = await listCampaigns(token, region, { agent });
   if (!list.ok) return { ok: false, error: list.error, claimed: [] };
   const claimed = [];
   for (const camp of list.campaigns) {
     if (camp.claimStatus !== 'CLAIMABLE') continue;
-    const r = await claimCampaign(token, region, camp.campaignId);
+    const r = await claimCampaign(token, region, camp.campaignId, { agent });
+    // campaignKey 两个来源都可信：领取响应（claimCampaign 现已带出）与列表条目。
+    // 领取响应缺失时用列表值兜底——账本里它参与标识批次，空着没法对账。
+    const campaignKey = r.campaignKey || camp.campaignKey || '';
     claimed.push({
       campaignId: camp.campaignId,
-      key: camp.campaignKey || '',
+      key: campaignKey,
+      // grantId 只有领取响应里有：账本幂等键（P0-1 补齐后才会非空）
+      grantId: r.grantId || '',
       amount: (r.amount != null ? r.amount : (camp.benefit && camp.benefit.amount)),
       ok: r.ok,
       status: r.status || '',
@@ -371,13 +408,13 @@ async function checkin(token, region, opts = {}) {
     if (r.ok && opts.account) {
       try {
         const grants = require('./grants');
-        grants.record(grants.fromClaim(r, opts.account));
+        grants.record(grants.fromClaim({ ...r, campaignKey }, opts.account));
       } catch (e) { /* 记账失败不影响签到 */ }
     }
   }
   // 结算有延迟，等一拍再读
   if (claimed.some((x) => x.ok)) await new Promise((s) => setTimeout(s, 1500));
-  const after = await fetchQuota(token, region);
+  const after = await fetchQuota(token, region, { agent });
   // 到账差值：以 addOnQuota 为准（免费用户的积分都进这里）
   let gained = null;
   if (before.ok && after.ok && before.addOnQuota && after.addOnQuota) {

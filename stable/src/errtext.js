@@ -32,6 +32,16 @@
  * 编一个不认识的错误的解释比不翻译更糟。
  */
 const NET_ERRORS = [
+  // Qoder 上游限流（2026-10-23~24 实测）：信封 code 10605 + subCode
+  // RESOURCE_LIMIT + serviceAvailable:false 是**服务级**过载，换账号没用。
+  // 两条都无锚（子串匹配）：信封串很长，错误码藏在嵌套 JSON 里。
+  [/RESOURCE_LIMIT/i, '上游限流中（服务过载，稍后重试）'],
+  // 读空闲（qoder/chat.js 的 read idle）：请求被上游排队挂起、先响应后沉默，
+  // 网关等满 READ_IDLE_MS 主动断开——不掐的话要挂到中间层 360s 才报 aborted。
+  [/qoder upstream read idle/i, '上游排队挂起，长时间无数据（限流，已主动断开）'],
+  // 排队 ack：上游先回一帧空内容、之后一直没有真实内容（CONTENT_MS 到点断开）。
+  // 这是「被排队」最常见的形态，且只花了 30 秒就识别出来。
+  [/qoder upstream queued/i, '上游排队中（长时间没有内容，已主动断开）'],
   // 响应流在传完之前被掐断。上游主动断开、中间设备超时、进程被杀都会触发
   [/^aborted$/i, '上游连接中断'],
   [/^socket hang up$/i, '上游连接被挂断'],
@@ -68,10 +78,15 @@ function explainError(msg) {
   const s = raw.trim();
   if (!s) return '';
 
+  // 读取侧会对已翻译过的存量值再翻一次：已带这段中文说明的就跳过——
+  // 无锚的子串匹配（RESOURCE_LIMIT / read idle / upstream timeout）不跳的话，
+  // 重翻会命中翻译结果里保留的原串，套娃成双重括号。
   for (const [re, text] of OWN_TIMEOUT) {
+    if (s.includes(text)) continue;
     if (re.test(s)) return `${text}（${s}）`;
   }
   for (const [re, text] of NET_ERRORS) {
+    if (s.includes(text)) continue;
     // 完全匹配或去掉 Node 前缀后匹配（Error: aborted → aborted）
     if (re.test(s) || re.test(s.replace(/^(Error|TypeError|FetchError)\s*:\s*/i, ''))) {
       return `${text}（${s}）`;

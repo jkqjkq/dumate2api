@@ -15,7 +15,14 @@ const authStore = require('./auth');
 const session = require('./session');
 const constants = require('./constants');
 const { normalizeError } = require('../errtext');
+const { isThrottle } = require('../upstream-errors');
 const ledger = require('../checkin-ledger');
+// 选号接缝（集成阶段）：冷却/熔断/粘性/在途帽统一走池状态机。
+// 通道在池里的 uid 键位 = 'qoder:<id>'（channel-pool.js 统一裁决）。
+const channelPool = require('../channel-pool');
+const CHANNEL = 'qoder';
+// 出站代理工厂（E 包接线）：runOnce 按账号解析 agent
+const proxyAgent = require('../proxy-agent');
 
 /**
  * 预热**模型表**：runOnce 从同步缓存里取「该模型的最大上下文档位」（1M），
@@ -59,8 +66,17 @@ function pickAccount() {
   return a;
 }
 
-function nextAccount(exclude) {
-  return authStore.findUsable().filter((a) => !exclude.has(a.id));
+/**
+ * 业务码 105（Login expired）→ classify 的 401（session_dead）。
+ *
+ * Qoder 凭证失效不走 HTTP 401，而是 COSY 信封里的 105；池的防误杀计数
+ * 必须能吃到它，否则凭证死了账号永远健康、每次请求都要白撞一次。
+ * 放在喂池入口而不是改 classify——105 是 Qoder 通道的私有业务码，
+ * upstream-errors 是两条 COSY 通道共用的识别层，不认识通道私有码。
+ */
+function poolStatusOf(code) {
+  const n = Number(code) || 0;
+  return n === 105 ? 401 : n;
 }
 
 /**
@@ -71,12 +87,19 @@ function nextAccount(exclude) {
  *
  * Qoder 特有：**额度耗尽时请求会挂起（不报错）**，所以这里看不到 402；
  * 真正会看到的是 `Login expired`（105，凭证失效，换号有用）与模型不可用。
+ *
+ * **限流（10605 + RESOURCE_LIMIT / CALL_COUNT_LIMIT）必须换号**：
+ * 排队的粒度是 (账号, 模型)，两个账号的队列位置不同——实测同一分钟，
+ * 一个账号的 dfmodel 在排 2410 位，另一个账号的 gfmodel 直接 200。
+ * 旧判据只看 403 + 一组模型/权限文案，限流落到「不可换号」分支，
+ * 于是第二个账号白放着、用户拿一个 403。
  */
 function retryable(code, message) {
   const n = Number(code);
   if (!Number.isFinite(n) || n === 0) return true; // 网络错误/超时：换号试一次
   if (n === 401 || n === 402 || n === 429) return true;
   if (n === 105) return true; // Login expired：凭证失效，换号有用
+  if (isThrottle(message)) return true; // 上游排队/限流：换号可能落到没排队的那个
   if (n === 403) {
     return /not available|无权限|无权访问|login expired|expired/i.test(String(message || ''));
   }
@@ -169,7 +192,8 @@ async function runOnce(account, payload, onChunk, opts, meter) {
   const modelMeta = cachedModels.find((m) => m.key === modelKey);
   const ctxMax = process.env.DUMATE_QODER_CONTEXT === 'default' ? null : (modelMeta && modelMeta.maxInputTokens);
   const bodyJson = chat.buildBody(modelKey, payload, { maxInputTokens: ctxMax });
-  const encBody = cosy.encode(Buffer.from(bodyJson));
+  // encode 进 worker（审计 P1-5b）：几 MB 请求的编码不再独占事件循环
+  const encBody = await cosy.encodeAsync(Buffer.from(bodyJson));
 
   // COSY 会话与账号身份绑定：uid / device_token 都进签名。
   // machineId/Token/Type 每账号一份（登录时生成并持久化）。
@@ -191,6 +215,8 @@ async function runOnce(account, payload, onChunk, opts, meter) {
     'x-model-key': modelKey,
     'x-model-source': 'system',
   });
+  // 出站代理（E 包接线）：账号 proxy 字段 > 全局 DUMATE_PROXY，无代理 null 直连
+  const agent = proxyAgent.getAgentFor(account);
 
   const startedAt = Date.now();
   // 本条请求的 credits（上游 usage 直给）。流式路径逐帧扫、取最大值——
@@ -231,7 +257,7 @@ async function runOnce(account, payload, onChunk, opts, meter) {
         }
         sent = true;
         onChunk(inner);
-      }, { signal: ac.signal });
+      }, { signal: ac.signal, agent });
       if (firstErr) {
         const err = new Error(`qoder ${firstErr.code}: ${firstErr.message}`);
         err.statusCode = firstErr.code;
@@ -268,7 +294,7 @@ async function runOnce(account, payload, onChunk, opts, meter) {
       meter.settle(peakCredits);
       return res;
     }
-    const res = await chat.post(ep.ChatStreamURL, encBody, headers);
+    const res = await chat.post(ep.ChatStreamURL, encBody, headers, { agent });
     const es = chat.envelopeStatus(res.raw);
     if (es && es.code >= 400) {
       const err = new Error(`qoder ${es.code}: ${es.message}`);
@@ -303,8 +329,17 @@ async function runOnce(account, payload, onChunk, opts, meter) {
   }
 }
 
-/** 一次请求最多试几个账号。Qoder 签名是纯本地计算，代价低，可以放宽到 3 */
-const MAX_ATTEMPTS = 3;
+/**
+ * 一次请求最多尝试几次。
+ *
+ * 每次尝试不一定是不同账号：上游排队是**请求级随机**的（实测同一账号挂起
+ * 一次后紧接着的 5 次请求全部成功），所以「换号」不是唯一出路，等掉那几秒
+ * 的短冷却再打同一个号往往就过了。MAX_ATTEMPTS 是总尝试次数上限，
+ * 排队类失败会把 `tried` 清空重新轮询（见循环里的 transientOnly 分支）。
+ */
+const MAX_ATTEMPTS = 4;
+/** 排队挂起后，最多愿意等多久再重试（ms）。池给的排队冷却默认 5s，留点余量 */
+const QUEUE_WAIT_MS = Math.max(0, parseInt(process.env.DUMATE_QODER_QUEUE_WAIT_MS || '6000', 10) || 6000);
 
 /**
  * 发对话请求。主账号失败且错误「换号有救」时，按可用列表顺序转移。
@@ -333,11 +368,18 @@ function makeMeter(account, opts) {
 async function send(payload, onChunk, opts = {}) {
   const tried = new Set();
   const errors = [];
-  let account = pickAccount();
   const model = payload && payload.model ? String(payload.model).replace(/^qoder\//, '') : '';
   const startedAt = Date.now();
+  // 会话粘性 + 池选号（冷却/熔断/禁用/暂停/在途满跳过），见 channel-pool.js
+  const sessionKey = channelPool.sessionKeyOf(payload, opts);
+  const usable = authStore.findUsable();
+  if (!usable.length) throw new Error('Qoder 没有可用账号，请先添加一个');
+  let sel = channelPool.pickCandidate(CHANNEL, usable, { exclude: tried, sessionKey, model });
+  if (!sel) throw noAccountError(usable, model);
 
   for (let i = 0; i < MAX_ATTEMPTS; i++) {
+    const account = sel.account;
+    const uid = sel.uid; // 本次尝试占用的池记录；catch 里换号后 finally 只放它
     tried.add(account.id);
     if (opts.onAccount) {
       const name = account.nickname || account.uid || `账号 ${account.id}`;
@@ -347,6 +389,8 @@ async function send(payload, onChunk, opts = {}) {
     const meter = makeMeter(account, { ...opts, model, startedAt });
     try {
       const result = await runOnce(account, payload, onChunk, opts, meter);
+      // 成功喂池：清熔断/软退避/防误杀计数
+      channelPool.noteSuccess(CHANNEL, account.id);
       // 成功即清除上次的失败标记（与千问同一约定：一次瞬时失败不该永远挂着）
       if (account.lastError) {
         try { authStore.patch(account.id, { lastError: '' }); }
@@ -355,13 +399,37 @@ async function send(payload, onChunk, opts = {}) {
       return result;
     } catch (e) {
       const code = Number(e.statusCode) || 0;
+      const throttled = isThrottle(e.message);
+      // 失败喂池：105（Login expired）按 401 进防误杀计数，其余按 classify
+      channelPool.noteError(CHANNEL, account.id, { status: poolStatusOf(code), message: e.message, model });
       markFailure(account, e.message);
-      errors.push({ account: account.nickname || account.uid || account.id, status: code || '网络错误', error: e.message });
+      errors.push({ account: account.nickname || account.uid || account.id, status: code || '网络错误', error: e.message, throttled });
       if (e.sent) throw e; // 流式已吐帧，不能再换号
       if (!retryable(code, e.message)) throw e;
-      const rest = nextAccount(tried);
-      if (!rest.length) break;
-      account = rest[0];
+      sel = channelPool.pickCandidate(CHANNEL, usable, { exclude: tried, sessionKey, model });
+      if (!sel) {
+        // 账号都轮过一遍了。**排队类失败不要就此收工**：它跟账号健康无关，
+        // 唯一的原因是上游这一条被随机排掉。等掉池给的短冷却（默认 5s）、
+        // 清空 exclude 再轮询一次，往往就过了。
+        const transientOnly = errors.every((x) => x.throttled || x.status === '网络错误');
+        const av = channelPool.availability(CHANNEL, usable, { model });
+        const canWait = transientOnly && i < MAX_ATTEMPTS - 1
+          && av.softOnly && av.nextInMs > 0 && av.nextInMs <= QUEUE_WAIT_MS;
+        if (canWait) {
+          await sleep(av.nextInMs);
+          tried.clear();
+          sel = channelPool.pickCandidate(CHANNEL, usable, { exclude: tried, sessionKey, model });
+        }
+        if (!sel) {
+          const av2 = channelPool.availability(CHANNEL, usable, { model });
+          if (av2.softOnly && av2.nextInMs > 0 && errors.every((x) => x.throttled)) {
+            throw throttleError(av2.nextInMs);
+          }
+          break;
+        }
+      }
+    } finally {
+      channelPool.release(uid);
     }
   }
 
@@ -372,11 +440,46 @@ async function send(payload, onChunk, opts = {}) {
     return `${x.account}(${x.status}${m ? ': ' + m.slice(0, 120) : ''})`;
   };
   const err = new Error(`Qoder 所有账号均失败：${errors.map(brief).join('；')}`);
-  // 状态码 0 = 网络层失败（连接被拒/中断/首字节超时）。映射成 502 让客户端
-  // 知道是上游不可用，而不是把 0 原样回出去（0 会被某些客户端当成「无错误」）。
-  err.statusCode = Number(errors[errors.length - 1].status) || 502;
+  // 全部失败原因都是**限流**时回 429：客户端（Codex / Claude Code）对 429 会
+  // 自动退避重试，对 403/502 只会当硬失败。上游的条件本来就是「稍后再来」。
+  if (errors.length && errors.every((x) => x.throttled)) {
+    err.statusCode = 429;
+    err.throttled = true;
+  } else {
+    // 状态码 0 = 网络层失败（连接被拒/中断/首字节超时）。映射成 502 让客户端
+    // 知道是上游不可用，而不是把 0 原样回出去（0 会被某些客户端当成「无错误」）。
+    err.statusCode = Number(errors[errors.length - 1].status) || 502;
+  }
   throw err;
 }
+
+/**
+ * 选不到账号时的错误。**限流软冷却要与「禁用/熔断/在途满」区分**：
+ * 前者是上游让我们等几十秒（429 + 可重试），后者要人介入（503）。
+ * 混成一句话时用户只看到「Qoder 没有可用账号」，而账号本身完全健康。
+ */
+function noAccountError(usable, model) {
+  const av = channelPool.availability(CHANNEL, usable, { model });
+  if (!av.usable && av.softOnly && av.nextInMs > 0) return throttleError(av.nextInMs);
+  const err = new Error('Qoder 没有可用账号（全部处于冷却/禁用/在途满，可到管理端账号池复活）');
+  err.statusCode = 503;
+  return err;
+}
+
+/**
+ * 429：上游在排队/限流，让客户端等一会儿重试。
+ * Codex 与 Claude Code 对 429 会自动退避重试，对 403/502 只当硬失败，
+ * 所以这个状态码本身就是「还可救」的信号。
+ */
+function throttleError(nextInMs) {
+  const err = new Error(`Qoder 上游限流，全部账号排队中（${Math.ceil(nextInMs / 1000)} 秒后可重试）`);
+  err.statusCode = 429;
+  err.throttled = true;
+  err.retryAfterMs = nextInMs;
+  return err;
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, Math.max(0, Number(ms) || 0)));
 
 /**
  * 模型列表：问服务端，失败回落静态表。
@@ -470,7 +573,11 @@ async function checkinAndSave(account) {
 
 function quota(account) {
   const a = account || pickAccount();
-  return session.fetchQuota(a.accessToken, a.region);
+  let agent;
+  try { agent = proxyAgent.getAgentFor(a); } catch (e) {
+    return Promise.resolve({ ok: false, error: e.message });
+  }
+  return session.fetchQuota(a.accessToken, a.region, { agent });
 }
 
 module.exports = {

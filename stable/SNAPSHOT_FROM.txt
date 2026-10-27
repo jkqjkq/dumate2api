@@ -1,5 +1,5 @@
-快照指纹 sha256（stable/src 下 49 个 .js，按路径+内容计算）：
-a49c6d16db547b5e8589b107d1fa5e69e7bdfde3d07598dcaf976da408a07f68
+快照指纹 sha256（stable/src 下 58 个 .js，按路径+内容计算）：
+c440a72bafd7fcaf56153b305cf948440549eceb76ce1a9cf61e53e08bbc338e
 
 指纹算法：
   对 stable/src 下所有 .js 文件，按相对路径排序（`/` 分隔），
@@ -7,41 +7,51 @@ a49c6d16db547b5e8589b107d1fa5e69e7bdfde3d07598dcaf976da408a07f68
   本次已用该算法实算，可复核。
 
 来源：main 分支提交 977723d（fix(qoder)：排队按 (账号,模型) 粒度冷却）
-  快照文件随后以 chore(stable) 单独提交。
+  快照同步随本次一并完成，单列 chore(stable) 提交。
 
-文件数：49 → 49（无增删）。内容变更 2 个。
+文件数：49 → 58（新增 9 个，无删除）。内容变更 10 个。
 
 本次同步的改动：
 
-  upstream-errors.js —— 排队信封带 modelKey 时标 scope:'model'（但本快照
-    没有账号池，见下）；冷却时长封顶 DUMATE_THROTTLE_MAX_MS（默认 10 分钟）；
-    修正 THROTTLE_TEXT 的转义引号匹配——原写法 `"isQueued"\s*:\s*true`
-    匹配不到真实串里的 `\"isQueued\":true`（引号前有转义反斜杠），
-    该分支从未命中过，一直靠 subCode 兜底。
+  **Qoder 账号池整套进快照**（新增 9 个）：
+    pool.js —— 账号池状态机（冷却/熔断/软退避/模型负缓存/防误杀计数），
+      落盘 data/pool-state.json，重启恢复时清理过期态
+    channel-pool.js —— 池的通道层接缝（sessionKeyOf / pickCandidate /
+      availability / noteError / noteSuccess / release）
+    sticky.js —— 会话粘性（同会话优先落同一账号）
+    filelock.js / fileperm.js —— 跨进程文件锁与权限（pool / keys / livecfg 共用）
+    jsonl.js —— JSONL 追加
+    livecfg.js —— 热配置（软冷却基数可在管理端改，下一个 429 即新口径）
+    offthread.js —— CPU 密集活挪出事件循环
+    proxy-agent.js —— 出站代理（按账号解析，配置了才走）
 
-  qoder/chat.js —— CONTENT_MS 默认 30s → 12s（排队「无内容」判定阈值）。
-    两个账号串行时用户感知的最坏等待从 60s 降到 24s；12s 覆盖埋点
-    实测 p99=11.9s，误杀约 1%，且误杀后会换号重试。
+  内容更新 10 个：
+    qoder/index.js —— 选号改走池（冷却/熔断/禁用/暂停/在途满跳过）；
+      排队失败走 5 秒短冷却，账号轮完一遍且失败全是瞬时类时等掉冷却再重试
+    upstream-errors.js —— 排队信封带 modelKey 时标 scope:'model'；冷却时长
+      封顶 DUMATE_THROTTLE_MAX_MS（默认 10 分钟）；修正 `\"isQueued\"` 的
+      转义匹配（原写法匹配不到，该分支从未命中过，一直靠 subCode 兜底）
+    qoder/chat.js —— CONTENT_MS 默认 30s → 12s（排队「无内容」判定）
+    qoder/auth.js / qoder/session.js / qoder/credits.js / qoder/cosy.js ——
+      与 src 对齐（积分归因、到账差值、协议常量等累计改动）
+    cosy.js / errtext.js —— 签名与错误文案的累计改动
+    traework/auth.js / traework/constants.js / traework/models.js —— 与 src 对齐
 
-**本次未同步的部分（如实标注，别当成已完成）**：
-  stable/src/qoder/index.js 仍是**账号池接入之前**的版本（只 require
-  ../errtext 与 ../checkin-ledger，没有 channel-pool）。所以 977723d 里
-  「模型级冷却——一个模型排队不再封掉整条通道」在这份快照里**不适用**：
-  本快照没有账号池，也就没有「账号级 7015 秒封禁」这个问题，它失败时
-  是直接报错而不是进入长冷却。
-  要让它也用上账号池，需要把 pool.js / channel-pool.js / sticky.js /
-  filelock.js / fileperm.js / livecfg.js / proxy-agent.js 等一并同步，
-  属于一次独立的架构同步，本次**未执行**。
+  **本次修复在快照里是完整生效的**：账号池已进快照，所以「一个模型排队
+  不再封掉整条通道（模型级冷却）」在 9080 同样有效。上一版（指纹 a49c6d16…）
+  只同步了 2 个文件，qoder/index.js 还是池接入前的实现，模型级冷却不适用；
+  本版已补齐。
 
 验证记录（2026-10-27，全部实测）：
 
-  - 逐字节比对：两个文件与 src 完全一致（cmp -s 通过）
-  - node --check：两文件均通过
+  - 闭包：从 src/qoder/index.js 出发算得 31 个文件，与快照逐字节比对，
+    19 个需同步（9 缺 / 10 异）；同步后全部 cmp -s 通过
+  - node --check：31 个文件全部通过
   - 独立启动（临时端口 19099，DUMATE_ADMIN_DATA=<repo>/data，
     DUMATE_AUTOSTART=off）：三条直连通道 ready（QwenWork / TRAE / Qoder），
-    listening on 127.0.0.1:19099 正常，无 Error
-  - 指纹实算：FILES=49，SHA256=a49c6d16…
-  - **未启动 9080**：本次只更新快照文件，9080 保持停止状态
+    listening on 127.0.0.1:19099 正常，日志零 Error
+  - 指纹实算：FILES=58，SHA256=c440a72b…
+  - **未启动 9080**：按用户要求只同步文件，9080 保持停止状态
 
 启动方式（沿用）：
   9080 必须按 start-stable.bat 启动（它设了 DUMATE_ADMIN_DATA=<repo>/data）。
@@ -50,6 +60,8 @@ a49c6d16db547b5e8589b107d1fa5e69e7bdfde3d07598dcaf976da408a07f68
   且 9083 管理端读的是 <repo>/data、看不到 9080 的流量。
 
 上一版快照来源：
+  977723d 的部分同步（2 文件），指纹 a49c6d16…
+    该版**没有账号池**，Qoder 通道仍是池接入前的实现，已于本版补齐。
   60ad161（merge(dev)：签到详情按月/按年查看），指纹 7c931419…
 
 更早：

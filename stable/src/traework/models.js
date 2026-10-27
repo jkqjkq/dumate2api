@@ -116,12 +116,18 @@ async function fetchModels({ force = false } = {}) {
   const auth = authStore.findUsable()[0];
   if (!auth) return { ok: false, error: '没有可用账号（需先登录）', models: [], fetchedAt: 0 };
 
+  // 出站代理（E 包收口补点）：模型表与对话同出口。配置非法按拉取失败返回。
+  let agent = null;
+  try { agent = require('../proxy-agent').getAgentFor(auth); } catch (e) {
+    return { ok: false, error: e.message, models: [], fetchedAt: 0 };
+  }
   const r = await c.request(c.AGENT_HOST, c.EP_MODELS, {
     method: 'POST',
     // **必须带 function**：空 body 上游只回空表（实测 config_info_list: []）
     body: { function: c.FUNCTION },
     headers: soloHeaders(auth),
     timeout: 60000,
+    agent,
   });
   if (r.status !== 200 || !r.data) {
     return { ok: false, error: `HTTP ${r.status} ${String(r.raw).slice(0, 120)}`, models: [], fetchedAt: 0 };

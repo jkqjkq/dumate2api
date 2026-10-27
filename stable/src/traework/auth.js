@@ -15,6 +15,8 @@ const crypto = require('crypto');
 const c = require('./constants');
 const { oauthHeaders } = require('./headers');
 const { explainError } = require('../errtext');
+const filelock = require('../filelock');
+const fileperm = require('../fileperm');
 
 const FILE = 'traework-accounts.json';
 
@@ -44,7 +46,9 @@ function save(data) {
   fs.mkdirSync(dataDir(), { recursive: true });
   const target = filePath();
   const tmp = `${target}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(data, null, 2), 'utf8');
+  // 权限收紧（fileperm.js）：token 只留在当前用户可读的文件里
+  fs.writeFileSync(tmp, JSON.stringify(data, null, 2), { encoding: 'utf8', mode: 0o600 });
+  fileperm.harden(tmp);
   fs.renameSync(tmp, target);
   cache = { mtime: fs.statSync(target).mtimeMs, data };
   return data;
@@ -96,42 +100,54 @@ function findUsable() {
 
 /** 新增或按 uid 覆盖 */
 function upsert(acc) {
-  const data = load();
-  const i = data.accounts.findIndex((a) => (acc.uid && a.uid === acc.uid) || (acc.id && a.id === acc.id));
-  if (i >= 0) {
-    data.accounts[i] = { ...data.accounts[i], ...acc };
+  // 跨进程互斥（filelock.js）：refreshToken 是轮换的，管理端换票写新值、
+  // 网关请求失败 patch(lastError)，两进程无锁 RMW 时后写者会盖掉新 token。
+  // 锁内先失效缓存再重读。
+  return filelock.withLock(filePath(), () => {
+    cache = { mtime: -1, data: null };
+    const data = load();
+    const i = data.accounts.findIndex((a) => (acc.uid && a.uid === acc.uid) || (acc.id && a.id === acc.id));
+    if (i >= 0) {
+      data.accounts[i] = { ...data.accounts[i], ...acc };
+      save(data);
+      return data.accounts[i];
+    }
+    const id = data.accounts.reduce((m, a) => Math.max(m, Number(a.id) || 0), 0) + 1;
+    const rec = { id, enabled: true, createdAt: Date.now(), ...acc };
+    data.accounts.push(rec);
     save(data);
-    return data.accounts[i];
-  }
-  const id = data.accounts.reduce((m, a) => Math.max(m, Number(a.id) || 0), 0) + 1;
-  const rec = { id, enabled: true, createdAt: Date.now(), ...acc };
-  data.accounts.push(rec);
-  save(data);
-  return rec;
+    return rec;
+  });
 }
 
 function remove(id) {
-  const data = load();
-  const before = data.accounts.length;
-  data.accounts = data.accounts.filter((a) => a.id !== Number(id));
-  if (data.accounts.length === before) return false;
-  save(data);
-  return true;
+  return filelock.withLock(filePath(), () => {
+    cache = { mtime: -1, data: null };
+    const data = load();
+    const before = data.accounts.length;
+    data.accounts = data.accounts.filter((a) => a.id !== Number(id));
+    if (data.accounts.length === before) return false;
+    save(data);
+    return true;
+  });
 }
 
 function patch(id, fields) {
-  const data = load();
-  const a = data.accounts.find((x) => x.id === Number(id));
-  if (!a) return null;
-  // lastError 与 lastErrorAt 必须同步移动（与 qwenwork/auth.js 同构）：所有写
-  // lastError 的调用方都走这里，集中打时间戳比在每个调用点各写一次可靠——
-  // 漏一处就会出现「有时间戳的错误」和「没时间戳的错误」两种形状，界面无法统一判断新鲜度。
-  if (fields && fields.lastError !== undefined) {
-    fields.lastErrorAt = fields.lastError ? Date.now() : null;
-  }
-  Object.assign(a, fields);
-  save(data);
-  return a;
+  return filelock.withLock(filePath(), () => {
+    cache = { mtime: -1, data: null };
+    const data = load();
+    const a = data.accounts.find((x) => x.id === Number(id));
+    if (!a) return null;
+    // lastError 与 lastErrorAt 必须同步移动（与 qwenwork/auth.js 同构）：所有写
+    // lastError 的调用方都走这里，集中打时间戳比在每个调用点各写一次可靠——
+    // 漏一处就会出现「有时间戳的错误」和「没时间戳的错误」两种形状，界面无法统一判断新鲜度。
+    if (fields && fields.lastError !== undefined) {
+      fields.lastErrorAt = fields.lastError ? Date.now() : null;
+    }
+    Object.assign(a, fields);
+    save(data);
+    return a;
+  });
 }
 
 /** token 是否在 skewMs 内过期 */
@@ -146,6 +162,10 @@ function needsRefresh(a, skewMs = 24 * 3600 * 1000) {
  */
 async function exchange(a) {
   if (!a || !a.refreshToken) return { ok: false, error: '缺少 refreshToken' };
+  let agent = null;
+  try { agent = require('../proxy-agent').getAgentFor(a); } catch (e) {
+    return { ok: false, error: `出站代理配置错误: ${e.message}` };
+  }
   const host = a.apiHost || c.OAUTH_HOST;
   const body = {
     ClientID: c.CLIENT_ID,
@@ -154,7 +174,7 @@ async function exchange(a) {
     UserID: '',
   };
   const r = await c.request(host, c.EP_EXCHANGE, {
-    method: 'POST', body, headers: oauthHeaders(),
+    method: 'POST', body, headers: oauthHeaders(), agent,
   });
   if (r.status !== 200 || !r.data) {
     return { ok: false, error: `HTTP ${r.status} ${String(r.raw).slice(0, 120)}` };
@@ -259,10 +279,14 @@ function ensureDevice(a) {
   }) || { ...a, ...d };
 }
 
-/** 取用户信息（登录后用一次，补 uid / 昵称） */
+/** 取用户信息（登录后用一次，补 uid / 昵称）。
+ *  出站代理（E 包收口补点）：与对话同出口。配置非法返回 null（调用方按
+ *  「读不到」处理），不回退直连。 */
 async function fetchUserInfo(a) {
+  let agent = null;
+  try { agent = require('../proxy-agent').getAgentFor(a); } catch (e) { return null; }
   const r = await c.request(a.apiHost || c.OAUTH_HOST, c.EP_USER_INFO, {
-    method: 'POST', body: {}, headers: { ...oauthHeaders(), Authorization: `Cloud-IDE-JWT ${a.accessToken}` },
+    method: 'POST', body: {}, headers: { ...oauthHeaders(), Authorization: `Cloud-IDE-JWT ${a.accessToken}` }, agent,
   });
   if (r.status !== 200 || !r.data) return null;
   const res = (r.data && r.data.Result) || r.data || {};
