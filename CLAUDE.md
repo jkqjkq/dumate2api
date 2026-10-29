@@ -579,6 +579,27 @@ cd web && npm run build    # 前端构建（vue-tsc 类型检查 + vite build �
 
 `start.bat` / `stop.bat` / `restart.bat` 是 Windows 生命周期脚本。`stop.bat` 用 `taskkill /T` 杀进程树（后端是网关的子进程），**不动 DuMate GUI 和 cc-switch**，可重复执行；`stop.bat nopause` 供 `restart.bat` 内部调用。
 
+**桌面快捷方式走的是托盘应用，不是 `start-dev.bat`**：`launcher/dumate2api-tray.vbs`
+（隐藏启动）→ `launcher/dumate2api-tray.ps1`（PowerShell + WinForms，零第三方依赖）。
+提供启动/关闭服务、打开管理端、完全退出；前台窗口滚动显示两个进程的实时日志；
+**点关闭按钮只收进托盘、服务继续跑**，退出必须走「完全退出」。托盘右键是同一套功能。
+
+三个实现细节，改之前先读：
+
+1. **`.ps1` 存成 UTF-8 带 BOM**。PowerShell 5.1 读无 BOM 的 `.ps1` 会按 ANSI
+   解码，中文全乱码甚至解析失败。这与下文「新建文件用无 BOM」的约定冲突，
+   但 PS 5.1 是硬要求——别「顺手修正」掉。（`.vbs` 反过来必须**纯 ASCII**，
+   wscript 按 ANSI 读。）
+2. **必须显式 `ShowWindow(SW_SHOW)`**。启动器用窗口样式 0 隐藏控制台，而 Windows
+   会把 `STARTUPINFO` 的 `SW_HIDE` 应用到该进程的**第一次 ShowWindow**——那一次
+   恰好是 WinForms 显示主窗体。不覆盖就会出现「服务起来了、进程活着、窗口永不出现」
+   （`MainWindowHandle = 0`）。所以在 `add_Shown` 里再调一次。
+3. **日志靠「重定向到文件 + 轮询字节偏移」**（`data/launcher-9082.log` /
+   `-9083.log`），不是抓 stdout：两个进程的输出要合并加前缀，在 PowerShell 里
+   跨线程改 UI 很容易死锁；落文件还能事后翻。
+
+`start-dev.bat` 保留，仍是无界面 / 需要看原始终端输出时的入口。
+
 **`.bat` 文件必须保持纯 ASCII——中文提示语会让脚本随机执行乱码片段。**
 cmd.exe 按**字节偏移**读取批处理文件；在 `chcp 65001`（UTF-8）下多字节字符
 会让偏移失步，某一行从错误位置被读出、尾部被当成命令执行。**且非确定性**：
