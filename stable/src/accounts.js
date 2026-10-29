@@ -7,6 +7,9 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const filelock = require('./filelock');
+const fileperm = require('./fileperm');
+const { normalizeProxyUrl, redactProxyUrl } = require('./proxy-agent');
 
 const DATA_DIR = process.env.DUMATE_ADMIN_DATA || path.resolve(__dirname, '..', 'data');
 const FILE = 'web-accounts.json';
@@ -36,8 +39,11 @@ function save(data) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
   const target = filePath();
   const tmp = `${target}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(data, null, 2), 'utf8');
-  fs.renameSync(tmp, target);
+  // 权限收紧（fileperm.js）：cookie 明文落盘是既有取舍（上游要原样取用），
+  // 至少把文件收窄到当前用户，不让同机其他账户直接读到
+  fs.writeFileSync(tmp, JSON.stringify(data, null, 2), { encoding: 'utf8', mode: 0o600 });
+  fileperm.harden(tmp);
+  filelock.renameAtomic(tmp, target);
   cache = { mtime: mtimeOf(), data };
   return data;
 }
@@ -100,6 +106,9 @@ function toPublic(a) {
     cookie: undefined,
     cookie_len: (a.cookie || '').length,
     cookie_summary: cookieSummary(a.cookie),
+    // proxy 同 cookie 纪律：可能带 user:pass，对外只出脱敏形态（连接用
+    // 原始记录走 load()/getRaw()，见 proxy-agent.js 文件头）
+    proxy: a.proxy ? redactProxyUrl(a.proxy) : '',
     // 账号存活天数（从 created_at 算到今天）。仪表盘账号健康快照用——
     // 与「会员剩余天数」是两回事，那个是额度有效期，这是账号用了多久。
     // 没有 created_at（很早以前加的账号）就 null，界面显示 —
@@ -147,95 +156,121 @@ function getRaw(id) {
   return load().accounts.find((a) => a.id === Number(id)) || null;
 }
 
+/**
+ * 账号出站代理字段（施工包 E）：空串=继承全局默认（DUMATE_PROXY /
+ * setGlobalProxy），非空=按账号覆盖。校验与归一化收敛在 proxy-agent.js，
+ * 保存时就暴露配置错误，而不是等请求打出去才发现。
+ */
+function normalizeProxyField(v) {
+  if (v === undefined || v === null || v === '') return '';
+  return normalizeProxyUrl(String(v));
+}
+
 function create(opts = {}) {
-  const data = load();
-  const cookie = normalizeCookie(opts.cookie);
-  if (!cookie) throw new Error('cookie 不能为空');
-  const sum = cookieSummary(cookie);
-  if (!sum.has_bduss) {
-    // BDUSS 是百度登录态的核心字段，没有它调任何接口都会 401。
-    // 与其存下来到调用时才失败，不如现在就说清缺什么。
-    throw new Error('cookie 里没有 BDUSS，请确认复制的是完整 Cookie（需包含 BDUSS）');
-  }
+  // 跨进程互斥（filelock.js）：签到/积分回写（管理端）与网关网页链路并发改
+  // 同一个文件，无锁 RMW 会互相覆盖。锁内先失效缓存再重读。
+  return filelock.withLock(filePath(), () => {
+    cache = { mtime: -1, data: null };
+    const data = load();
+    const cookie = normalizeCookie(opts.cookie);
+    if (!cookie) throw new Error('cookie 不能为空');
+    const sum = cookieSummary(cookie);
+    if (!sum.has_bduss) {
+      // BDUSS 是百度登录态的核心字段，没有它调任何接口都会 401。
+      // 与其存下来到调用时才失败，不如现在就说清缺什么。
+      throw new Error('cookie 里没有 BDUSS，请确认复制的是完整 Cookie（需包含 BDUSS）');
+    }
 
-  // 同一个 BDUSS 重复添加没有意义，会变成两个账号各自签到——但签到本身
-  // 按账号去重，所以后果是列表里出现两条一样的记录，容易被误读成两个账号
-  const dup = data.accounts.find((a) => cookieSummary(a.cookie).bduss_tail === sum.bduss_tail);
-  if (dup) throw new Error(`该账号已存在（${dup.name}）`);
+    // 同一个 BDUSS 重复添加没有意义，会变成两个账号各自签到——但签到本身
+    // 按账号去重，所以后果是列表里出现两条一样的记录，容易被误读成两个账号
+    const dup = data.accounts.find((a) => cookieSummary(a.cookie).bduss_tail === sum.bduss_tail);
+    if (dup) throw new Error(`该账号已存在（${dup.name}）`);
 
-  const id = data.accounts.reduce((m, a) => Math.max(m, a.id || 0), 0) + 1;
-  const now = Date.now();
-  const account = {
-    id,
-    name: String(opts.name || '').trim() || `账号 ${id}`,
-    cookie,
-    created_at: now,
-    updated_at: now,
-    enabled: opts.enabled !== false,
-    // 上游返回的身份信息，首次调接口后回填
-    uid: '',
-    nickname: '',
-    last_login_ok_at: null,
-    last_error: '',
-    // 签到状态
-    checkin: {
-      last_at: null,
-      last_result: '',
-      total_times: null,
-      sign_in_days: [],
-      month_points: null,
-    },
-    // 抽奖状态
-    lottery: {
-      remaining: null,
-      last_at: null,
-      last_result: '',
-      my_prizes: [],
-    },
-    // 积分缓存
-    points: null,
-    points_at: null,
-  };
-  data.accounts.push(account);
-  save(data);
-  return toPublic(account);
+    const id = data.accounts.reduce((m, a) => Math.max(m, a.id || 0), 0) + 1;
+    const now = Date.now();
+    const account = {
+      id,
+      name: String(opts.name || '').trim() || `账号 ${id}`,
+      cookie,
+      created_at: now,
+      updated_at: now,
+      enabled: opts.enabled !== false,
+      proxy: normalizeProxyField(opts.proxy),
+      // 上游返回的身份信息，首次调接口后回填
+      uid: '',
+      nickname: '',
+      last_login_ok_at: null,
+      last_error: '',
+      // 签到状态
+      checkin: {
+        last_at: null,
+        last_result: '',
+        total_times: null,
+        sign_in_days: [],
+        month_points: null,
+      },
+      // 抽奖状态
+      lottery: {
+        remaining: null,
+        last_at: null,
+        last_result: '',
+        my_prizes: [],
+      },
+      // 积分缓存
+      points: null,
+      points_at: null,
+    };
+    data.accounts.push(account);
+    save(data);
+    return toPublic(account);
+  });
 }
 
 function update(id, patch = {}) {
-  const data = load();
-  const a = data.accounts.find((x) => x.id === Number(id));
-  if (!a) return null;
-  if (patch.name !== undefined) a.name = String(patch.name).trim() || a.name;
-  if (patch.enabled !== undefined) a.enabled = !!patch.enabled;
-  if (patch.cookie !== undefined) {
-    const c = normalizeCookie(patch.cookie);
-    const sum = cookieSummary(c);
-    if (!sum.has_bduss) throw new Error('cookie 里没有 BDUSS');
-    a.cookie = c;
-  }
-  a.updated_at = Date.now();
-  save(data);
-  return toPublic(a);
+  return filelock.withLock(filePath(), () => {
+    cache = { mtime: -1, data: null };
+    const data = load();
+    const a = data.accounts.find((x) => x.id === Number(id));
+    if (!a) return null;
+    if (patch.name !== undefined) a.name = String(patch.name).trim() || a.name;
+    if (patch.enabled !== undefined) a.enabled = !!patch.enabled;
+    if (patch.proxy !== undefined) a.proxy = normalizeProxyField(patch.proxy);
+    if (patch.cookie !== undefined) {
+      const c = normalizeCookie(patch.cookie);
+      const sum = cookieSummary(c);
+      if (!sum.has_bduss) throw new Error('cookie 里没有 BDUSS');
+      a.cookie = c;
+    }
+    a.updated_at = Date.now();
+    save(data);
+    return toPublic(a);
+  });
 }
 
 // 内部使用：直接改账号记录（签到结果、积分缓存等），不回显 cookie
 function patchInternal(id, patch = {}) {
-  const data = load();
-  const a = data.accounts.find((x) => x.id === Number(id));
-  if (!a) return null;
-  Object.assign(a, patch);
-  a.updated_at = Date.now();
-  save(data);
-  return a;
+  return filelock.withLock(filePath(), () => {
+    cache = { mtime: -1, data: null };
+    const data = load();
+    const a = data.accounts.find((x) => x.id === Number(id));
+    if (!a) return null;
+    Object.assign(a, patch);
+    a.updated_at = Date.now();
+    save(data);
+    return a;
+  });
 }
 
 function remove(id) {
-  const data = load();
-  const before = data.accounts.length;
-  data.accounts = data.accounts.filter((x) => x.id !== Number(id));
-  if (data.accounts.length === before) return false;
-  save(data);
-  return true;
+  return filelock.withLock(filePath(), () => {
+    cache = { mtime: -1, data: null };
+    const data = load();
+    const before = data.accounts.length;
+    data.accounts = data.accounts.filter((x) => x.id !== Number(id));
+    if (data.accounts.length === before) return false;
+    save(data);
+    return true;
+  });
 }
 
 module.exports = {

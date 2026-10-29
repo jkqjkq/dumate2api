@@ -223,8 +223,8 @@ function unwrap(raw) {
   return [s];
 }
 
-/** 发一次推理请求，返回 { status, headers, raw } */
-function post(url, body, headers) {
+/** 发一次推理请求，返回 { status, headers, raw }。opts.agent 出站代理（E 包接线） */
+function post(url, body, headers, opts = {}) {
   return new Promise((resolve, reject) => {
     const u = new URL(url);
     const req = https.request({
@@ -233,14 +233,26 @@ function post(url, body, headers) {
       method: 'POST',
       headers: { ...headers, 'Accept': 'text/event-stream', 'Content-Length': Buffer.byteLength(body) },
       timeout: TIMEOUT_MS,
+      ...(opts.agent ? { agent: opts.agent } : {}),
     }, (res) => {
       let buf = '';
       // 同 postStream：必须用 StringDecoder 保持跨 chunk 的解码状态，
       // 否则非流式响应里的汉字也会在 chunk 边界处变成 U+FFFD
       const { StringDecoder } = require('string_decoder');
       const dec = new StringDecoder('utf8');
-      res.on('data', (c) => { buf += dec.write(c); });
-      res.on('end', () => { buf += dec.end(); resolve({ status: res.statusCode, headers: res.headers, raw: buf }); });
+      // 上游响应累积上限（审计 P1-1b）：上游半信任，无限 buf += 等于把
+      // 上游输出全部吃进内存。超限按连接错误处理。
+      let over = false;
+      res.on('data', (c) => {
+        if (over) return;
+        buf += dec.write(c);
+        if (buf.length > 64 * 1024 * 1024) {
+          over = true;
+          buf = '';
+          req.destroy(new Error('qwenwork upstream response too large'));
+        }
+      });
+      res.on('end', () => { if (!over) { buf += dec.end(); resolve({ status: res.statusCode, headers: res.headers, raw: buf }); } });
       res.on('error', reject);
     });
     req.on('error', reject);
@@ -250,8 +262,8 @@ function post(url, body, headers) {
   });
 }
 
-/** 流式：逐块回调内层 payload（含 [DONE]） */
-function postStream(url, body, headers, onChunk) {
+/** 流式：逐块回调内层 payload（含 [DONE]）。opts.agent 出站代理（E 包接线） */
+function postStream(url, body, headers, onChunk, opts = {}) {
   return new Promise((resolve, reject) => {
     const u = new URL(url);
     const req = https.request({
@@ -260,6 +272,7 @@ function postStream(url, body, headers, onChunk) {
       method: 'POST',
       headers: { ...headers, 'Accept': 'text/event-stream', 'Content-Length': Buffer.byteLength(body) },
       timeout: TIMEOUT_MS,
+      ...(opts.agent ? { agent: opts.agent } : {}),
     }, (res) => {
       let buf = '';
       // **必须用 StringDecoder**：TCP chunk 不按字符边界切，

@@ -152,13 +152,31 @@ const MODEL_TEXT = /model[^\n]{0,40}(not available|not found|not exist|unsupport
  * 就能把整个账号池打进 30~6 小时的冷却，而真实条件 30 秒后就恢复了，
  * 客户端看到的是「Qoder 用不了」。
  */
-// 引号前可能有一个转义反斜杠（上游把内层错误当字符串塞进信封，实测串里是
-// `\"isQueued\":true`）——写成 `"isQueued"` 是匹配不到的，只能靠 subCode
-// 兜住。两条都要能命中，否则 subCode 一改名就漏。
-const THROTTLE_TEXT = /RESOURCE_LIMIT|CALL_COUNT_LIMIT|\\?"isQueued\\?"\s*:\s*true|\\?"serviceAvailable\\?"\s*:\s*false|qoder upstream (queued|read idle)/i;
+// 引号前的转义反斜杠**可能是任意层数**：上游把内层错误当字符串塞进信封，
+// 而错误信封本身又是字符串，于是同一个 `isQueued` 会以 `"isQueued"`、
+// `\"isQueued\"`、`\\\"isQueued\"` 三种编码出现在不同深度的信封里。实测
+// Qoder 排队信封是**三层**（`\\\\"modelKey\\\\"`），旧的 `\\?"` 只认零到一层，
+// `modelKey` 与 `retryAfterSeconds` 全部匹配不到——后果是时长取不到（退化成
+// 5 分钟基数）且冷却退化成账号级（一个模型排队封掉整条通道）。
+// 所以判据统一在**归一化后的串**上做：先把 `\\+` 压成空，再去掉多余引号。
+const unescapeDeep = (s) => String(s == null ? '' : s).replace(/\\+"/g, '"').replace(/\\+/g, '');
+
+const THROTTLE_TEXT = /RESOURCE_LIMIT|CALL_COUNT_LIMIT|"isQueued"\s*:\s*true|"serviceAvailable"\s*:\s*false|qoder upstream (queued|read idle)/i;
+
+/**
+ * 排队（而非配额耗尽）的判据：信封里 `serviceAvailable:false`。
+ *
+ * **不能用 `isQueued:true`**——实测两种信封都带它：
+ *   · RESOURCE_LIMIT（排队）：`serviceAvailable:false`、queueCount:0、waitTime:30
+ *   · CALL_COUNT_LIMIT（调用次数配额）：`serviceAvailable:true`、queueCount:2410、waitTime:66
+ * 前者是请求级随机排队，等多久都不保证（见 QUEUE_THROTTLE_COOLDOWN_MS 注释）；
+ * 后者是真配额，等久了确实会恢复，**按上游时长冷却是对的**。
+ * 两者混为一谈会让 CALL_COUNT_LIMIT 也丢掉上游给的 66 秒时长。
+ */
+const QUEUE_TEXT = /"serviceAvailable"\s*:\s*false/i;
 
 /** 信封里带 modelKey = 这条限流是**某个模型**的排队，不是整条通道 */
-const MODEL_QUEUE_TEXT = /\\?"modelKey\\?"/i;
+const MODEL_QUEUE_TEXT = /"modelKey"\s*:/i;
 
 /**
  * 排队冷却的**上限**。上游按自己的队列长度算 `waitTime`（实测 queueCount
@@ -168,6 +186,26 @@ const MODEL_QUEUE_TEXT = /\\?"modelKey\\?"/i;
 const THROTTLE_MAX_MS = Math.max(
   1000,
   parseInt(process.env.DUMATE_THROTTLE_MAX_MS || '600000', 10) || 600000,
+);
+
+/**
+ * 排队类限流**冷却的上限**（与上面的 `THROTTLE_MAX_MS` 是两回事，别合并）。
+ *
+ * 实测 2026-10-29：排队是**请求级随机**的，上游给的 `retryAfterSeconds:30`
+ * **不可信**——照它等 3s 三次只成一次，等 10s / 30s 仍全部 `stillThrottled`，
+ * 但间隔 20 秒的单发请求 925ms 就成功。所以「按上游时长冷却」在排队场景下
+ * 只会把下一次本来能成的请求挡在门外。
+ *
+ * 反证也在同一次实测里：把冷却按 30s 记账后，紧接着的请求 **1~2ms** 就被
+ * 本地拒掉（`pickCandidate` 因冷却返回 null），用户看到的是「秒失败」——
+ * 比等 30 秒更糟，因为连一次真实尝试都没有。
+ *
+ * 取 5 秒：够挡住「同一秒连打」的自我放大，又短到下一轮重试就能真实触达上游。
+ * 与 `QUEUE_HANG_COOLDOWN_MS` 同一量级，两者都是「排队不是账号坏了」的处置。
+ */
+const QUEUE_THROTTLE_COOLDOWN_MS = Math.max(
+  0,
+  parseInt(process.env.DUMATE_QODER_QUEUE_COOLDOWN_MS || '5000', 10) || 5000,
 );
 
 /**
@@ -184,7 +222,7 @@ const QUEUE_HANG_COOLDOWN_MS = 5000;
 
 /** 这条错误串是不是上游在说「排队/限流，稍后重试」 */
 function isThrottle(message) {
-  return THROTTLE_TEXT.test(String(message == null ? '' : message));
+  return THROTTLE_TEXT.test(unescapeDeep(message));
 }
 
 /**
@@ -194,10 +232,9 @@ function isThrottle(message) {
  * `waitTime`（CALL_COUNT_LIMIT，同为秒）。
  */
 function throttleRetryMs(message) {
-  const s = String(message == null ? '' : message);
-  // 上游把内层错误当**字符串**塞进信封，所以实际串里是 `\"retryAfterSeconds\":30`
-  // （转义过的引号）。反斜杠可有可无，两种编码都要认，否则取不到时长。
-  const re = /\\?"(?:retryAfterSeconds|waitTime)\\?"\s*:\s*(\d+(?:\.\d+)?)/gi;
+  // 与 isThrottle 同一归一化：转义层数不确定，先在无转义的串上匹配。
+  const s = unescapeDeep(message);
+  const re = /"(?:retryAfterSeconds|waitTime)"\s*:\s*(\d+(?:\.\d+)?)/gi;
   // 两个字段可能同时出现（实测 CALL_COUNT_LIMIT：retryAfterSeconds=30、
   // waitTime=66）。取**较大的**那个——waitTime 是队列里的实际预估，
   // 只按 30s 回来必然还在队里；两者取大不会把冷却做得比上游要求更短。
@@ -243,15 +280,25 @@ function classify(err) {
   // 顺序很关键——放后面就会被下面那条 403/5xx 的 breaker 分支吃掉。
   if (isThrottle(full)) {
     const out = { ...base, kind: 'soft' };
-    const ms = throttleRetryMs(full);
-    if (ms) out.retryAfterMs = Math.min(ms, THROTTLE_MAX_MS);
-    // 上游没给时长（排队挂起是自己掐的）：用短冷却，别套 5 分钟基数。
-    else if (QUEUE_HANG_TEXT.test(full)) out.retryAfterMs = QUEUE_HANG_COOLDOWN_MS;
+    // **排队类限流不采信上游给的时长**（见 QUEUE_THROTTLE_COOLDOWN_MS 注释）：
+    // 实测照 `retryAfterSeconds` 等下去并不可靠，而按它记账会让下一次请求在
+    // 1~2ms 内被本地拒掉——用户看到「秒失败」，连一次真实尝试都没有。
+    // 判据用「信封带 isQueued / serviceAvailable:false」这一组，它与
+    // CALL_COUNT_LIMIT（真·调用配额耗尽，等久了确实会恢复）不同。
+    const isQueue = QUEUE_TEXT.test(unescapeDeep(full));
+    if (isQueue) {
+      out.retryAfterMs = QUEUE_THROTTLE_COOLDOWN_MS;
+    } else {
+      const ms = throttleRetryMs(full);
+      if (ms) out.retryAfterMs = Math.min(ms, THROTTLE_MAX_MS);
+      // 上游没给时长（排队挂起是自己掐的）：用短冷却，别套 5 分钟基数。
+      else if (QUEUE_HANG_TEXT.test(full)) out.retryAfterMs = QUEUE_HANG_COOLDOWN_MS;
+    }
     // **排队的粒度是 (账号, 模型)**（信封带 modelKey，实测同一分钟一个账号的
     // dfmodel 排 4697 位、另一个账号的 qfmodel 直接 200）。按账号级冷却会把
     // 没排队的模型一起封掉——用户配的是 dfmodel，于是连 qfmodel 都用不了，
     // 表现就是「Qoder 整条通道打不开」。带 modelKey 时降级为模型级冷却。
-    if (base.model && MODEL_QUEUE_TEXT.test(full)) out.scope = 'model';
+    if (base.model && MODEL_QUEUE_TEXT.test(unescapeDeep(full))) out.scope = 'model';
     return out;
   }
   if (status === 401) return { ...base, kind: 'session_dead' };
@@ -264,4 +311,5 @@ function classify(err) {
 
 module.exports = {
   payloadError, envelopeStatus, classify, isThrottle, throttleRetryMs, THROTTLE_TEXT,
+  QUEUE_TEXT, QUEUE_THROTTLE_COOLDOWN_MS,
 };

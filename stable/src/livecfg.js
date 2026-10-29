@@ -143,7 +143,7 @@ function Store(patch) {
     const target = filePath();
     const tmp = `${target}.tmp`;
     fs.writeFileSync(tmp, JSON.stringify(snap, null, 2), 'utf8');
-    fs.renameSync(tmp, target);
+    filelock.renameAtomic(tmp, target);
     cache = { mtime: mtimeOf(), snap };
     return Load();
   });

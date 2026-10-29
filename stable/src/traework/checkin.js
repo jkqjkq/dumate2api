@@ -37,6 +37,12 @@ async function withFreshToken(auth) {
   } catch (e) { return auth; }
 }
 
+// 出站 agent（E 包收口补点）：签到/额度与对话同出口。配置非法抛给调用方
+// 转失败形状，绝不静默回退直连。
+function agentOf(auth) {
+  return require('../proxy-agent').getAgentFor(auth);
+}
+
 /**
  * 查签到状态：{ checkedIn, credits, extraCredits, enable }
  *
@@ -46,8 +52,10 @@ async function withFreshToken(auth) {
  * credits 是**签到可得的额度**（不是余额），did_checked_in 是今天是否已领。
  */
 async function status(auth) {
+  let agent;
+  try { agent = agentOf(auth); } catch (e) { return { ok: false, error: e.message }; }
   const r = await c.request(c.UG_HOST, c.EP_CHECKIN_STATUS, {
-    method: 'POST', body: {}, headers: ugHeaders(withDevice(auth)),
+    method: 'POST', body: {}, headers: ugHeaders(withDevice(auth)), agent,
   });
   if (r.status !== 200 || !r.data) {
     return { ok: false, error: `HTTP ${r.status} ${String(r.raw).slice(0, 120)}` };
@@ -79,8 +87,10 @@ async function status(auth) {
 const CODE_RATE_LIMITED = 9074;
 
 async function claim(auth) {
+  let agent;
+  try { agent = agentOf(auth); } catch (e) { return { ok: false, error: e.message }; }
   const r = await c.request(c.UG_HOST, c.EP_CHECKIN_CLAIM, {
-    method: 'POST', body: {}, headers: ugHeaders(withDevice(auth)),
+    method: 'POST', body: {}, headers: ugHeaders(withDevice(auth)), agent,
   });
   if (r.status !== 200) {
     return { ok: false, error: `HTTP ${r.status} ${String(r.raw).slice(0, 120)}` };
@@ -125,8 +135,10 @@ async function claim(auth) {
  * total_amount 缺失时返回 null（不补 0）：0 会被当成「额度为零」。
  */
 async function usage(auth) {
+  let agent;
+  try { agent = agentOf(auth); } catch (e) { return { ok: false, error: e.message }; }
   const r = await c.request(c.UG_HOST, c.EP_ENT_USAGE, {
-    method: 'POST', body: {}, headers: ugHeaders(withDevice(auth)),
+    method: 'POST', body: {}, headers: ugHeaders(withDevice(auth)), agent,
   });
   if (r.status !== 200 || !r.data) {
     return { ok: false, error: `HTTP ${r.status} ${String(r.raw).slice(0, 120)}` };

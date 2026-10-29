@@ -207,7 +207,7 @@ function translateStreamToGoogle(upstreamRes, res, originalModel, onDone) {
     'Content-Type': 'text/event-stream',
     'Cache-Control': 'no-cache',
     'Connection': 'keep-alive',
-    'Access-Control-Allow-Origin': '*',
+    ...(res._cors || {}),
   });
 
   const send = (obj) => res.write(`data: ${JSON.stringify(obj)}\n\n`);

@@ -74,6 +74,17 @@ function prepareInfer(opts) {
   return prepareInferViaWasm(opts);
 }
 
+/**
+ * prepareInfer 的异步版（审计 P1-5b）：本地签名路径的 encode 进 worker，
+ * 事件循环不被占。wasm 退路维持同步——execFileSync 的阻塞是保留病灶
+ * （默认 DUMATE_QWENWORK_USE_WASM 不开启），修它要把 wasm 装载也搬进
+ * worker，超出本次范围。
+ */
+function prepareInferAsync(opts) {
+  if (!useWasm()) return localSign.prepareInferAsync(opts);
+  return Promise.resolve(prepareInferViaWasm(opts));
+}
+
 /** 预热：本地签名无外部资源可预热；wasm 模式才需要解析 wasm 路径 */
 function warmup() {
   if (!useWasm()) return { file: '(local sign)', version: 'local' };
@@ -89,4 +100,4 @@ function warmup() {
   return detailed;
 }
 
-module.exports = { prepareInfer, warmup, helperPath, useWasm, signer };
+module.exports = { prepareInfer, prepareInferAsync, warmup, helperPath, useWasm, signer };

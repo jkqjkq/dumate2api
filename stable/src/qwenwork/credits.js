@@ -20,6 +20,7 @@ const https = require('https');
 const fs = require('fs');
 const path = require('path');
 const constants = require('./constants');
+const filelock = require('../filelock');
 
 const SITE_ORIGIN = 'https://qwenwork.cn';
 const WALLETS_PATH = '/user/wallets';
@@ -85,7 +86,7 @@ function writePeak(o) {
     fs.mkdirSync(dataDir(), { recursive: true });
     const tmp = peakPath() + '.tmp';
     fs.writeFileSync(tmp, JSON.stringify(o));
-    fs.renameSync(tmp, peakPath());
+    filelock.renameAtomic(tmp, peakPath());
   } catch (e) { /* 峰值写不进不影响主流程 */ }
 }
 
@@ -153,7 +154,7 @@ function tokenOf(account) {
   return account.accessToken || account.token || '';
 }
 
-function httpGet(path, token, timeout = 15000, hostname = 'qwenwork.cn') {
+function httpGet(path, token, timeout = 15000, hostname = 'qwenwork.cn', opts = {}) {
   return new Promise((resolve) => {
     const req = https.request({
       hostname,
@@ -165,6 +166,8 @@ function httpGet(path, token, timeout = 15000, hostname = 'qwenwork.cn') {
         'User-Agent': constants.USER_AGENT,
       },
       timeout,
+      // 出站代理（E 包收口补点）：余额查询与对话同出口，null = 直连
+      ...(opts.agent ? { agent: opts.agent } : {}),
     }, (res) => {
       let b = '';
       res.on('data', (c) => { b += c; });
@@ -190,8 +193,8 @@ function num(v) {
  * 只在 wallets 报可疑的 0 时才调用——正常路径不该为一次查询多打一个上游。
  * 取不到（网络错 / 结构变了）返回 null，调用方据此回落，不编数字。
  */
-async function fetchQuotaRemaining(token) {
-  const r = await httpGet(constants.ACCOUNT_CONTEXT_PATH, token, 15000, ACCOUNT_CONTEXT_HOST);
+async function fetchQuotaRemaining(token, opts = {}) {
+  const r = await httpGet(constants.ACCOUNT_CONTEXT_PATH, token, 15000, ACCOUNT_CONTEXT_HOST, opts);
   if (r.status !== 200 || !r.data) return null;
   const q = (r.data.data || {}).quota;
   if (!q || typeof q.remaining !== 'number' || !Number.isFinite(q.remaining)) return null;
@@ -211,6 +214,13 @@ async function fetchWallets(opts = {}) {
   if (!token) {
     return { ok: false, error: '缺少账号 token，无法查询余额', daily: null, monthly: null, longterm: null };
   }
+  // 出站代理（E 包收口补点）：余额查询与对话同出口。配置非法按查询失败
+  // 返回（保活/面板把该账号当「查不到余额」），绝不回退直连。
+  let agent = null;
+  try { agent = require('../proxy-agent').getAgentFor(opts.account); } catch (e) {
+    return { ok: false, error: e.message, daily: null, monthly: null, longterm: null };
+  }
+  const agentOpts = { agent };
   // 无账号对象（裸 token）时按 token 尾段分桶，保证缓存仍然按身份隔离
   const key = String((opts.account && opts.account.id) || token.slice(-8));
   if (!opts.force) {
@@ -218,7 +228,7 @@ async function fetchWallets(opts = {}) {
     if (hit && Date.now() - hit.at < CACHE_MS) return hit.data;
   }
 
-  let r = await httpGet(WALLETS_PATH, token);
+  let r = await httpGet(WALLETS_PATH, token, 15000, 'qwenwork.cn', agentOpts);
   if (r.status !== 200 || !r.data) {
     return { ok: false, error: r.error || `HTTP ${r.status}`, daily: null, monthly: null, longterm: null };
   }
@@ -253,7 +263,7 @@ async function fetchWallets(opts = {}) {
   if (allZero(r)) {
     retried = true;
     await new Promise((s) => setTimeout(s, 400));
-    const r2 = await httpGet(WALLETS_PATH, token);
+    const r2 = await httpGet(WALLETS_PATH, token, 15000, 'qwenwork.cn', agentOpts);
     if (r2.status === 200 && r2.data && !allZero(r2)) {
       // 重试拿到了非 0 —— 第一次确实是抖动，用第二次的结果
       r = r2;
@@ -283,7 +293,7 @@ async function fetchWallets(opts = {}) {
   let authoritativeDaily = null;
   let dailyCorrected = false;
   if (walletsDaily === 0) {
-    const remaining = await fetchQuotaRemaining(token);
+    const remaining = await fetchQuotaRemaining(token, agentOpts);
     if (remaining != null && Number.isFinite(remaining)
         && remaining - (monthlyVal + longtermVal) > 0.005) {
       authoritativeDaily = remaining - (monthlyVal + longtermVal);
@@ -367,6 +377,13 @@ async function fetchWallets(opts = {}) {
 const queues = new Map();   // 账号 id → Promise（串行队列）
 const baselines = new Map(); // 账号 id → 上一次结算后的余额
 
+// 归因节流（审计 P1-4）：每次归因要「前后两次」打上游余额接口（force 读，
+// 不走 30s 缓存），匿名刷网关等于把每条请求放大成两次上游调用。TTL 内同一
+// 账号只做一次实测归因，窗口内的请求不落归因记录（与首个请求无基准时的
+// 行为一致），窗口两端的差值涵盖期间消耗总量。DUMATE_QWENWORK_CREDIT_TTL_MS 可调。
+const CAPTURE_TTL_MS = Math.max(0, parseInt(process.env.DUMATE_QWENWORK_CREDIT_TTL_MS || '60000', 10));
+const lastCaptureAt = new Map();
+
 /** 账号在队列里的 key。没有 id 就退回 token 尾段，保证同一身份同一条队列 */
 function queueKeyOf(account) {
   return String((account && account.id) || tokenOf(account).slice(-8) || 'unknown');
@@ -389,6 +406,10 @@ function capture(opts = {}) {
   const account = opts.account;
   if (!account) return Promise.resolve(null);
   const key = queueKeyOf(account);
+  // 节流窗口内不打上游、不落归因
+  const last = lastCaptureAt.get(key) || 0;
+  if (CAPTURE_TTL_MS && Date.now() - last < CAPTURE_TTL_MS) return Promise.resolve(null);
+  lastCaptureAt.set(key, Date.now());
   const run = async () => {
     // 首次没有基准，只建立它，不产出归因（否则会把历史消耗算到这次请求上）
     if (!baselines.has(key)) {
@@ -473,6 +494,7 @@ function forget(account) {
   const key = queueKeyOf(account);
   baselines.delete(key);
   queues.delete(key);
+  lastCaptureAt.delete(key);
   caches.delete(String(account.id || ''));
 }
 
@@ -511,10 +533,12 @@ function indexByReqId() {
 function record(entry) {
   const fs = require('fs');
   const path = require('path');
+  const jsonl = require('../jsonl');
   const dir = process.env.DUMATE_ADMIN_DATA || path.resolve(__dirname, '..', '..', 'data');
   try {
     fs.mkdirSync(dir, { recursive: true });
-    fs.appendFileSync(path.join(dir, 'qwenwork-credits.jsonl'), `${JSON.stringify(entry)}\n`, 'utf8');
+    // 大小轮转（jsonl.js）：逐请求归因文件不设限会无限增长
+    jsonl.append(path.join(dir, 'qwenwork-credits.jsonl'), `${JSON.stringify(entry)}\n`);
   } catch (e) { /* 埋点失败绝不影响正在转发的响应 */ }
 }
 

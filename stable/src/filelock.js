@@ -74,6 +74,25 @@ function release(target) {
 }
 
 /**
+ * 原子替换写盘的最后一步（tmp → target）要带 EPERM/EBUSY 重试。Windows 上
+ * 杀软会在文件刚关闭后短暂持有句柄，renameSync 随机报 EPERM——一次抖动就
+ * 会穿过 withLock（release 的 unlink 同样失败），锁文件孤儿化后同进程内
+ * 后续所有写盘都级联超时（实测 test/verify-qoder-throttle.js 六连败即此因，
+ * 线上 data/pool-state.json 走同一条路径）。退避极短（40~160ms），只为穿过
+ * 扫描窗口；全同步，锁内可用。
+ */
+function renameAtomic(tmp, target) {
+  for (let i = 0; ; i++) {
+    try { fs.renameSync(tmp, target); return; }
+    catch (e) {
+      const retryable = e && (e.code === 'EPERM' || e.code === 'EBUSY' || e.code === 'EACCES');
+      if (!retryable || i >= 4) throw e;
+      sleepSync(40 * (i + 1));
+    }
+  }
+}
+
+/**
  * 在锁内跑一次同步的「读-改-写」。锁的粒度是单个数据文件
  * （`data/keys.json` ↔ `data/keys.json.lock`）。
  *
@@ -85,4 +104,4 @@ function withLock(target, fn) {
   try { return fn(); } finally { release(target); }
 }
 
-module.exports = { withLock, acquire, release, lockPathFor };
+module.exports = { withLock, acquire, release, renameAtomic, lockPathFor };

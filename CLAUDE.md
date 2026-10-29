@@ -407,7 +407,7 @@ provider config 自带顶层 `model_context_window = 200000` +
 用前缀而不是猜模型名的理由：两侧模型名会撞车（搭子有 `glm-5`，千问上游也是 GLM 系），猜错了两侧都返回 200，从响应里根本看不出来；且隐式路由会让同一名字今天走 A 明天走 B。未知前缀若静默跑到搭子，会拿到「看起来成功但完全不是想要的结果」，比直接 400 难查得多。
 
 
-**`stable/` 是冻结快照**——网关闭包的拷贝（当前 **49 个 `.js`**：顶层 23 个 + `qwenwork/` 9 个 + `traework/` 9 个 + `qoder/` 8 个），**不随主目录开发改动**，保证 9080 不被开发中的代码波及。快照有自己的启动脚本 `stable/start-stable.bat`，默认用 `<repo>/data`——与开发实例共享同一份数据，这是有意的（账号池共用）。
+**`stable/` 是冻结快照**——网关闭包的拷贝（当前 **73 个 `.js`**：顶层 43 个 + `qwenwork/` 9 个 + `traework/` 9 个 + `qoder/` 8 个 + `admin/` 4 个），**不随主目录开发改动**，保证 9080 不被开发中的代码波及。快照有自己的启动脚本 `stable/start-stable.bat`，默认用 `<repo>/data`——与开发实例共享同一份数据，这是有意的（账号池共用）。
 
 **发布新版时不要简单地「把 `src/*.js` 覆盖过去」**，两个坑：
 
@@ -930,10 +930,10 @@ Claude Code ── Anthropic ───────┼──→ 网关 :9080 ─�
 
 **先分清两类**，它们的归属决定了改动要不要同步进 `stable/` 快照：
 
-- **属于网关闭包**（会进快照）：`dumate-web.js`、`accounts.js`、`web-pool.js`、`points-cursor.js`。它们被 `server.js` 的依赖闭包引用（回落链路与余额游标都要用），**改这些要同步快照**。
-- **纯管理端**（不进快照）：`web-gateway.js`、`task-runner.js`、`task-scheduler.js`、`login-browser.js`、`records.js`、`points-agg.js`、`admin/`。9080 网关不加载它们。
+- **属于网关闭包**（会进快照）：`server.js` 依赖闭包可达的全部文件。除了 `dumate-web.js`、`accounts.js`、`web-pool.js`、`points-cursor.js` 这些老的，**`boot.js` 接线后闭包又长了一截**：`boot.js` / `cors.js`（server.js 顶层引用）、`reqlog-hook.js` / `usage-agg.js` / `keepalive.js`（boot 探活与优雅停止）、`admin/store.js` / `balance-hist.js`（keepalive **顶层**依赖），以及 keepalive 签到适配器懒加载可达的 `admin/auth.js` / `admin/router.js` / `admin/routes/accounts.js` / `records.js` / `points-agg.js` / `task-runner.js` / `task-scheduler.js` / `login-browser.js`。**改这些都要同步快照**——别被「admin/ 不进快照」的旧印象骗了。
+- **真正不进快照的只剩**：`web-gateway.js`（9084 独立网关）、`admin/iputil.js`、`admin/routes/` 下其余管理路由（traework / qwenwork / qoder / keys / models / usage / reqlogs / chatlab / autotask / keepalive 面板等）。判断方法永远是**从 `src/server.js` 重算一次依赖闭包**，别凭直觉。
 
-> 判断某模块属于哪类，**不要凭直觉**——`records.js`（操作记录）和 `points-agg.js`（额度包聚合）看着像核心逻辑，实际只被管理端路由引用，不在快照里。用依赖闭包算一次最可靠（见下文「`stable/` 是冻结快照」）。
+> **闭包比对必须从 `src/server.js` 算起**。2026-10-29 的教训：上一版快照同步只按 `src/qoder/index.js` 的 31 文件子闭包做逐字节比对，结果 server.js / responses.js / web-pool.js 等 34 个文件自 `41863ef` 起**一直没同步**，其中 server.js 顶层新 require 的 `./boot` / `./cors` 不在快照里——**9080 会直接起不来**。子闭包比对会静默漏掉主链路的演进。
 
 | 模块 | 职责 |
 |---|---|

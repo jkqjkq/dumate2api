@@ -7,6 +7,10 @@ const chat = require('./chat');
 const authStore = require('./auth');
 const models = require('./models');
 const { normalizeError } = require('../errtext');
+// 选号接缝（集成阶段）：冷却/熔断/粘性/在途帽统一走池状态机。
+// 通道在池里的 uid 键位 = 'traework:<id>'（channel-pool.js 统一裁决）。
+const channelPool = require('../channel-pool');
+const CHANNEL = 'traework';
 
 /** 通道是否可用：至少有一个启用且凭证完整的账号 */
 function status() {
@@ -19,22 +23,26 @@ function status() {
 
 /**
  * 取一个可用账号，必要时先刷新 token。
- * 单账号阶段直接取第一个；多账号轮转后续接 web-pool 的思路。
+ * **只服务辅助路径**（管理端签到/额度等）。对话请求的选号走池状态机
+ * （send → channel-pool），冷却/熔断账号不会被选中；签到恰恰要触达
+ * 冷却账号（B 包「签到→解冻」闭环），不能被池拦截。
  */
 async function pickAccount() {
   const list = authStore.findUsable();
   if (!list.length) throw new Error('traework 没有可用账号');
-  const a = list[0];
-  if (authStore.needsRefresh(a)) {
-    const r = await authStore.exchange(a);
-    if (!r.ok) {
-      authStore.patch(a.id, { lastError: normalizeError(`刷新失败: ${r.error}`) });
-      throw new Error(`traework token 刷新失败: ${r.error}`);
-    }
-    authStore.patch(a.id, { ...r.patch, lastError: '' });
-    return authStore.get(a.id);
+  return ensureFresh(list[0]);
+}
+
+/** token 余量不足就先换票（选号成功后的第一步；失败抛错由调用方喂池） */
+async function ensureFresh(a) {
+  if (!authStore.needsRefresh(a)) return a;
+  const r = await authStore.exchange(a);
+  if (!r.ok) {
+    authStore.patch(a.id, { lastError: normalizeError(`刷新失败: ${r.error}`) });
+    throw new Error(`traework token 刷新失败: ${r.error}`);
   }
-  return a;
+  authStore.patch(a.id, { ...r.patch, lastError: '' });
+  return authStore.get(a.id);
 }
 
 /**
@@ -151,22 +159,63 @@ function upstreamError(streamErr) {
  * @param {object} [opts] { reqId } 请求埋点的 id，用于把积分归因与日志精确配对
  */
 async function send(payload, onChunk, opts = {}) {
-  const auth = await pickAccount();
   const model = payload && payload.model ? String(payload.model).replace(/^traework\//, '') : c.DEFAULT_MODEL;
-  const meta = {};
-  const body = chat.buildBody(payload, model, meta);
-  const startedAt = Date.now();
+  // 选号经池状态机：冷却/熔断/禁用/暂停/在途满跳过 + 会话粘性。
+  // traework 单账号时代不做故障转移；多账号后由池提供「跳过坏号」能力，
+  // 换号重试仍交给上层（一次会话内修不动模型行为问题）。
+  const sessionKey = channelPool.sessionKeyOf(payload, opts);
+  const usable = authStore.findUsable();
+  if (!usable.length) throw new Error('traework 没有可用账号');
+  const sel = channelPool.pickCandidate(CHANNEL, usable, { sessionKey, model });
+  if (!sel) {
+    const err = new Error('traework 没有可用账号（全部处于冷却/禁用/在途满，可到管理端账号池复活）');
+    err.statusCode = 503;
+    throw err;
+  }
+  const { uid } = sel;
+  let auth;
+  try {
+    auth = await ensureFresh(sel.account);
+  } catch (e) {
+    // 换票失败也进池：网络类按熔断计数，凭证失效类按防误杀计数（classify 判）
+    channelPool.noteError(CHANNEL, sel.account.id, { status: Number(e.statusCode) || 0, message: e.message, model });
+    channelPool.release(uid);
+    throw e;
+  }
 
-  // 上报本次实际使用的账号。**这是唯一权威的来源**：多账号轮询下
-  // 「池里的第一个」与「这次选中的那个」不是一回事，埋点处猜不出来。
   const accountName = auth.nickname || auth.uid || `账号 ${auth.id}`;
   if (opts.onAccount) {
     try { opts.onAccount(accountName); } catch (e) { /* 上报失败不影响请求 */ }
   }
 
+  try {
+    const result = await runConversation(auth, payload, onChunk, opts, model);
+    // 成功喂池：清熔断/软退避/防误杀计数（修复重试属于模型行为，不算失败）
+    channelPool.noteSuccess(CHANNEL, auth.id);
+    return result;
+  } catch (e) {
+    channelPool.noteError(CHANNEL, auth.id, { status: Number(e.statusCode) || 0, message: e.message, model });
+    try { authStore.patch(auth.id, { lastError: normalizeError(e.message) }); } catch (err) { /* 记不下不影响 */ }
+    throw e;
+  } finally {
+    channelPool.release(uid);
+  }
+}
+
+/**
+ * 一次完整对话（原 send 主体）：选号之后的事——构造请求体、修复重试、
+ * 积分归因采集。成败喂池统一在 send 里做，这里不碰池。
+ */
+async function runConversation(auth, payload, onChunk, opts, model) {
+  const meta = {};
+  const body = chat.buildBody(payload, model, meta);
+  const startedAt = Date.now();
+
+  // 账号上报已在 send 里做过（选号完成即上报），这里只管发请求与采集。
+
   // 积分归因：**必须在请求完成后**采集（请求要几秒，提前读会读到没结算的状态）。
   // 不 await —— 采集在响应发出后进行，不占请求延迟。
-  // 记的是**本次实际使用的账号**（pickAccount 选出的那个），多账号下
+  // 记的是**本次实际使用的账号**（send 经池选出的那个），多账号下
   // 「池里的第一个」与「实际用的那个」不是一回事。
   const settle = () => {
     require('./credits')

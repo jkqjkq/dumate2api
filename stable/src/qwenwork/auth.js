@@ -15,6 +15,8 @@ const path = require('path');
 const crypto = require('crypto');
 const c = require('./constants');
 const { explainError } = require('../errtext');
+const filelock = require('../filelock');
+const fileperm = require('../fileperm');
 
 const FILE = 'qwenwork-accounts.json';
 
@@ -44,8 +46,10 @@ function save(data) {
   fs.mkdirSync(dataDir(), { recursive: true });
   const target = filePath();
   const tmp = `${target}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(data, null, 2), 'utf8');
-  fs.renameSync(tmp, target);
+  // 权限收紧（fileperm.js）：token 与明文手机号只留在当前用户可读的文件里
+  fs.writeFileSync(tmp, JSON.stringify(data, null, 2), { encoding: 'utf8', mode: 0o600 });
+  fileperm.harden(tmp);
+  filelock.renameAtomic(tmp, target);
   cache = { mtime: fs.statSync(target).mtimeMs, data };
   return data;
 }
@@ -120,68 +124,106 @@ function preferred() {
 
 /** 新增或按 uid / id 覆盖。uid 相同视为同一个账号（重新登录同一个号） */
 function upsert(acc) {
-  const data = load();
-  const i = data.accounts.findIndex((a) => (acc.uid && a.uid === acc.uid) || (acc.id && a.id === acc.id));
-  // 主账号是排他的：任何写路径带 preferred:true 都要先清掉别人的。
-  // 只在新账号时设 preferred 是不够的——绕过 upsert 直接传 preferred 的
-  // 调用方（如探针、导入）会留下两个 true，选号就变成「看谁排在前面」。
-  if (acc && acc.preferred === true) {
-    for (const x of data.accounts) x.preferred = false;
-  }
-  if (i >= 0) {
-    data.accounts[i] = { ...data.accounts[i], ...acc };
+  // 跨进程互斥（filelock.js）：**高危点**——网关在请求失败时 patch(lastError)、
+  // 管理端在换票后写新的 accessToken/refreshToken，两个进程同时 RMW 时后写者
+  // 会用旧快照盖掉先写者刚换到的 refresh token，账号直接报废。锁内先失效
+  // 缓存再重读，保证改的是磁盘上的最新值。
+  return filelock.withLock(filePath(), () => {
+    cache = { mtime: -1, data: null };
+    const data = load();
+    const i = data.accounts.findIndex((a) => (acc.uid && a.uid === acc.uid) || (acc.id && a.id === acc.id));
+    // 主账号是排他的：任何写路径带 preferred:true 都要先清掉别人的。
+    // 只在新账号时设 preferred 是不够的——绕过 upsert 直接传 preferred 的
+    // 调用方（如探针、导入）会留下两个 true，选号就变成「看谁排在前面」。
+    if (acc && acc.preferred === true) {
+      for (const x of data.accounts) x.preferred = false;
+    }
+    if (i >= 0) {
+      data.accounts[i] = { ...data.accounts[i], ...acc };
+      save(data);
+      return data.accounts[i];
+    }
+    const id = data.accounts.reduce((m, a) => Math.max(m, Number(a.id) || 0), 0) + 1;
+    // 池里第一个账号自动成为主账号，否则一个账号时也要额外配一次
+    const rec = { id, enabled: true, createdAt: Date.now(), ...acc };
+    if (rec.preferred === undefined) rec.preferred = data.accounts.length === 0;
+    data.accounts.push(rec);
     save(data);
-    return data.accounts[i];
-  }
-  const id = data.accounts.reduce((m, a) => Math.max(m, Number(a.id) || 0), 0) + 1;
-  // 池里第一个账号自动成为主账号，否则一个账号时也要额外配一次
-  const rec = { id, enabled: true, createdAt: Date.now(), ...acc };
-  if (rec.preferred === undefined) rec.preferred = data.accounts.length === 0;
-  data.accounts.push(rec);
-  save(data);
-  return rec;
+    return rec;
+  });
 }
 
 function remove(id) {
-  const data = load();
-  const before = data.accounts.length;
-  data.accounts = data.accounts.filter((a) => a.id !== Number(id));
-  if (data.accounts.length === before) return false;
-  // 删掉的是主账号时，把主账号顺延给剩下的第一个——否则池里没有 preferred，
-  // 选号会静默退化成「取第一个」，用户以为是随机换的
-  if (!data.accounts.some((a) => a.preferred) && data.accounts.length) {
-    data.accounts[0].preferred = true;
-  }
-  save(data);
-  return true;
+  return filelock.withLock(filePath(), () => {
+    cache = { mtime: -1, data: null };
+    const data = load();
+    const before = data.accounts.length;
+    data.accounts = data.accounts.filter((a) => a.id !== Number(id));
+    if (data.accounts.length === before) return false;
+    // 删掉的是主账号时，把主账号顺延给剩下的第一个——否则池里没有 preferred，
+    // 选号会静默退化成「取第一个」，用户以为是随机换的
+    if (!data.accounts.some((a) => a.preferred) && data.accounts.length) {
+      data.accounts[0].preferred = true;
+    }
+    save(data);
+    return true;
+  });
 }
 
 function patch(id, fields) {
-  const data = load();
-  const a = data.accounts.find((x) => x.id === Number(id));
-  if (!a) return null;
-  // 设为主账号是排他的：置 true 时清掉其他账号的同标记
-  if (fields && fields.preferred === true) {
-    for (const x of data.accounts) if (x.id !== a.id) x.preferred = false;
-  }
-  // lastError 与 lastErrorAt 必须同步移动：所有写 lastError 的调用方
-  // （index.js 的 markFailure、chat.js 的换票失败）都走这里，集中打时间戳
-  // 比在每个调用点各写一次可靠——漏一处就会出现「有时间戳的错误」和
-  // 「没时间戳的错误」两种形状，界面无法统一判断新鲜度。
-  //
-  // 为什么要时间戳：lastError **只在换票成功时才清空**，所以它经常停在
-  // 很久以前的失败上。用户看到「Model is not available」会以为当前坏了，
-  // 其实可能是几小时前那次瞬时抖动的残留。带上时刻才能显示「N 分钟前」。
-  if (fields && fields.lastError !== undefined) {
-    fields.lastErrorAt = fields.lastError ? Date.now() : null;
-  }
-  Object.assign(a, fields);
-  save(data);
-  return a;
+  return filelock.withLock(filePath(), () => {
+    cache = { mtime: -1, data: null };
+    const data = load();
+    const a = data.accounts.find((x) => x.id === Number(id));
+    if (!a) return null;
+    // 设为主账号是排他的：置 true 时清掉其他账号的同标记
+    if (fields && fields.preferred === true) {
+      for (const x of data.accounts) if (x.id !== a.id) x.preferred = false;
+    }
+    // lastError 与 lastErrorAt 必须同步移动：所有写 lastError 的调用方
+    // （index.js 的 markFailure、chat.js 的换票失败）都走这里，集中打时间戳
+    // 比在每个调用点各写一次可靠——漏一处就会出现「有时间戳的错误」和
+    // 「没时间戳的错误」两种形状，界面无法统一判断新鲜度。
+    //
+    // 为什么要时间戳：lastError **只在换票成功时才清空**，所以它经常停在
+    // 很久以前的失败上。用户看到「Model is not available」会以为当前坏了，
+    // 其实可能是几小时前那次瞬时抖动的残留。带上时刻才能显示「N 分钟前」。
+    if (fields && fields.lastError !== undefined) {
+      fields.lastErrorAt = fields.lastError ? Date.now() : null;
+    }
+    Object.assign(a, fields);
+    save(data);
+    return a;
+  });
 }
 
-/** token 是否在 skewMs 内过期 */
-function needsRefresh(a, skewMs = 300000) {
+/**
+ * token 是否该续期了（在 skewMs 内过期就续）。
+ *
+ * **提前量必须按小时算，不能按分钟**（2026-10-29 修，账号报废级）。
+ *
+ * 原值是 5 分钟。它的隐含假设是「反正每个请求都会走到这里，快到期时顺手续上」——
+ * 但那只在**有请求**的时候成立。实测后果：
+ *
+ *   · 账号 1 的 access token `iat 10-21 14:07 / exp 10-28 14:07`（7 天有效）
+ *   · 它最后一次成功请求是 10-28 08:20，之后 6 小时没有流量
+ *   · 于是 5 分钟窗口里一个请求都没有 → 没人触发续期
+ *   · 下次有人来（10-29 13:10，已过期 **23 小时**）才第一次换票
+ *   · 上游回 `401 INVALID_REFRESH_TOKEN` / `invalid_grant:令牌未激活或缺少用户ID`
+ *
+ * 也就是说：**refresh token 只在 access token 还有效时可用**，过期太久 grant
+ * 直接被作废，7 天的额度全废，只能重新登录。同一天同在跑的另一账号（10-28
+ * 16:36 到期）因为当时有请求，在到期这一刻续上了，一直健康——差别只在
+ * 「到期时有没有流量」，这就是 5 分钟窗口的随机性风险。
+ *
+ * 改成 24 小时：任何一次请求都会提前一天续上，不再依赖「到期那一刻恰好有请求」。
+ * 与 `traework/auth.js` 的口径一致（那边一直是 24 小时，所以 TRAE 从没出过这种事）。
+ * 代价是每天多一次换票请求——可忽略，而账号报废要人工重登。
+ *
+ * 注意上游**允许**同一 RT 重复使用（实测并发 3 次全部 200，且各自轮换出新 RT），
+ * 所以提前续期不会消耗掉别的进程手里的 RT。
+ */
+function needsRefresh(a, skewMs = 24 * 3600 * 1000) {
   if (!a || !a.expiresAt) return true;
   return Date.now() + skewMs >= a.expiresAt;
 }
@@ -196,8 +238,10 @@ function jwtExp(token) {
   } catch (e) { return null; }
 }
 
-/** 发一个 JSON 请求。统一用 StringDecoder——跨 chunk 的汉字逐块解码会变 U+FFFD */
-function requestJson(pathname, method, body, headers, timeout = 20000) {
+/** 发一个 JSON 请求。统一用 StringDecoder——跨 chunk 的汉字逐块解码会变 U+FFFD。
+ *  opts.agent 出站代理（E 包接线）：凭证请求与对话同出口，换 IP 出口不一致
+ *  本身就是风控信号。null = 直连。 */
+function requestJson(pathname, method, body, headers, timeout = 20000, opts = {}) {
   return new Promise((resolve) => {
     const payload = body == null ? null : JSON.stringify(body);
     const req = require('https').request({
@@ -209,6 +253,7 @@ function requestJson(pathname, method, body, headers, timeout = 20000) {
         ...(payload ? { 'Content-Length': Buffer.byteLength(payload) } : {}),
       },
       timeout,
+      ...(opts.agent ? { agent: opts.agent } : {}),
     }, (res) => {
       let buf = '';
       const { StringDecoder } = require('string_decoder');
@@ -239,13 +284,17 @@ function requestJson(pathname, method, body, headers, timeout = 20000) {
  */
 async function exchange(a) {
   if (!a || !a.refreshToken) return { ok: false, error: '缺少 refreshToken' };
+  let agent = null;
+  try { agent = require('../proxy-agent').getAgentFor(a); } catch (e) {
+    return { ok: false, error: `出站代理配置错误: ${e.message}` };
+  }
   const r = await requestJson(c.REFRESH_PATH, 'POST', { refresh_token: a.refreshToken, target: 'c' }, {
     'Content-Type': 'application/json',
     Accept: 'application/json',
     'User-Agent': c.USER_AGENT,
     'X-Request-Id': crypto.randomUUID(),
     'Login-Version': c.LOGIN_VERSION,
-  }, 30000);
+  }, 30000, { agent });
 
   const token = (r.data && (r.data.device_token || r.data.token)) || '';
   if (!token) {
@@ -276,11 +325,15 @@ async function exchange(a) {
 async function fetchUserInfo(a) {
   const token = (a && (a.accessToken || a.access)) || '';
   if (!token) return null;
+  // 出站代理（E 包收口补点）：用户信息查询与对话同出口。配置非法返回 null
+  //（调用方按「读不到」处理），不回退直连。
+  let agent = null;
+  try { agent = require('../proxy-agent').getAgentFor(a); } catch (e) { return null; }
   const r = await requestJson(c.ACCOUNT_CONTEXT_PATH, 'GET', null, {
     Accept: 'application/json',
     'User-Agent': c.USER_AGENT,
     Authorization: `Bearer ${token}`,
-  });
+  }, 20000, { agent });
   if (r.status !== 200 || !r.data) return null;
   const d = (r.data && r.data.data) || r.data;
   const u = d.user || d;

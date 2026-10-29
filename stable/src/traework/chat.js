@@ -136,9 +136,14 @@ function buildBody(payload, model, meta) {
   return JSON.stringify(obj);
 }
 
-/** 发流式请求。返回 { stream, status, raw } */
+/** 发流式请求。返回 { stream, status, raw }。auth 兼作账号记录：出站代理
+ *  （E 包接线）按它的 proxy 字段 > 全局 DUMATE_PROXY 解析，null 直连。 */
 function postStream(body, auth) {
   return new Promise((resolve) => {
+    let agent = null;
+    try { agent = require('../proxy-agent').getAgentFor(auth); } catch (e) {
+      return resolve({ stream: null, status: 0, error: `出站代理配置错误: ${e.message}` });
+    }
     const u = new URL(c.AGENT_HOST + c.EP_CHAT);
     const req = https.request({
       hostname: u.hostname,
@@ -147,6 +152,7 @@ function postStream(body, auth) {
       headers: { ...soloHeaders(auth, true), 'Content-Length': Buffer.byteLength(body) },
       // 长流不能设总超时，否则 SSE 会被掐断
       timeout: c.STREAM_TIMEOUT_MS,
+      ...(agent ? { agent } : {}),
     }, (res) => resolve({ stream: res, status: res.statusCode }));
     req.on('error', (e) => resolve({ stream: null, status: 0, error: e.message }));
     req.on('timeout', () => { req.destroy(); resolve({ stream: null, status: 0, error: 'timeout' }); });

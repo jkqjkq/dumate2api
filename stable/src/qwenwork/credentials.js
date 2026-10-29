@@ -17,6 +17,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { execFileSync } = require('child_process');
+const filelock = require('../filelock');
 
 const USER_DATA_DIR = () => path.join(process.env.APPDATA || '', 'QwenWorkCN');
 const MACHINE_ID_PATH = () =>
@@ -101,7 +102,7 @@ function encryptAuth(doc, file) {
   // 原子写：写 .tmp 再 rename。中途被 kill 会留下半个文件，客户端就登不上了。
   const tmp = `${target}.tmp`;
   fs.writeFileSync(tmp, out);
-  fs.renameSync(tmp, target);
+  filelock.renameAtomic(tmp, target);
 }
 
 /**

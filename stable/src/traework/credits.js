@@ -16,6 +16,7 @@
 const fs = require('fs');
 const path = require('path');
 const checkin = require('./checkin');
+const jsonl = require('../jsonl');
 
 const FILE = 'traework-credits.jsonl';
 
@@ -30,12 +31,19 @@ function filePath() {
 function append(entry) {
   try {
     fs.mkdirSync(dataDir(), { recursive: true });
-    fs.appendFileSync(filePath(), `${JSON.stringify(entry)}\n`, 'utf8');
+    // 大小轮转（jsonl.js）：逐请求归因文件不设限会无限增长
+    jsonl.append(filePath(), `${JSON.stringify(entry)}\n`);
   } catch (e) { /* 埋点失败绝不影响正在转发的响应 */ }
 }
 
 // 每账号一条串行队列，key 是账号 id
 const queues = new Map();
+
+// 归因节流（审计 P1-4）：每条请求一次上游 usage 查询，匿名刷网关等于把
+// 上游额度查询接口打满。TTL 内同一账号只实测一次，窗口内的请求不落归因
+// 记录，窗口两端的 consumed 差值涵盖期间消耗总量。DUMATE_TRAEWORK_CREDIT_TTL_MS 可调。
+const CAPTURE_TTL_MS = Math.max(0, parseInt(process.env.DUMATE_TRAEWORK_CREDIT_TTL_MS || '60000', 10));
+const lastCaptureAt = new Map();
 
 /**
  * 采集一次请求后的账号消耗游标。**必须在请求完成之后调用**。
@@ -51,6 +59,10 @@ const queues = new Map();
 function capture(account, opts = {}) {
   if (!account || account.id == null) return Promise.resolve(null);
   const key = String(account.id);
+  // 节流窗口内不打上游、不落归因
+  const last = lastCaptureAt.get(key) || 0;
+  if (CAPTURE_TTL_MS && Date.now() - last < CAPTURE_TTL_MS) return Promise.resolve(null);
+  lastCaptureAt.set(key, Date.now());
   const run = async () => {
     const u = await checkin.usage(account);
     // 取不到就不落记录。**不补 0**——0 会被读成「这次没花钱」，

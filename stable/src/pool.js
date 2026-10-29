@@ -452,7 +452,7 @@ function createPool(opts = {}) {
     const tmp = `${file}.tmp`;
     fs.writeFileSync(tmp, JSON.stringify(doc, null, 2), 'utf8');
     fileperm.harden(tmp);
-    fs.renameSync(tmp, file);
+    filelock.renameAtomic(tmp, file);
     lastMtime = mtimeOf();
   }
 

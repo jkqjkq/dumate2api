@@ -8,6 +8,7 @@
 // 所以出错只吞掉。
 const fs = require('fs');
 const path = require('path');
+const filelock = require('./filelock');
 
 const ROOT = path.resolve(__dirname, '..');
 const LOG_DIR = process.env.DUMATE_ADMIN_DATA || path.join(ROOT, 'data');
@@ -15,6 +16,13 @@ const FILE = 'requests.jsonl';
 const MAX_BYTES = 32 * 1024 * 1024;
 
 let disabled = false;
+
+// 施工包 C：计量挂钩。分桶聚合挂在 record 里而不是 server.js——网关、
+// web 网关、chatlab 三个调用点自动全覆盖。聚合是纯内存累加且自吞异常，
+// 失败只少统计，绝不影响埋点。懒加载：首次 record 时才 require，避免
+// 无关进程为它付启动成本。DUMATE_USAGE_AGG=0 可整体关停。
+let aggHook = null;
+let aggHookBroken = false;
 
 function ensureDir() {
   try { fs.mkdirSync(LOG_DIR, { recursive: true }); } catch (e) { /* 已存在 */ }
@@ -27,13 +35,29 @@ function rotateIfNeeded(file) {
     if (st.size < MAX_BYTES) return;
     const prev = `${file}.1`;
     try { fs.unlinkSync(prev); } catch (e) { /* 不存在 */ }
-    fs.renameSync(file, prev);
+    filelock.renameAtomic(file, prev);
   } catch (e) { /* 文件还不存在 */ }
 }
 
 function record(entry) {
   if (disabled) return;
+  if (!aggHook && !aggHookBroken) {
+    try { aggHook = require('./reqlog-hook'); } catch (e) { aggHookBroken = true; }
+  }
+  if (aggHook) {
+    try { aggHook.feed(entry); } catch (e) { /* 计量失败不影响埋点 */ }
+  }
   try {
+    // 调用来源开关（livecfg.recordClientInfo，F6e）：关掉时不落 ip / ua。
+    // 收口在 record 里而不是调用方——server.js 的 logRequest 与三个协议
+    // 翻译器都汇到这里，一处判定全覆盖，server.js 不用动。
+    // 开关热生效：livecfg 按 mtime 重读，管理端 PUT 后下一次请求即新口径。
+    try {
+      if (require('./livecfg').Load().recordClientInfo === false) {
+        delete entry.ip;
+        delete entry.ua;
+      }
+    } catch (e) { /* 配置读不到按默认（记录）处理 */ }
     ensureDir();
     const file = path.join(LOG_DIR, FILE);
     rotateIfNeeded(file);

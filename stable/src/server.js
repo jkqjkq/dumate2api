@@ -23,15 +23,25 @@ const reqlog = require('./reqlog');
 // 也在 reqlog 之外调用它，两处各写一份必然漂移。
 const markFirstToken = reqlog.markFirstToken;
 const pointsCursor = require('./points-cursor');
+const cors = require('./cors');
 const modelmap = require('./modelmap');
 const keysvc = require('./keys');
 const router = require('./upstream-router');
+// 热配置（F5）：/v1/models 与 /v1beta/models 输出侧的 hiddenModels 过滤
+const livecfg = require('./livecfg');
+// 启动接线（集成阶段）：池状态机恢复 / 热配置 / 出站代理 / 计量挂钩探活。
+// 保活排程不在这里启动——它由管理端进程经 task-scheduler 持有（见 boot.js）。
+const boot = require('./boot');
 
 const PROXY_PORT = parseInt(process.env.DUMATE2API_PORT || '9080', 10);
 const PROXY_HOST = process.env.DUMATE2API_HOST || '127.0.0.1';
-const API_KEY = process.env.DUMATE2API_KEY || 'nokey';
-// 默认关闭。开启后所有模型端点要求带已登记的 API key。
-const REQUIRE_KEY = process.env.DUMATE_REQUIRE_KEY === '1';
+// 审计修复（P0-1）：DUMATE2API_KEY 此前定义后从未被使用——管理员设了这个
+// 变量也不会有任何强制，是个配置陷阱。现在它与登记 key 体系并联：
+//   - DUMATE_REQUIRE_KEY=1          → 校验管理端登记的 key（原开关，语义不变）
+//   - 设置了 DUMATE2API_KEY（非空）  → 同样强制鉴权，命中该 env 密钥（或任一
+//     登记 key）才放行。两个开关任意一个打开即启用鉴权。
+const ENV_API_KEY = String(process.env.DUMATE2API_KEY || '').trim();
+const REQUIRE_KEY = process.env.DUMATE_REQUIRE_KEY === '1' || !!ENV_API_KEY;
 
 let upstreamPort = null;
 let upstreamManaged = false;
@@ -90,7 +100,7 @@ function makeSSEWriter(res) {
     'Content-Type': 'text/event-stream',
     'Cache-Control': 'no-cache',
     'Connection': 'keep-alive',
-    'Access-Control-Allow-Origin': '*',
+    ...(res._cors || {}),
   };
   const flushHead = () => {
     if (res.headersSent) return;
@@ -257,7 +267,7 @@ async function handleDirectChannel(req, res, payload, route, ctx) {
           'Content-Type': 'text/event-stream',
           'Cache-Control': 'no-cache',
           'Connection': 'keep-alive',
-          'Access-Control-Allow-Origin': '*',
+          ...(res._cors || {}),
         });
       };
       shim.once('data', writeSSEHead);
@@ -528,23 +538,68 @@ function forwardWithFallback(portOrTarget, path, method, headers, body, clientRe
   }
 }
 
+// 请求体上限（审计 P1-1a）：网关是匿名可达的一侧，readBody 不设限等于让
+// 一次 POST 把内存吃满、再被 JSON.parse 二次放大。默认 32MB——聊天请求带
+// base64 图片也有富余。DUMATE_MAX_BODY_MB 可调。
+const MAX_BODY_BYTES = Math.max(1, parseInt(process.env.DUMATE_MAX_BODY_MB || '32', 10)) * 1024 * 1024;
+
 function readBody(req) {
+  // 超限标记：鉴权预读阶段超限时已经把流读干净，这里直接短路，
+  // 不再尝试二次消费
+  if (req._bodyTooLarge) return Promise.resolve(null);
   // 鉴权阶段可能已经为模型白名单预读过请求体；流只能消费一次，
   // 直接返回缓存，否则 handler 拿到空串
-  if (typeof req._rawBody === 'string') return Promise.resolve(req._rawBody);  return new Promise((resolve) => {
+  if (typeof req._rawBody === 'string') return Promise.resolve(req._rawBody);
+  return new Promise((resolve) => {
     const chunks = [];
-    req.on('data', (c) => chunks.push(c));
-    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+    let size = 0;
+    req.on('data', (c) => {
+      size += c.length;
+      if (size > MAX_BODY_BYTES) {
+        req._bodyTooLarge = true;
+        chunks.length = 0;
+        // 继续把剩余数据读干净，连接才能正常收尾；handler 统一回 413
+        req.resume();
+        return;
+      }
+      chunks.push(c);
+    });
+    req.on('end', () => resolve(req._bodyTooLarge ? null : Buffer.concat(chunks).toString('utf8')));
   });
+}
+
+// 请求体超限的统一出口。各端点正常错误形状不同，但 413 极少触发，
+// 统一 OpenAI 形状即可（客户端只看状态码）。
+function sendBodyTooLarge(res) {
+  return sendJSON(res, 413, { error: { message: 'Request body too large', type: 'invalid_request_error' } });
+}
+
+// 非流式上游响应的累积上限（审计 P1-1b）：上游半信任，流量不可控，
+// 无限 `data += c` 等于把上游（或中间人）的输出全部吃进内存。
+// 默认 64MB，DUMATE_MAX_UPSTREAM_MB 可调。超限后停止累积、继续读干净，
+// 由调用方回 502。
+const MAX_UPSTREAM_BYTES = Math.max(1, parseInt(process.env.DUMATE_MAX_UPSTREAM_MB || '64', 10)) * 1024 * 1024;
+
+function sendUpstreamTooLarge(res) {
+  return sendJSON(res, 502, { error: { message: 'Upstream response too large', type: 'api_error' } });
 }
 
 // 收全上游响应体后回调一次。end / aborted / error 三路都以同一入口收尾，
 // 避免上游中途断开时下游永远等不到回调（「输出停止」类故障的根因之一）。
-function collectAndFinish(upstreamRes, onComplete) {
+// 超限时 onComplete 收到 null（不是超长字符串）——调用方按「上游响应异常」处理。
+function collectAndFinish(upstreamRes, onComplete, maxBytes = MAX_UPSTREAM_BYTES) {
   let data = '';
+  let over = false;
   let done = false;
-  const finish = () => { if (!done) { done = true; onComplete(data); } };
-  upstreamRes.on('data', (c) => data += c);
+  const finish = () => { if (!done) { done = true; onComplete(over ? null : data); } };
+  upstreamRes.on('data', (c) => {
+    if (over) return;
+    data += c;
+    if (data.length > maxBytes) {
+      over = true;
+      data = '';
+    }
+  });
   upstreamRes.on('end', finish);
   upstreamRes.on('aborted', finish);
   upstreamRes.on('error', finish);
@@ -554,7 +609,7 @@ function sendJSON(res, statusCode, data) {
   const body = JSON.stringify(data);
   res.writeHead(statusCode, {
     'Content-Type': 'application/json',
-    'Access-Control-Allow-Origin': '*',
+    ...(res._cors || {}),
     'Content-Length': Buffer.byteLength(body)
   });
   res.end(body);
@@ -646,7 +701,7 @@ async function handleOpenAIModels(req, res) {
   const cfg = modelmap.load();
   const created = Math.floor(Date.now() / 1000);
   const upstream = new Set(cfg.upstream_models);
-  const data = cfg.exposed.map((id) => ({
+  let data = cfg.exposed.map((id) => ({
     id,
     object: 'model',
     created,
@@ -721,12 +776,18 @@ async function handleOpenAIModels(req, res) {
     } catch (e) { /* 通道不可用，不列 */ }
   }
 
+  // hiddenModels 热配置（F5）：输出侧过滤。管理端 PUT 后下一次列表即新口径。
+  try {
+    data = livecfg.applyHiddenModels(data);
+  } catch (e) { /* 配置不可用按全量列表 */ }
+
   sendJSON(res, 200, { object: 'list', data });
 }
 
 async function handleOpenAIChat(req, res) {
   const startedAt = Date.now();
   const bodyStr = await readBody(req);
+  if (bodyStr == null) return sendBodyTooLarge(res);
   let reqBody;
   try {
     reqBody = JSON.parse(bodyStr);
@@ -798,7 +859,7 @@ async function handleOpenAIChat(req, res) {
         'Content-Type': 'text/event-stream',
         'Cache-Control': 'no-cache',
         'Connection': 'keep-alive',
-        'Access-Control-Allow-Origin': '*',
+        ...(res._cors || {}),
       });
       // 上游中途断开时必须主动收尾，否则客户端挂在半开的流上
       // （表现为「输出写到一半就停住，一直不返回」）。
@@ -853,10 +914,16 @@ async function handleOpenAIChat(req, res) {
     } else {
       // Pass-through non-streaming
       let data = '';
+      let over = false;
       let done = false;
       const finish = () => {
         if (done) return;
         done = true;
+        // 上游响应超限（审计 P1-1b）：不把超长体转发给客户端，回 502
+        if (over) {
+          logRequest(req, res, startedAt, info, 502, null, { error: 'upstream_too_large' });
+          return sendUpstreamTooLarge(res);
+        }
         let usage = null;
         try {
           const j = JSON.parse(data);
@@ -865,13 +932,18 @@ async function handleOpenAIChat(req, res) {
         logRequest(req, res, startedAt, info, upstreamRes.statusCode, usage);
         res.writeHead(upstreamRes.statusCode, {
           'Content-Type': 'application/json',
-          'Access-Control-Allow-Origin': '*',
+          ...(res._cors || {}),
         });
         res.end(data);
       };
       upstreamRes.on('data', (c) => {
         markFirstToken(res);
+        if (over) return;
         data += c;
+        if (data.length > MAX_UPSTREAM_BYTES) {
+          over = true;
+          data = '';
+        }
       });
       upstreamRes.on('end', finish);
       upstreamRes.on('aborted', finish);
@@ -903,6 +975,7 @@ function estimateTokens(value) {
 
 async function handleAnthropicCountTokens(req, res) {
   const bodyStr = await readBody(req);
+  if (bodyStr == null) return sendBodyTooLarge(res);
   let body;
   try {
     body = JSON.parse(bodyStr);
@@ -918,19 +991,21 @@ async function handleAnthropicCountTokens(req, res) {
 // ==================== Google Generative Language (v1beta) Compatible Endpoints ====================
 
 async function handleGoogleModels(req, res) {
-  sendJSON(res, 200, {
-    models: [
-      { name: 'models/glm-5', displayName: 'GLM-5', supportedGenerationMethods: ['generateContent', 'streamGenerateContent'] },
-      { name: 'models/model-text', displayName: 'DuMate text', supportedGenerationMethods: ['generateContent', 'streamGenerateContent'] },
-      { name: 'models/claude-3-5-sonnet-20241022', displayName: 'Claude 3.5 Sonnet (proxy)', supportedGenerationMethods: ['generateContent', 'streamGenerateContent'] },
-      { name: 'models/gpt-4o', displayName: 'GPT-4o (proxy)', supportedGenerationMethods: ['generateContent', 'streamGenerateContent'] },
-    ],
-  });
+  const models = [
+    { name: 'models/glm-5', displayName: 'GLM-5', supportedGenerationMethods: ['generateContent', 'streamGenerateContent'] },
+    { name: 'models/model-text', displayName: 'DuMate text', supportedGenerationMethods: ['generateContent', 'streamGenerateContent'] },
+    { name: 'models/claude-3-5-sonnet-20241022', displayName: 'Claude 3.5 Sonnet (proxy)', supportedGenerationMethods: ['generateContent', 'streamGenerateContent'] },
+    { name: 'models/gpt-4o', displayName: 'GPT-4o (proxy)', supportedGenerationMethods: ['generateContent', 'streamGenerateContent'] },
+  ];
+  // hiddenModels 热配置（F5）：与 /v1/models 同一过滤口径（applyHiddenModels
+  // 自剥 'models/' 前缀比对裸名，读不到配置时原样返回）
+  sendJSON(res, 200, { models: livecfg.applyHiddenModels(models) });
 }
 
 async function handleGoogleGenerateContent(req, res, isStream, pathModel) {
   const startedAt = Date.now();
   const bodyStr = await readBody(req);
+  if (bodyStr == null) return sendBodyTooLarge(res);
   let googleReq;
   try {
     googleReq = JSON.parse(bodyStr);
@@ -991,6 +1066,10 @@ async function handleGoogleGenerateContent(req, res, isStream, pathModel) {
     // 客户端以为成功、拿到的却是空回答。
     if (upstreamRes.statusCode >= 400) {
       return collectAndFinish(upstreamRes, (data) => {
+        if (data == null) {
+          logRequest(req, res, startedAt, info, 502, null, { error: 'upstream_too_large' });
+          return sendUpstreamTooLarge(res);
+        }
         logRequest(req, res, startedAt, info, upstreamRes.statusCode, null, { error: 'upstream_error' });
         sendJSON(res, upstreamRes.statusCode, {
           error: { code: upstreamRes.statusCode, message: 'Upstream error: ' + data.substring(0, 300), status: 'UNAVAILABLE' },
@@ -1005,16 +1084,22 @@ async function handleGoogleGenerateContent(req, res, isStream, pathModel) {
       });
     } else {
       let data = '';
+      let over = false;
       let done = false;
       const finish = () => {
         if (done) return;
         done = true;
+        // 上游响应超限（审计 P1-1b）：回 502，不解析超长体
+        if (over) {
+          logRequest(req, res, startedAt, info, 502, null, { error: 'upstream_too_large' });
+          return sendUpstreamTooLarge(res);
+        }
         try {
           const openaiResp = JSON.parse(data);
           logRequest(req, res, startedAt, info, 200, reqlog.pickUsage(openaiResp.usage));
           res.writeHead(200, {
             'Content-Type': 'application/json',
-            'Access-Control-Allow-Origin': '*',
+            ...(res._cors || {}),
           });
           res.end(JSON.stringify(openAIToGoogle(openaiResp, googleReq.model)));
         } catch (e) {
@@ -1022,7 +1107,14 @@ async function handleGoogleGenerateContent(req, res, isStream, pathModel) {
           sendJSON(res, 502, { error: { code: 502, message: 'Upstream parse error: ' + data.substring(0, 200), status: 'INTERNAL' } });
         }
       };
-      upstreamRes.on('data', (c) => data += c);
+      upstreamRes.on('data', (c) => {
+        if (over) return;
+        data += c;
+        if (data.length > MAX_UPSTREAM_BYTES) {
+          over = true;
+          data = '';
+        }
+      });
       upstreamRes.on('end', finish);
       upstreamRes.on('aborted', finish);
       upstreamRes.on('error', finish);
@@ -1035,6 +1127,7 @@ async function handleGoogleGenerateContent(req, res, isStream, pathModel) {
 async function handleOpenAIResponses(req, res) {
   const startedAt = Date.now();
   const bodyStr = await readBody(req);
+  if (bodyStr == null) return sendBodyTooLarge(res);
   let reqBody;
   try {
     reqBody = JSON.parse(bodyStr);
@@ -1085,6 +1178,10 @@ async function handleOpenAIResponses(req, res) {
     }
     if (!upstreamRes.statusCode || upstreamRes.statusCode >= 400) {
       return collectAndFinish(upstreamRes, (data) => {
+        if (data == null) {
+          logRequest(req, res, startedAt, info, 502, null, { error: 'upstream_too_large' });
+          return sendUpstreamTooLarge(res);
+        }
         logRequest(req, res, startedAt, info, upstreamRes.statusCode || 502, null, { error: 'upstream_error' });
         sendJSON(res, upstreamRes.statusCode || 502, {
           error: { message: 'Upstream error: ' + data.substring(0, 300), type: 'api_error' },
@@ -1098,6 +1195,10 @@ async function handleOpenAIResponses(req, res) {
       });
     } else {
       collectAndFinish(upstreamRes, (data) => {
+        if (data == null) {
+          logRequest(req, res, startedAt, info, 502, null, { error: 'upstream_too_large' });
+          return sendUpstreamTooLarge(res);
+        }
         try {
           const openaiResp = JSON.parse(data);
           logRequest(req, res, startedAt, info, 200, reqlog.pickUsage(openaiResp.usage));
@@ -1116,6 +1217,7 @@ async function handleOpenAIResponses(req, res) {
 async function handleAnthropicMessages(req, res) {
   const startedAt = Date.now();
   const bodyStr = await readBody(req);
+  if (bodyStr == null) return sendBodyTooLarge(res);
   let anthropicReq;
   try {
     anthropicReq = JSON.parse(bodyStr);
@@ -1181,6 +1283,10 @@ async function handleAnthropicMessages(req, res) {
     } else {
       // Non-streaming: collect and translate
       collectAndFinish(upstreamRes, (data) => {
+        if (data == null) {
+          logRequest(req, res, startedAt, info, 502, null, { error: 'upstream_too_large' });
+          return sendUpstreamTooLarge(res);
+        }
         try {
           const openaiResp = JSON.parse(data);
           const anthropicResp = openAIToAnthropic(openaiResp, anthropicReq.model);
@@ -1403,7 +1509,23 @@ function translateStreamToAnthropic(upstreamRes, res, originalModel, onDone) {
     w.end();
   });
 
-  upstreamRes.on('error', () => {
+  upstreamRes.on('error', (e) => {
+    // 一个内容块都没发出去 = 上游在出内容之前就死了（限流 / 额度 / 网关错）。
+    // **不能**收成一个「正常但空」的 message_delta + message_stop：Claude Code
+    // 会把它当成一次合法的空回合，不重试，用户看到的就是「模型什么都不回答」。
+    // Anthropic 的 SSE 有专门的 `error` 事件，客户端据此抛错并按退避重试。
+    const nothingSent = blockIndex < 0 && !toolBuf.size && !hasText;
+    if (nothingSent) {
+      const msg = String((e && e.message) || 'upstream error');
+      sendEvent('error', {
+        type: 'error',
+        error: { type: anthErrorType(e && e.statusCode, msg), message: msg },
+      });
+      finish(Number(e && e.statusCode) || 502);
+      w.end();
+      return;
+    }
+    // 已经吐过内容：协议上收不回去了，只能按正常收尾（客户端已有部分输出）
     sendEvent('message_delta', {
       type: 'message_delta',
       delta: { stop_reason: mapFinishReason(lastFinishReason), stop_sequence: null },
@@ -1415,13 +1537,35 @@ function translateStreamToAnthropic(upstreamRes, res, originalModel, onDone) {
   });
 }
 
+/**
+ * Anthropic SSE 错误事件的 `type`。取值来自 Anthropic 的错误类型枚举——
+ * 客户端（Anthropic SDK / Claude Code）按它决定是否重试：`rate_limit_error`
+ * 与 `overloaded_error` 会退避重试，`invalid_request_error` 不会。
+ */
+function anthErrorType(status, message) {
+  const n = Number(status) || 0;
+  if (n === 429) return 'rate_limit_error';
+  if (n === 401) return 'authentication_error';
+  if (n === 403) return 'permission_error';
+  if (n === 404) return 'not_found_error';
+  if (n === 400 || n === 422) return 'invalid_request_error';
+  if (n === 529) return 'overloaded_error';
+  // 上游排队挂起（自造的串）也是「稍后再来」，按过载处理让客户端重试
+  if (/queued|read idle|timeout/i.test(String(message || ''))) return 'overloaded_error';
+  return 'api_error';
+}
+
 // ==================== Server ====================
 
 const server = http.createServer(async (req, res) => {
-  // CORS preflight
+  // CORS 白名单判定（fail-closed，见 cors.js）：入口算一次挂到 res 上，
+  // sendJSON / SSE writeHead 统一取用。默认不发任何 CORS 头。
+  res._cors = cors.headersFor(req);
+  // CORS preflight：仅白名单命中的 Origin 才回 ACAO，其余 204 但不带
+  // 放行头——浏览器会拒绝后续实际请求，服务端不执行任何业务逻辑。
   if (req.method === 'OPTIONS') {
     res.writeHead(204, {
-      'Access-Control-Allow-Origin': '*',
+      ...res._cors,
       'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
       'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-api-key, anthropic-version, anthropic-beta',
     });
@@ -1507,13 +1651,17 @@ const server = http.createServer(async (req, res) => {
       });
     }
 
-    // ==================== API Key 鉴权（可选）====================
-    // 默认关闭：现有 cc-switch / Codex 直连不带 key，一旦默认开启会把
-    // 所有人挡在外面。只有显式设 DUMATE_REQUIRE_KEY=1 才校验。
-    // 鉴权在路由分发之前统一做，避免以后新增端点时漏挂。
+    // ==================== API Key 鉴权 ====================
+    // 触发条件（满足其一）：DUMATE_REQUIRE_KEY=1，或设置了 DUMATE2API_KEY。
+    // 环境变量密钥此前是死变量（定义后从未校验），现已接线：命中登记 key
+    // 或 env 密钥任一即放行。鉴权在路由分发之前统一做，避免新增端点漏挂。
     if (REQUIRE_KEY && url !== '/health' && url !== '/ping') {
       const token = keysvc.tokenFromHeaders(req.headers);
-      const key = keysvc.resolve(token);
+      let key = keysvc.resolve(token);
+      // env 密钥兜底：与登记 key 体系并联，常时比较（keys.tokenMatches）
+      if (!key && ENV_API_KEY && keysvc.tokenMatches(token, ENV_API_KEY)) {
+        key = { id: 0, name: 'env:DUMATE2API_KEY', enabled: true };
+      }
 
       // 模型白名单与通道绑定都需要知道请求的是哪个模型。只有 key 真的配了
       // 这两类规则时才预读请求体——否则给默认路径凭空加一次完整读取。
@@ -1619,6 +1767,9 @@ const server = http.createServer(async (req, res) => {
 async function start() {
   log('Starting dumate2api...');
   log(`Proxy will listen on ${PROXY_HOST}:${PROXY_PORT}`);
+
+  // 运行时模块启动接线（pool 恢复 / livecfg / 出站代理 / 计量探活），见 boot.js
+  try { boot.init({ log }); } catch (e) { log(`⚠ 启动接线异常（不阻断监听）: ${e.message}`); }
 
   // 只用网页凭证（默认）时跳过初始发现——桌面链路根本不参与，
   // 这次探测（要跑 PowerShell 查询，实测约 3 秒）纯属浪费启动时间。
@@ -1735,6 +1886,22 @@ async function start() {
     log(`✓ dumate2api listening on http://${PROXY_HOST}:${PROXY_PORT}`);
     // 同步代码卡住时打日志，把「静默假死」变成可排查的痕迹（见函数注释）
     startLagMonitor();
+    // 鉴权态势（P0-1）：env 密钥 / 登记 key 开关任一打开即有鉴权；
+    // 都没开且监听非回环地址时显式告警（不拒启，保持兼容）。
+    if (REQUIRE_KEY) {
+      log(ENV_API_KEY
+        ? '✓ 已启用鉴权：模型端点要求 Bearer / x-api-key（DUMATE2API_KEY 或管理端登记 key）'
+        : '✓ 已启用鉴权：模型端点要求管理端登记的 API key（DUMATE_REQUIRE_KEY=1）');
+    } else {
+      const LOOPBACK = new Set(['127.0.0.1', '::1', 'localhost']);
+      if (!LOOPBACK.has(String(PROXY_HOST).toLowerCase())) {
+        log(`⚠ 安全警告：未启用任何 API key 鉴权（未设 DUMATE2API_KEY / DUMATE_REQUIRE_KEY=1），且监听 ${PROXY_HOST} 非回环地址——局域网内任何设备都能直接消耗上游账号与积分。`);
+        log('  最小修复：设 DUMATE2API_KEY=<密钥> 后，客户端请求头带 Bearer <密钥>。');
+      }
+    }
+    if (!cors.allowlistSize()) {
+      log('· CORS 默认关闭（浏览器跨域请求将在 preflight 被拒）；如需放行请设 DUMATE_CORS_ORIGINS=http://localhost:xxxx（逗号分隔，支持 *.example.com）');
+    }
     log('');
     log('Endpoints:');
     log('  OpenAI:    http://127.0.0.1:' + PROXY_PORT + '/v1/chat/completions');
@@ -1743,10 +1910,16 @@ async function start() {
     log('  Health:    http://127.0.0.1:' + PROXY_PORT + '/health');
     log('');
     log('cc-switch configuration:');
-    log('  Claude Code: Base URL = http://127.0.0.1:' + PROXY_PORT + ', API Key = nokey');
-    log('  Codex:       Base URL = http://127.0.0.1:' + PROXY_PORT + '/v1, API Key = nokey');
+    log('  Claude Code: Base URL = http://127.0.0.1:' + PROXY_PORT + (REQUIRE_KEY ? ', API Key = <你的 DUMATE2API_KEY 或登记 key>' : ', API Key = nokey'));
+    log('  Codex:       Base URL = http://127.0.0.1:' + PROXY_PORT + '/v1' + (REQUIRE_KEY ? ', API Key = <你的 DUMATE2API_KEY 或登记 key>' : ', API Key = nokey'));
   });
 }
+
+// 优雅停止（集成阶段）：信号到来时把池状态与计量分桶刷盘再退。
+// SIGINT/SIGTERM 被接管后默认的立即退出没有了，shutdown 里显式 exit。
+process.once('SIGINT', () => { log('收到 SIGINT，刷盘退出…'); boot.shutdown('SIGINT', true); });
+process.once('SIGTERM', () => { log('收到 SIGTERM，刷盘退出…'); boot.shutdown('SIGTERM', true); });
+process.once('exit', () => { try { boot.shutdown('exit'); } catch (e) { /* 退出路径不再抛 */ } });
 
 start().catch(err => {
   console.error('Fatal:', err);

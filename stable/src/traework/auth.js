@@ -49,7 +49,7 @@ function save(data) {
   // 权限收紧（fileperm.js）：token 只留在当前用户可读的文件里
   fs.writeFileSync(tmp, JSON.stringify(data, null, 2), { encoding: 'utf8', mode: 0o600 });
   fileperm.harden(tmp);
-  fs.renameSync(tmp, target);
+  filelock.renameAtomic(tmp, target);
   cache = { mtime: fs.statSync(target).mtimeMs, data };
   return data;
 }
@@ -297,8 +297,44 @@ async function fetchUserInfo(a) {
   };
 }
 
+/**
+ * 把**上游当前的昵称**同步回本地账号记录。
+ *
+ * 为什么需要单独一个方法：昵称只在登录回调那一瞬间抓一次，之后再不更新
+ * （`upsert` 只在重登时写）。所以用户在 TRAE 平台改名后，本地永远是旧名，
+ * 页面、埋点、积分流水全都跟着显示旧名——2026-10-29 用户报的正是这个。
+ *
+ * 前置条件：`GetUserInfo` 要求**有效登录态**，access token 过期时返回
+ * `20310 The user is not logged in`（实测），所以这里先续期再查——
+ * 与 `checkin.withFreshToken` 同一处理。
+ *
+ * @returns {{ok:boolean, nickname:string, changed:boolean, error:string}}
+ *   取不到就如实报 ok:false，**不返回空串覆盖已有昵称**。
+ */
+async function syncNickname(a) {
+  let cur = a;
+  try {
+    if (needsRefresh(cur)) {
+      const r = await exchange(cur);
+      if (r.ok && r.patch) cur = patch(cur.id, { ...r.patch, lastError: '' }) || { ...cur, ...r.patch };
+    }
+  } catch (e) { /* 续期失败就用现有 token 试，失败会体现在下面的结果里 */ }
+
+  let info = null;
+  try { info = await fetchUserInfo(cur); } catch (e) { /* 下面统一处理 */ }
+  if (!info || !info.nickname) {
+    return { ok: false, nickname: cur.nickname || '', changed: false, error: '上游未返回昵称（登录态可能已失效）' };
+  }
+  const before = cur.nickname || '';
+  if (info.nickname === before) {
+    return { ok: true, nickname: before, changed: false, error: '' };
+  }
+  patch(cur.id, { nickname: info.nickname });
+  return { ok: true, nickname: info.nickname, changed: true, error: '' };
+}
+
 module.exports = {
   FILE, filePath, dataDir, load, save, list, get, findUsable, upsert, remove, patch,
   needsRefresh, exchange, jwtExp, jwtUid, fetchUserInfo, ensureDevice,
-  maskPhone, phoneFromNickname, genId,
+  maskPhone, phoneFromNickname, genId, syncNickname,
 };

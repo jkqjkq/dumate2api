@@ -295,6 +295,15 @@ async function runOnce(account, payload, onChunk, opts, meter) {
       return res;
     }
     const res = await chat.post(ep.ChatStreamURL, encBody, headers, { agent });
+    // `post` 现在会在数据块里识别错误信封并当场断流（与 postStream 同一纪律）。
+    // 命中的 `firstErr` 是**最准确**的那份（带上游 code 与内层 message），
+    // 优先用它——排在 envelopeStatus 之前，否则会先被 raw 的空壳信封盖掉，
+    // 让 `retryAfterSeconds` / `modelKey` 这些限流判据丢掉。
+    if (res.firstErr) {
+      const err = new Error(`qoder ${res.firstErr.code}: ${res.firstErr.message}`);
+      err.statusCode = res.firstErr.code;
+      throw err;
+    }
     const es = chat.envelopeStatus(res.raw);
     if (es && es.code >= 400) {
       const err = new Error(`qoder ${es.code}: ${es.message}`);
@@ -338,8 +347,41 @@ async function runOnce(account, payload, onChunk, opts, meter) {
  * 排队类失败会把 `tried` 清空重新轮询（见循环里的 transientOnly 分支）。
  */
 const MAX_ATTEMPTS = 4;
-/** 排队挂起后，最多愿意等多久再重试（ms）。池给的排队冷却默认 5s，留点余量 */
-const QUEUE_WAIT_MS = Math.max(0, parseInt(process.env.DUMATE_QODER_QUEUE_WAIT_MS || '6000', 10) || 6000);
+
+/**
+ * 排队重试的**总预算**（ms），含所有等待与请求本身。
+ *
+ * 实测 2026-10-29 推翻了早先「按时间窗口、等 ~52s 会放行」的结论：
+ * 上游限流信封（403 + 10605 + `retryAfterSeconds:30`）**150~1000ms 就到达**，
+ * 而照它给的 30 秒等下去**并不可靠**——同一账号连测，等 3s 三次里只成一次，
+ * 等 10s / 30s 仍全部 `stillThrottled`。排队是**请求级随机**的，等多久都不保证。
+ *
+ * 所以这里不是「耐心等窗口」，而是「**快速多试几次就交还客户端**」：
+ * 拿到限流信封本身只要几百毫秒，多轮询几次的成本很低；硬等 60 秒只会让
+ * 用户对着转圈界面干瞪眼，最后仍然可能失败。
+ *
+ * 默认 6 秒：够覆盖 3~4 轮快速轮询，又不会让用户等过一个客户端超时。
+ * `0` 关闭（拿到限流就立刻回 429）。
+ */
+const QUEUE_PATIENCE_MS = Math.max(0, parseInt(process.env.DUMATE_QODER_QUEUE_PATIENCE_MS || '6000', 10) || 0);
+
+/**
+ * 排队重试的间隔（ms）。
+ *
+ * 实测：限流信封返回极快（150~1000ms），所以间隔不需要长——**过长的间隔
+ * 恰恰是用户感知的「慢」**。原来的 3000ms 让每次空转都要多等 3 秒，
+ * 5 轮就是 15 秒纯等待，实测首条请求因此耗到 27~35 秒。
+ *
+ * 取 1500ms：足够让上游侧翻页；再密则没有额外收益（实测连打 12 次全被拒），
+ * 再疏则直接累加到用户等待（原 3000ms × 5 轮 = 15 秒纯等待）。
+ */
+const QUEUE_RETRY_STEP_MS = Math.max(200, parseInt(process.env.DUMATE_QODER_QUEUE_STEP_MS || '1500', 10) || 1500);
+
+/**
+ * 主循环的尝试上限。与上面两个常量匹配：6s ÷ 1.5s = 4 次。
+ * 非排队类失败（换号）仍受 MAX_ATTEMPTS 约束，所以取两者较大值。
+ */
+const MAX_ATTEMPTS_QUEUE = Math.max(MAX_ATTEMPTS, Math.ceil(QUEUE_PATIENCE_MS / QUEUE_RETRY_STEP_MS) + 1);
 
 /**
  * 发对话请求。主账号失败且错误「换号有救」时，按可用列表顺序转移。
@@ -375,9 +417,26 @@ async function send(payload, onChunk, opts = {}) {
   const usable = authStore.findUsable();
   if (!usable.length) throw new Error('Qoder 没有可用账号，请先添加一个');
   let sel = channelPool.pickCandidate(CHANNEL, usable, { exclude: tried, sessionKey, model });
-  if (!sel) throw noAccountError(usable, model);
+  if (!sel) {
+    // 入口被**排队软冷却**挡住时，等掉它再试——**不能秒失败**。
+    //
+    // 实测（2026-10-29，端到端经 9082 打了一遍）：客户端每 3 秒发一次，
+    // 每次都落在上一条留下的 5 秒模型冷却里，于是连续 4 次都在 **1~3ms**
+    // 返回 429。用户看到的是「点了立刻失败」，比等 5 秒糟得多——连一次
+    // 真实的上游尝试都没有。
+    //
+    // 排队是**请求级随机**的，冷却只有 5 秒（QUEUE_THROTTLE_COOLDOWN_MS），
+    // 等掉它再发一次很可能就过了。所以这里等（封顶到重试预算），而不是
+    // 直接拒。只有「禁用/熔断/在途满」这类要人介入的才立刻报 503。
+    const av = channelPool.availability(CHANNEL, usable, { model });
+    if (av.softOnly && av.nextInMs > 0 && av.nextInMs <= QUEUE_PATIENCE_MS) {
+      await sleep(av.nextInMs);
+      sel = channelPool.pickCandidate(CHANNEL, usable, { exclude: tried, sessionKey, model });
+    }
+    if (!sel) throw noAccountError(usable, model);
+  }
 
-  for (let i = 0; i < MAX_ATTEMPTS; i++) {
+  for (let i = 0; i < MAX_ATTEMPTS_QUEUE; i++) {
     const account = sel.account;
     const uid = sel.uid; // 本次尝试占用的池记录；catch 里换号后 finally 只放它
     tried.add(account.id);
@@ -408,17 +467,28 @@ async function send(payload, onChunk, opts = {}) {
       if (!retryable(code, e.message)) throw e;
       sel = channelPool.pickCandidate(CHANNEL, usable, { exclude: tried, sessionKey, model });
       if (!sel) {
-        // 账号都轮过一遍了。**排队类失败不要就此收工**：它跟账号健康无关，
-        // 唯一的原因是上游这一条被随机排掉。等掉池给的短冷却（默认 5s）、
-        // 清空 exclude 再轮询一次，往往就过了。
+        // 账号都轮过一遍了。
+        //
+        // **不再在网关里「耐心等窗口」**（2026-10-29 实测推翻了旧结论）：
+        // 排队是请求级随机，照上游给的 retryAfterSeconds 等 30 秒**并不保证
+        // 放行**——连测等 10s / 30s 仍全部 stillThrottled，而间隔 20 秒的
+        // 单发请求 925ms 就成功。等待全部累加到用户感知上（实测首条请求因此
+        // 耗到 27~35 秒），用户看到的就是「点了半天没反应」。
+        //
+        // 正确做法：**快速轮询几轮，仍不行就如实回 429 交还客户端**。
+        // 拿到限流信封本身只要 150~1000ms，所以多试几次成本很低；而
+        // Codex / Claude Code 对 429 会自动退避重试，用户还能看到明确提示，
+        // 比网关静默空转透明得多。
         const transientOnly = errors.every((x) => x.throttled || x.status === '网络错误');
-        const av = channelPool.availability(CHANNEL, usable, { model });
-        const canWait = transientOnly && i < MAX_ATTEMPTS - 1
-          && av.softOnly && av.nextInMs > 0 && av.nextInMs <= QUEUE_WAIT_MS;
-        if (canWait) {
-          await sleep(av.nextInMs);
+        if (transientOnly && i < MAX_ATTEMPTS_QUEUE - 1 && Date.now() - startedAt < QUEUE_PATIENCE_MS) {
+          // 还有预算：等一个短间隔让上游侧翻页，再按可用列表轮转。
+          // **绕过 pickCandidate 的冷却过滤**——冷却只是防打爆的观测，
+          // 不是上游的判决，排队期间它会挡住本该发出去的尝试。
+          await sleep(QUEUE_RETRY_STEP_MS);
           tried.clear();
-          sel = channelPool.pickCandidate(CHANNEL, usable, { exclude: tried, sessionKey, model });
+          const idx = i % usable.length;
+          const cand = usable[idx];
+          sel = cand ? { account: cand, uid: channelPool.uidOf(CHANNEL, cand.id), sessionKey } : null;
         }
         if (!sel) {
           const av2 = channelPool.availability(CHANNEL, usable, { model });
@@ -460,7 +530,16 @@ async function send(payload, onChunk, opts = {}) {
  */
 function noAccountError(usable, model) {
   const av = channelPool.availability(CHANNEL, usable, { model });
-  if (!av.usable && av.softOnly && av.nextInMs > 0) return throttleError(av.nextInMs);
+  if (!av.usable && av.softOnly && av.nextInMs > 0) {
+    // 入口被冷却挡住时**直接报 429，不在入口 sleep**。
+    //
+    // 早先这里是「等掉 nextInMs 再送进主循环」，前提是「上游按时间窗口放行，
+    // 等一等就能过」。实测 2026-10-29 推翻了它：排队是请求级随机，等 30 秒
+    // 也不保证放行，而**在入口干等只是把这段时间加进用户等待**——实测首条
+    // 请求因此耗到 27 秒。冷却本身已经降到 5 秒（QUEUE_THROTTLE_COOLDOWN_MS），
+    // 客户端拿到 429 后自己的退避往往就跨过了它；真要等，交还客户端更透明。
+    return throttleError(av.nextInMs);
+  }
   const err = new Error('Qoder 没有可用账号（全部处于冷却/禁用/在途满，可到管理端账号池复活）');
   err.statusCode = 503;
   return err;

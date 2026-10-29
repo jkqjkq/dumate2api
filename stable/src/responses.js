@@ -268,7 +268,7 @@ function translateStreamToResponses(upstreamRes, res, model, onDone) {
     'Content-Type': 'text/event-stream',
     'Cache-Control': 'no-cache',
     'Connection': 'keep-alive',
-    'Access-Control-Allow-Origin': '*',
+    ...(res._cors || {}),
   });
 
   // 收尾时把最终 usage 交回调用方做埋点；两条收尾路径都要走一次
@@ -557,14 +557,24 @@ function translateStreamToResponses(upstreamRes, res, model, onDone) {
     finish(200, truncatedCall ? { error: 'tool_arguments_truncated' } : undefined);
   });
 
-  upstreamRes.on('error', () => {
+  // 上游在第一帧之前就失败（限流/额度/网关错）。**必须把真实原因写进
+  // response.failed.error.message**：硬编码成 `upstream stream error` 时，
+  // Codex 只报一句「上游流错误」，用户看不出是排队限流还是凭证失效，
+  // 也没法判断该等 30 秒还是该去管理端换账号。
+  // 状态码同样不能写死 502：埋点里全部直连通道的失败都变成 502 就归因不了。
+  upstreamRes.on('error', (e) => {
+    const msg = String((e && e.message) || 'upstream stream error').slice(0, 500);
+    const status = Number(e && e.statusCode) || 502;
     send('response.failed', {
       type: 'response.failed', sequence_number: seq++,
-      response: { ...baseResponse('failed'), error: { code: 'upstream_error', message: 'upstream stream error' } },
+      response: {
+        ...baseResponse('failed'),
+        error: { code: status === 429 ? 'rate_limit_exceeded' : 'server_error', message: msg },
+      },
     });
     ended = true;
     res.end();
-    finish(502);
+    finish(status);
   });
 }
 

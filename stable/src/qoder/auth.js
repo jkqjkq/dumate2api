@@ -46,7 +46,7 @@ function save(data) {
   // 权限收紧（fileperm.js）：token 只留在当前用户可读的文件里
   fs.writeFileSync(tmp, JSON.stringify(data, null, 2), { encoding: 'utf8', mode: 0o600 });
   fileperm.harden(tmp);
-  fs.renameSync(tmp, target);
+  filelock.renameAtomic(tmp, target);
   cache = { mtime: fs.statSync(target).mtimeMs, data };
   return data;
 }

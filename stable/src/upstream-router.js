@@ -174,6 +174,11 @@ function dumateSource() {
  * 某通道是否可用。
  * 千问的可用来判断两件事：官方 wasm 能不能找到、登录态能不能解出来——
  * 它不再依赖本地 8787 的 Key（那是走 Buddy2api 中转时的遗留）。
+ *
+ * 三条直连通道（qwenwork / traework / qoder）走**同一个判定形状**：各通道
+ * index.js 的 status()（ready + error），路由层只认这个约定。此前 qoder 没有
+ * 分支、落到末尾默认恒 ok——零账号也报可用，预检形同虚设，且三条通道
+ * 语义不一致（CODE_REVIEW 问题 3 / GAP F7-2）。
  */
 function availability(channel) {
   if (channel === 'dumate') {
@@ -204,6 +209,14 @@ function availability(channel) {
   if (channel === 'traework') {
     try {
       const st = require('./traework').status();
+      return st.ready ? { ok: true } : { ok: false, reason: st.error || 'not_ready' };
+    } catch (e) {
+      return { ok: false, reason: e.message };
+    }
+  }
+  if (channel === 'qoder') {
+    try {
+      const st = require('./qoder').status();
       return st.ready ? { ok: true } : { ok: false, reason: st.error || 'not_ready' };
     } catch (e) {
       return { ok: false, reason: e.message };
