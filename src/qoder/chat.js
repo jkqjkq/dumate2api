@@ -237,17 +237,20 @@ const READ_IDLE_MS = parseInt(process.env.DUMATE_QODER_READ_IDLE_MS || '120000',
 // 然后沉默到读空闲的 120s。于是每次排队都要白等两分钟——两个账号就是四分钟，
 // 客户端早就超时了。
 //
-// 判据换成「有没有**真正的内容帧**」：只在还没转发过任何 payload 时计时，
-// 一旦有内容立刻清掉（长回答不受影响）。阈值取 12s 的依据是埋点实测——
-// Qoder 成功请求的首字 p50=1.8s、p90=4.4s、p99=11.9s、最大 35.1s
-// （1029 条）：12s 刚好盖住 p99，误杀约 1% 的慢请求，而误杀后会换号重试，
-// 代价远小于「排队时干等」。排队请求是**完全无内容**的（实测压到 8s 时
-// 稳定在 8.0s 断开），所以压短不会漏判。
+// 判据是「有没有**真正的内容帧**」：只在还没转发过任何 payload 时计时，
+// 一旦有内容立刻清掉（长回答不受影响）。
 //
-// 阈值直接决定用户感知的最坏等待：两个账号串行时 30s×2=60s（客户端多半
-// 已经超时），12s×2=24s。2026-10-27 实测一次排队卡了 33s，用户侧就是
-// 「点了没反应」。DUMATE_QODER_CONTENT_MS 可调，0 关闭。
-const CONTENT_MS = parseInt(process.env.DUMATE_QODER_CONTENT_MS || '12000', 10);
+// **阈值从 12s 下调到 6s（2026-10-29 实测）**：早先取 12s 的依据是
+// 「p99=11.9s」，但那批样本里混进了排队失败（它们也被计成「首字延迟」），
+// 把分布右尾拉长了。干净样本重测（限流一律丢弃）：
+//   · 76K token 的大上下文 content 在 **3.2~3.4s** 到达
+//   · 小 prompt 在 0.6~0.9s
+//   · **所有成功样本的「空 ack → 真实内容」间隔都是 0**（同帧或紧邻帧）
+// 也就是说，真正的 prefill 从没接近过 12s；12s 只是让每次排队白等 12 秒。
+// 取 6s 仍是大上下文实测值的近 2 倍余量，而排队失败代价减半。
+//
+// DUMATE_QODER_CONTENT_MS 可调，0 关闭。
+const CONTENT_MS = parseInt(process.env.DUMATE_QODER_CONTENT_MS || '6000', 10);
 
 /** 排队的「无内容」计时器；返回 clear()，转发第一帧真实内容后调用 */
 function armContentDeadline(req) {
@@ -324,6 +327,10 @@ function hasPayload(text) {
 function post(url, body, headers, opts = {}) {
   return new Promise((resolve, reject) => {
     const u = new URL(url);
+    // 识别到的错误帧（限流信封等）。与 postStream 一样要**当场中止**，
+    // 否则上游的「先回信封再沉默」会被计时器掐成无信息的网络错误。
+    let firstErr = null;
+    let rawAll = '';
     const req = https.request({
       hostname: u.hostname,
       path: u.pathname + u.search,
@@ -341,9 +348,38 @@ function post(url, body, headers, opts = {}) {
         buf += text;
         // 只有**真实内容**才算撤销排队计时器（空 ack 不算，见 hasPayload 注释）
         if (!sawContent && hasPayload(text)) { sawContent = true; clearContent(); }
+        // **错误信封要当场断流**（与 postStream 同一条纪律）：排队时上游
+        // 先回一帧限流信封（`code 10605`/`RESOURCE_LIMIT`），然后**永远沉默**。
+        // 不在这里认出来，就只能等 armContentDeadline 的 CONTENT_MS 把它掐成
+        // 「no content in …ms」——一个真实的限流被记成网络错误，
+        // 既丢了上游给的 retryAfterSeconds，又让用户白等 CONTENT_MS × 账号数。
+        if (!firstErr && !rawAll.length) {
+          for (const line of text.split('\n')) {
+            const t = line.trim();
+            if (!t.startsWith('data:')) continue;
+            const raw = t.slice(5).trim();
+            if (!raw || raw === '[DONE]') continue;
+            for (const inner of unwrap(raw)) {
+              let parsed = null;
+              try { parsed = JSON.parse(inner); } catch (e) { continue; }
+              const err = payloadError(parsed);
+              if (err) { firstErr = err; try { req.destroy(); } catch (e) { /* 已结束 */ } return; }
+            }
+          }
+        }
       });
-      res.on('end', () => { clearFb(); clearContent(); idle.clear(); buf += dec.end(); resolve({ status: res.statusCode, headers: res.headers, raw: buf }); });
-      res.on('error', (e) => { clearFb(); clearContent(); idle.clear(); reject(e); });
+      res.on('end', () => {
+        clearFb(); clearContent(); idle.clear();
+        buf += dec.end();
+        rawAll = buf;
+        resolve({ status: res.statusCode, headers: res.headers, raw: buf, firstErr });
+      });
+      res.on('error', (e) => {
+        clearFb(); clearContent(); idle.clear();
+        // 我们自己 destroy 造成的 error 不是失败：firstErr 才是真原因
+        if (firstErr) { resolve({ status: res.statusCode, headers: res.headers, raw: buf, firstErr }); return; }
+        reject(e);
+      });
     });
     // 计时器**从请求写出时开始**，不是从响应头开始：上游被限流时可能连响应头
     // 都不给，那种情况下 socket 空闲超时（600s）才会兜底，而客户端早就断了。

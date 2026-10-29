@@ -34,8 +34,13 @@ const fs = require('fs');
 // 必须在 require pool 之前设：单例是模块加载时按这个路径建的
 const TMP_STATE = path.join(os.tmpdir(), `dumate-qoder-throttle-${process.pid}.json`);
 process.env.DUMATE_POOL_STATE = TMP_STATE;
+// 排队重试预算。测试里**要非零**（否则 `send` 一轮都不重试，锁不住
+// 「挂起后快速轮询命中」这条用例）；6 秒是生产默认值，用例总耗时可控。
+process.env.DUMATE_QODER_QUEUE_PATIENCE_MS = '6000';
+// 重试间隔取默认 1500ms 会拖慢用例；压到 100ms，语义不变（只是让轮询更快）。
+process.env.DUMATE_QODER_QUEUE_STEP_MS = '100';
 
-const { classify, isThrottle, throttleRetryMs } = require('../src/upstream-errors');
+const { classify, isThrottle, throttleRetryMs, QUEUE_THROTTLE_COOLDOWN_MS } = require('../src/upstream-errors');
 const { createPool } = require('../src/pool');
 
 let failures = 0;
@@ -57,6 +62,13 @@ const THROTTLE_CALLCOUNT = 'qoder 403: {"code":"10605","message":"{\\"isQueued\\
 const THROTTLE_BIGQUEUE = 'qoder 403: {"code":"10605","message":"{\\"isQueued\\":true,\\"modelKey\\":\\"dfmodel\\",\\"queueCount\\":4697,\\"queueType\\":\\"p3\\",\\"retryAfterSeconds\\":30,\\"serviceAvailable\\":true,\\"subCode\\":\\"CALL_COUNT_LIMIT\\",\\"waitTime\\":7015}","subCode":"CALL_COUNT_LIMIT"}';
 const READ_IDLE = 'qoder upstream read idle (120000ms)';
 const MODEL_GONE = 'qoder 403: {"code":"403","message":"Model is not available for this user"}';
+// 2026-10-28 实测形态：**三层**信封。上游把限流信封又包了一层
+// （`code:"403"` 里再套 `code:"10605"`），于是内层引号是三倍转义
+// （`\\\\"modelKey\\\\"`）。旧判据 `\\?"` 只认零到一层，两个字段全匹配不到：
+// 时长取不到（退化 5 分钟基数）、modelKey 认不出（冷却退化成**账号级**，
+// 一个模型排队把整条通道封死）。这个向量直接取自 `data/requests.jsonl`
+// 对应的真实抓包，不要「整理」成两层——那正是它一直没被覆盖的原因。
+const THROTTLE_3LAYER = 'qoder 403: {"code":"403","message":"{\\"code\\":\\"10605\\",\\"message\\":\\"{\\\\\\"isQueued\\\\\\":true,\\\\\\"modelKey\\\\\\":\\\\\\"qfmodel\\\\\\",\\\\\\"queueCount\\\\\\":0,\\\\\\"queueType\\\\\\":\\\\\\"p3\\\\\\",\\\\\\"retryAfterSeconds\\\\\\":30,\\\\\\"serviceAvailable\\\\\\":false,\\\\\\"subCode\\\\\\":\\\\\\"RESOURCE_LIMIT\\\\\\",\\\\\\"waitTime\\\\\\":30}\\",\\"subCode\\":\\"RESOURCE_LIMIT\\"}"}';
 
 console.log('== 1. 限流识别 ==');
 check('RESOURCE_LIMIT 认得出', () => assert.ok(isThrottle(THROTTLE_RESOURCE)));
@@ -66,13 +78,34 @@ check('普通模型不可用不是限流', () => assert.ok(!isThrottle(MODEL_GON
 check('取 retryAfterSeconds → 30000ms', () => assert.strictEqual(throttleRetryMs(THROTTLE_RESOURCE), 30000));
 check('无 retryAfterSeconds 时优先 waitTime → 66000ms', () => assert.strictEqual(throttleRetryMs(THROTTLE_CALLCOUNT), 66000));
 check('取不到时长返回 null（不编默认值）', () => assert.strictEqual(throttleRetryMs(READ_IDLE), null));
+check('三层信封：retryAfterSeconds 仍取得到（旧判据在这里返回 null）', () => {
+  assert.ok(isThrottle(THROTTLE_3LAYER));
+  assert.strictEqual(throttleRetryMs(THROTTLE_3LAYER), 30000);
+});
+check('三层信封：modelKey 认得出 → 冷却按模型级（不封整条通道）', () => {
+  const c = classify({ status: 403, message: THROTTLE_3LAYER, model: 'qfmodel' });
+  assert.strictEqual(c.kind, 'soft');
+  assert.strictEqual(c.scope, 'model');
+  // RESOURCE_LIMIT（serviceAvailable:false）是**请求级随机排队**：实测照上游
+  // 给的 30 秒等下去并不保证放行（等 10s/30s 连测仍全部 stillThrottled），
+  // 而按 30 秒记账会让下一次本来能成的请求在 1~2ms 内被本地拒掉。
+  // 所以改用短冷却，**不采信** retryAfterSeconds。
+  assert.strictEqual(c.retryAfterMs, QUEUE_THROTTLE_COOLDOWN_MS);
+});
 
 console.log('');
 console.log('== 2. classify：限流进 soft，不进 breaker ==');
-check('403 + RESOURCE_LIMIT → soft 且带 retryAfterMs', () => {
+check('403 + RESOURCE_LIMIT → soft 且带短冷却（不采信上游 30s）', () => {
   const c = classify({ status: 403, message: THROTTLE_RESOURCE, model: 'dfmodel' });
   assert.strictEqual(c.kind, 'soft');
-  assert.strictEqual(c.retryAfterMs, 30000);
+  assert.strictEqual(c.retryAfterMs, QUEUE_THROTTLE_COOLDOWN_MS);
+});
+check('403 + CALL_COUNT_LIMIT → 仍按上游时长冷却（真配额，等久了会恢复）', () => {
+  // serviceAvailable:true 的 CALL_COUNT_LIMIT 与排队不同：它是真·调用配额，
+  // 上游给的 waitTime(66s) 是可信的，不能一并降级成短冷却。
+  const c = classify({ status: 403, message: THROTTLE_CALLCOUNT, model: 'dfmodel' });
+  assert.strictEqual(c.kind, 'soft');
+  assert.strictEqual(c.retryAfterMs, 66000);
 });
 check('502 + RESOURCE_LIMIT → soft（状态码不改变判据）', () => {
   assert.strictEqual(classify({ status: 502, message: THROTTLE_RESOURCE, model: 'dfmodel' }).kind, 'soft');
@@ -136,7 +169,10 @@ check('没有 retryAfterMs 时才回落基数（5 分钟）', () => {
 check('冷却中再次限流不延长（防堆厚）', () => {
   let now = 1_000_000;
   const pool = createPool({ file: null, now: () => now });
-  const cls = classify({ status: 403, message: THROTTLE_RESOURCE });
+  // 用 CALL_COUNT_LIMIT（按上游 66s 冷却）：时长够长，才测得出「不叠加」。
+  // RESOURCE_LIMIT 现在只给 5s 短冷却，`now += 5s` 正好让它过期，
+  // 续期是池的既有语义（守卫条件是 `until > now`），不是叠加。
+  const cls = classify({ status: 403, message: THROTTLE_CALLCOUNT });
   pool.noteError('qoder:1', cls);
   const until1 = pool.status('qoder:1').until;
   now += 5_000;
@@ -318,15 +354,19 @@ function resetCase(plan) {
     pool.revive('qoder:901');
   });
 
-  await checkAsync('排队挂起后等掉短冷却、重试同一账号 → 成功（不必两轮都无法命中）', async () => {
-    // 上游排队是**请求级随机**的（实测同一账号挂起一次后紧接着 5 次全成功），
-    // 所以「A 挂起 → B 挂起 → 等 5 秒 → 再打 A」应当能过。
+  await checkAsync('排队挂起后快速重试同一账号 → 成功（不在网关里干等冷却）', async () => {
+    // 2026-10-29 实测推翻了「等掉冷却再重试」的旧结论：
+    //   · 排队是**请求级随机**，照上游 retryAfterSeconds 等 30 秒并不保证放行
+    //     （等 10s / 30s 连测仍全部 stillThrottled）
+    //   · 而在网关里等，全部累加到用户感知上（实测首条请求因此耗到 27~35 秒）
+    // 新策略：**快速轮询几轮就交还客户端**。本用例锁定「挂起后仍能很快成功」，
+    // 且总耗时必须远小于旧的「等 5 秒冷却」路径。
     resetCase({ ta: ['readidle', 'ok'], tb: ['readidle'] });
     const t0 = Date.now();
     const r = await require('../src/qoder').send(payload, () => {}, { sessionKey: 'case-e' });
     const spent = Date.now() - t0;
     assert.strictEqual(r.status, 200);
-    assert.ok(spent >= 4000, '应先等掉排队冷却（约 5s），实际 ' + spent + 'ms');
+    assert.ok(spent < 4000, '应快速轮询命中，而不是干等冷却，实际 ' + spent + 'ms');
     const { pool } = require('../src/pool');
     pool.revive('qoder:901');
     pool.revive('qoder:902');
