@@ -258,16 +258,33 @@ const routes = [
   {
     // 生成一次登录所需的设备标识 + 授权链接。
     // 前端拿到后开浏览器；用户把回调地址粘回来，再调 /login/callback。
+    //
+    // **重登已有账号时必须复用它的旧指纹**（body.accountId）。设备标识一旦
+    // 参与登录就与账号绑定，换成新的等于「换设备」——TRAE 按设备限流，
+    // 而且新指纹的 deviceId 未必是 15 位派生数字（`ensureDevice` 事后会改，
+    // 那是补救不是正途）。2026-10-29 实测：账号 1 的 deviceId 是
+    // `684948195320048`（15 位），而 `newDeviceIds()` 产的是 32 位 hex。
     method: 'POST',
     path: '/login/url',
-    handler: async ({ res }) => {
-      const ids = login.newDeviceIds();
+    handler: async ({ res, body }) => {
+      const wantId = body && body.accountId;
+      const existing = wantId ? authStore.get(wantId) : null;
+      let ids;
+      let reused = false;
+      if (existing && existing.deviceId && existing.machineId) {
+        ids = { deviceId: existing.deviceId, machineId: existing.machineId };
+        reused = true;
+      } else {
+        ids = login.newDeviceIds();
+      }
       return sendJSON(res, 200, {
         ok: true,
         url: login.buildAuthUrl(ids),
         deviceId: ids.deviceId,
         machineId: ids.machineId,
-        // 提示：回调地址要原样粘回来
+        // 复用旧指纹时前端要提示「这是重登，不会换设备」
+        reuseDevice: reused,
+        accountId: existing ? existing.id : null,
         hint: '浏览器登录后跳到 127.0.0.1:18080（打不开是正常的），复制地址栏完整 URL。',
       });
     },
@@ -352,10 +369,34 @@ const routes = [
     handler: async ({ res, params, body }) => {
       const fields = {};
       if (body && body.enabled !== undefined) fields.enabled = !!body.enabled;
+      // 手动改昵称：上游 `GetUserInfo` 需要登录会话票据（我们只存了 access
+      // token，实测恒返回 20310「未登录」），所以平台上的新名字**取不到**。
+      // 重登时回调里的 ScreenName 才是唯一来源，但它可能是注册默认名。
+      // 因此留一个手动入口，让用户自己把显示名改对。
+      if (body && body.nickname !== undefined) {
+        const n = String(body.nickname || '').trim();
+        if (!n) return sendJSON(res, 400, { error: 'nickname 不能为空' });
+        fields.nickname = n;
+      }
       const a = authStore.patch(params[0], fields);
       if (!a) return sendJSON(res, 404, { error: '账号不存在' });
       try { require('../auth').audit('admin', 'traework_account_patch', params[0], JSON.stringify(fields)); } catch (e) { /* 审计失败不影响结果 */ }
       return sendJSON(res, 200, { ok: true, account: authStore.list().find((x) => x.id === a.id) });
+    },
+  },
+  {
+    // 从上游同步昵称（重登之后的兜底）。上游取不到时如实返回 ok:false，
+    // **不会把已有昵称清空**——见 auth.syncNickname 的注释。
+    method: 'POST',
+    path: '/accounts/:id/sync-nickname',
+    handler: async ({ res, params }) => {
+      const a = authStore.get(params[0]);
+      if (!a) return sendJSON(res, 404, { error: '账号不存在' });
+      const r = await authStore.syncNickname(a);
+      if (r.changed) {
+        try { require('../auth').audit('admin', 'traework_nickname_sync', params[0], r.nickname); } catch (e) { /* 忽略 */ }
+      }
+      return sendJSON(res, 200, { ok: r.ok, changed: r.changed, nickname: r.nickname, error: r.error, account: authStore.list().find((x) => x.id === a.id) });
     },
   },
 ];

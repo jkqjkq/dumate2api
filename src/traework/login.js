@@ -143,17 +143,37 @@ async function exchangeAndSave(opts) {
     lastError: '',
   };
 
-  // 补用户信息（失败不阻断：uid 缺失时用 deviceId 兜底做标识）
-  if (!rec.uid) {
-    try {
-      const u = await authStore.fetchUserInfo({ accessToken, apiHost: host });
-      if (u) {
-        if (u.uid) rec.uid = u.uid;
-        if (u.nickname) rec.nickname = rec.nickname || u.nickname;
-        if (u.email) rec.email = u.email;
-      }
-    } catch (e) { /* 忽略 */ }
-  }
+  // 补用户信息。**不只是「uid 缺失时兜底」**（2026-10-29 修）：
+  //
+  // 早先这段只在 `!rec.uid` 时才跑，且昵称用 `rec.nickname || u.nickname`
+  // （回调带了就绝不覆盖）。后果是**用户在 TRAE 平台改了昵称，重登后页面
+  // 还是旧的**——回调里的 ScreenName 可能是注册时的默认名 `用户<手机号>`，
+  // 而 GetUserInfo 才是当前值；两者不一致时永远取前者。
+  //
+  // 现在的口径：**上游实时值优先**，回调值只作兜底。
+  // `upsert` 是 `{...旧, ...新}`，所以**绝不能把空串写进去**——那会抹掉已有
+  // 昵称（重登时回调不带昵称就会这样）。故只在取到非空值时才写入字段。
+  try {
+    const u = await authStore.fetchUserInfo({ accessToken, apiHost: host });
+    if (u) {
+      if (u.uid) rec.uid = u.uid;
+      if (u.nickname) rec.nickname = u.nickname;
+      if (u.email) rec.email = u.email;
+    }
+  } catch (e) { /* 忽略：取不到就用回调值 */ }
+
+  // uid 是 `upsert` 的匹配键。**缺了它会新建一条重复账号**（`findIndex` 按
+  // uid/id 匹配，两者都没有就落到「新增」分支），用户的账号池里就会凭空多出
+  // 一个同名同号的新条目。
+  //
+  // 兜底：access token 是 JWT，`data.id` 就是 uid（实测与回调的 UserID 一致）。
+  // 这比 `fetchUserInfo` 可靠——后者需要登录会话票据，我们只存 access token，
+  // 实测恒回 401/20310。
+  if (!rec.uid) rec.uid = authStore.jwtUid(accessToken);
+
+  // 空昵称/邮箱不要写进记录：`upsert` 会把它盖到旧值上
+  if (!rec.nickname) delete rec.nickname;
+  if (!rec.email) delete rec.email;
 
   const saved = authStore.upsert(rec);
   return { ok: true, account: authStore.list().find((a) => a.id === saved.id) };
