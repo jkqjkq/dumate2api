@@ -49,7 +49,7 @@ function save(data) {
   // 权限收紧（fileperm.js）：token 与明文手机号只留在当前用户可读的文件里
   fs.writeFileSync(tmp, JSON.stringify(data, null, 2), { encoding: 'utf8', mode: 0o600 });
   fileperm.harden(tmp);
-  fs.renameSync(tmp, target);
+  filelock.renameAtomic(tmp, target);
   cache = { mtime: fs.statSync(target).mtimeMs, data };
   return data;
 }
@@ -197,8 +197,33 @@ function patch(id, fields) {
   });
 }
 
-/** token 是否在 skewMs 内过期 */
-function needsRefresh(a, skewMs = 300000) {
+/**
+ * token 是否该续期了（在 skewMs 内过期就续）。
+ *
+ * **提前量必须按小时算，不能按分钟**（2026-10-29 修，账号报废级）。
+ *
+ * 原值是 5 分钟。它的隐含假设是「反正每个请求都会走到这里，快到期时顺手续上」——
+ * 但那只在**有请求**的时候成立。实测后果：
+ *
+ *   · 账号 1 的 access token `iat 10-21 14:07 / exp 10-28 14:07`（7 天有效）
+ *   · 它最后一次成功请求是 10-28 08:20，之后 6 小时没有流量
+ *   · 于是 5 分钟窗口里一个请求都没有 → 没人触发续期
+ *   · 下次有人来（10-29 13:10，已过期 **23 小时**）才第一次换票
+ *   · 上游回 `401 INVALID_REFRESH_TOKEN` / `invalid_grant:令牌未激活或缺少用户ID`
+ *
+ * 也就是说：**refresh token 只在 access token 还有效时可用**，过期太久 grant
+ * 直接被作废，7 天的额度全废，只能重新登录。同一天同在跑的另一账号（10-28
+ * 16:36 到期）因为当时有请求，在到期这一刻续上了，一直健康——差别只在
+ * 「到期时有没有流量」，这就是 5 分钟窗口的随机性风险。
+ *
+ * 改成 24 小时：任何一次请求都会提前一天续上，不再依赖「到期那一刻恰好有请求」。
+ * 与 `traework/auth.js` 的口径一致（那边一直是 24 小时，所以 TRAE 从没出过这种事）。
+ * 代价是每天多一次换票请求——可忽略，而账号报废要人工重登。
+ *
+ * 注意上游**允许**同一 RT 重复使用（实测并发 3 次全部 200，且各自轮换出新 RT），
+ * 所以提前续期不会消耗掉别的进程手里的 RT。
+ */
+function needsRefresh(a, skewMs = 24 * 3600 * 1000) {
   if (!a || !a.expiresAt) return true;
   return Date.now() + skewMs >= a.expiresAt;
 }

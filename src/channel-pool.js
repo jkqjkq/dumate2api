@@ -173,6 +173,29 @@ function noteSuccess(channel, id) {
 }
 
 /**
+ * 各通道「免费额度重置」的本地时刻（小时）。402（额度耗尽）的**硬冷却必须
+ * 结束在这个点**，不能用池的默认值。
+ *
+ * 池的默认是次日 **04:00**（`pool.msUntilNext4AM`），那是给**搭子**的——
+ * 它的签到窗口在凌晨 4 点。而**千问的每日免费额度是 00:00 自动重置**
+ * （实测：`wallet.valid_to` 是 `T00:00:00+08:00`，且当天零请求的账号次日也
+ * 恢复满额）。照 04:00 冷却会让千问账号在 00:00~04:00 这 4 小时里明明有满额
+ * 可用，却被本地直接跳过——实测 2026-10-29：账号 2 的 402 把冷却设到次日
+ * 04:00，而它 00:00 就会回满 100 积分。
+ *
+ * 不在表里的通道（搭子/dumate、TRAE、Qoder）沿用池的默认。
+ */
+const QUOTA_RESET_HOUR = { qwenwork: 0 };
+
+/** 下一个「整点 hour」距现在多少毫秒（今天是 hour 点且已过，就顺延到明天） */
+function msUntilHour(hour, now = Date.now()) {
+  const d = new Date(now);
+  const target = new Date(d.getFullYear(), d.getMonth(), d.getDate(), hour, 0, 0, 0);
+  if (target.getTime() <= now) target.setDate(target.getDate() + 1);
+  return Math.max(1000, target.getTime() - now);
+}
+
+/**
  * 失败喂池。info 与 web-pool.markFailure 同形：字符串/Error 按网络类，
  * 或 { status, code, message, model } 交给 classify 定类别。
  * 池动作（软冷却/硬冷却/模型负缓存/防误杀/熔断）由类别决定，这里不判。
@@ -182,6 +205,11 @@ function noteError(channel, id, info) {
     const cls = (typeof info === 'string' || info instanceof Error)
       ? classify({ status: 0, message: info instanceof Error ? info.message : info })
       : classify(info);
+    // 额度耗尽（hard）的冷却时长按**该通道的额度重置时刻**给，见 QUOTA_RESET_HOUR
+    const resetHour = QUOTA_RESET_HOUR[channel];
+    if (cls && cls.kind === 'hard' && cls.durationMs == null && resetHour != null) {
+      cls.durationMs = msUntilHour(resetHour);
+    }
     pool.noteError(uidOf(channel, id), cls);
   } catch (e) { /* 喂池失败不影响请求 */ }
 }

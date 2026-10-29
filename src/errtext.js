@@ -68,6 +68,19 @@ const OWN_TIMEOUT = [
 ];
 
 /**
+ * 额度类：402 是「这个账号的免费/订阅额度用完了」，不是故障。
+ *
+ * 上游给它配的 message 是 `Error in upstream response`——**与 400（请求格式
+ * 错）完全相同**（见 `qwenwork/index.js` 的 `retryable` 注释），所以只能按
+ * 402 这个状态码认，不能按文案认。
+ *
+ * 不翻译的后果（2026-10-29 用户报）：账号卡上显示
+ * 「qwenwork 402: Error in upstream response」，看起来像通道坏了，
+ * 而真相只是这个号的额度用完了、已经自动切到别的号。
+ */
+const QUOTA_ERROR = /^qwenwork\s+402\b/i;
+
+/**
  * 翻译一条错误。匹配不到就**原样返回**（含空串）。
  *
  * @param {unknown} msg 原始错误串或 Error
@@ -84,6 +97,10 @@ function explainError(msg) {
   for (const [re, text] of OWN_TIMEOUT) {
     if (s.includes(text)) continue;
     if (re.test(s)) return `${text}（${s}）`;
+  }
+  if (QUOTA_ERROR.test(s)) {
+    const text = '额度已用完（该账号暂停使用，次日 00:00 重置后自动恢复）';
+    return s.includes(text) ? s : `${text}（${s}）`;
   }
   for (const [re, text] of NET_ERRORS) {
     if (s.includes(text)) continue;
