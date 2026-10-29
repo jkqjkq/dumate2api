@@ -39,8 +39,14 @@ process.env.DUMATE_POOL_STATE = TMP_STATE;
 process.env.DUMATE_QODER_QUEUE_PATIENCE_MS = '6000';
 // 重试间隔取默认 1500ms 会拖慢用例；压到 100ms，语义不变（只是让轮询更快）。
 process.env.DUMATE_QODER_QUEUE_STEP_MS = '100';
+// 选号顺序：本脚本多条例程按「先打 901、失败再换 902」断言，依赖**确定性**选号。
+// 生产默认已改为加权抽签 + 防撞号窗口（更快命中健康号，但顺序是随机的）。
+// 这里关回轮询——本脚本要验的是限流分类与冷却，不是选号分布；顺序随机化会让
+// 「901 应进软冷却」这类断言时灵时不灵。
+process.env.DUMATE_POOL_PICK_MODE = 'rr';
+process.env.DUMATE_POOL_PICK_GAP_MS = '0';
 
-const { classify, isThrottle, throttleRetryMs, QUEUE_THROTTLE_COOLDOWN_MS } = require('../src/upstream-errors');
+const { classify, isThrottle, throttleRetryMs, QUEUE_THROTTLE_COOLDOWN_MS, isDeterministic } = require('../src/upstream-errors');
 const { createPool } = require('../src/pool');
 
 let failures = 0;
@@ -370,6 +376,44 @@ function resetCase(plan) {
     const { pool } = require('../src/pool');
     pool.revive('qoder:901');
     pool.revive('qoder:902');
+  });
+
+  // ── 5. 确定性 vs 瞬时 ────────────────────────────────────────────────
+  // 「重发同一份字节必然得到同一个失败」的错误不该让客户端重试，也不该让网关
+  // 在换号前白等；反过来，限流是瞬时的，**绝不能**被判成确定性——否则客户端
+  // 不再退避重试，用户看到的就是「点了没反应」（这正是上游条件明明写着
+  // retryAfterSeconds 却没人去等的那类故障）。
+  check('413 / 404 / 400 / 422 判为确定性', () => {
+    for (const s of [400, 404, 413, 415, 422]) {
+      assert.strictEqual(isDeterministic(s, 'something'), true, `status ${s} 应判确定性`);
+    }
+  });
+
+  check('「模型不在套餐」文案判为确定性（哪怕状态码是 403）', () => {
+    assert.strictEqual(isDeterministic(403, 'Model is not available for this user'), true);
+    assert.strictEqual(isDeterministic(403, 'model not found'), true);
+  });
+
+  check('请求体过大判为确定性', () => {
+    assert.strictEqual(isDeterministic(0, 'Payload Too Large'), true);
+  });
+
+  check('限流**不能**被判成确定性（哪怕是 403 信封形态）', () => {
+    assert.strictEqual(isDeterministic(403, THROTTLE_RESOURCE), false, 'RESOURCE_LIMIT 被误判成确定性');
+    assert.strictEqual(isDeterministic(403, THROTTLE_CALLCOUNT), false, '排队被误判成确定性');
+    assert.strictEqual(isDeterministic(429, 'rate limited'), false, '429 被误判成确定性');
+  });
+
+  check('网络层失败与 5xx 不算确定性（瞬时，换号/重试有意义）', () => {
+    assert.strictEqual(isDeterministic(0, 'ECONNRESET'), false);
+    assert.strictEqual(isDeterministic(500, 'internal error'), false);
+    assert.strictEqual(isDeterministic(502, 'bad gateway'), false);
+  });
+
+  check('classify 输出带 deterministic 标志', () => {
+    assert.strictEqual(classify({ status: 413, message: 'big' }).deterministic, true);
+    assert.strictEqual(classify({ status: 403, message: THROTTLE_RESOURCE }).deterministic, false);
+    assert.strictEqual(classify(null).deterministic, false, 'null 输入不该抛错');
   });
 
   session.ensureAccount = async (store, acc) => acc;

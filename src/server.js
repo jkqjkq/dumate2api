@@ -376,7 +376,15 @@ async function handleDirectChannel(req, res, payload, route, ctx) {
   } catch (e) {
     const status = e.statusCode || 502;
     logRequest(req, res, startedAt, info, status, null, { error: e.message });
-    return sendJSON(res, status, { error: { message: e.message, type: 'api_error' } });
+    // 429 必须带 Retry-After：上游限流时**自己说了要等多久**
+    // （retryAfterSeconds / waitTime，见 upstream-errors.throttleRetryMs）。
+    // 不带给客户端，它就只能盲退避——退不够会再撞一次限流（加深冷却），
+    // 退过头则白白拉长用户等待。Codex / Claude Code 都认这个头。
+    const ra = Number(e.retryAfterMs);
+    const extra = status === 429 && ra > 0
+      ? { 'Retry-After': String(Math.ceil(ra / 1000)) }
+      : null;
+    return sendJSON(res, status, { error: { message: e.message, type: 'api_error' } }, extra);
   }
 }
 
@@ -605,11 +613,12 @@ function collectAndFinish(upstreamRes, onComplete, maxBytes = MAX_UPSTREAM_BYTES
   upstreamRes.on('error', finish);
 }
 
-function sendJSON(res, statusCode, data) {
+function sendJSON(res, statusCode, data, extraHeaders) {
   const body = JSON.stringify(data);
   res.writeHead(statusCode, {
     'Content-Type': 'application/json',
     ...(res._cors || {}),
+    ...(extraHeaders || {}),
     'Content-Length': Buffer.byteLength(body)
   });
   res.end(body);

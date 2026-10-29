@@ -17,6 +17,7 @@ const constants = require('./constants');
 const wasmPath = require('./wasm-path');
 const credits = require('./credits');
 const { normalizeError } = require('../errtext');
+const { isThrottle } = require('../upstream-errors');
 // 选号接缝（集成阶段）：冷却/熔断/粘性/在途帽统一走池状态机。
 // 通道在池里的 uid 键位 = 'qwenwork:<id>'（channel-pool.js 统一裁决）。
 const channelPool = require('../channel-pool');
@@ -263,7 +264,14 @@ async function send(payload, onChunk, opts = {}) {
       // 失败喂池：类别判定在 upstream-errors.classify，池动作按类别分发
       channelPool.noteError(CHANNEL, account.id, { status: code, message: e.message, model });
       markFailure(account, e.message);
-      errors.push({ account: account.nickname || account.uid || account.id, status: code || '-', error: e.message });
+      // 限流要单独标出来：千问的限流是 **HTTP 403 + 信封 10605**，只看状态码
+      // 会把它和「签名错/无权限」混为一谈（isThrottle 才是判据）。
+      errors.push({
+        account: account.nickname || account.uid || account.id,
+        status: code || '-',
+        error: e.message,
+        throttled: isThrottle(e.message),
+      });
       // 流式已经吐过帧，客户端收到了半截输出，再换号会输出两遍
       if (e.sent) throw e;
       if (!retryable(code, e.message)) throw e;
@@ -276,8 +284,30 @@ async function send(payload, onChunk, opts = {}) {
     }
   }
 
-  const err = new Error(`千问办公所有账号均失败：${errors.map((x) => `${x.account}(${x.status})`).join('；')}`);
-  err.statusCode = Number(errors[errors.length - 1].status) || 502;
+  const brief = (x) => `${x.account}(${x.status}${
+    String(x.error || '').trim() ? `: ${String(x.error).replace(/\s+/g, ' ').trim().slice(0, 120)}` : ''
+  })`;
+  const err = new Error(`千问办公所有账号均失败：${errors.map(brief).join('；')}`);
+  // 全部失败原因都是**限流**时回 429，与 Qoder 通道同口径。
+  //
+  // 为什么必须在这里翻译：千问上游的限流回的是 **HTTP 403 + 信封 code 10605**，
+  // 把 403 原样回给客户端，Codex / Claude Code 会当成硬失败（对 403 只报一次错、
+  // 不退避重试），用户看到的就是「点了没反应」——而上游的条件其实是「稍后再来」，
+  // 其信封里还带了自己的 retryAfterSeconds。429 才能让客户端自动退避重试。
+  if (errors.length && errors.every((x) => x.throttled)) {
+    err.statusCode = 429;
+    err.throttled = true;
+    // 带上最近一次限流的冷却时刻 → server.js 会翻译成 Retry-After 头，
+    // 客户端退避时长才能对齐上游节奏，而不是盲退避。
+    try {
+      const av = channelPool.availability(CHANNEL, usable, { model });
+      if (av && av.softOnly && av.nextInMs > 0) err.retryAfterMs = av.nextInMs;
+    } catch (e) { /* 取不到就不带头，429 语义本身仍然正确 */ }
+  } else {
+    // 状态码 0 = 网络层失败（连接被拒/中断/超时）。映射成 502 让客户端知道是
+    // 上游不可用，而不是把 0 原样回出去（0 会被某些客户端当成「无错误」）。
+    err.statusCode = Number(errors[errors.length - 1].status) || 502;
+  }
   throw err;
 }
 
