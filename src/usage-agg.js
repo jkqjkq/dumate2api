@@ -265,7 +265,7 @@ function create(opts = {}) {
         });
         const tmp = `${file}.tmp`;
         fs.writeFileSync(tmp, payload, 'utf8');
-        fs.renameSync(tmp, file);
+        filelock.renameAtomic(tmp, file);
       });
       dirty = false;
       return true;

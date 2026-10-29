@@ -20,6 +20,7 @@ const https = require('https');
 const fs = require('fs');
 const path = require('path');
 const constants = require('./constants');
+const filelock = require('../filelock');
 
 const SITE_ORIGIN = 'https://qwenwork.cn';
 const WALLETS_PATH = '/user/wallets';
@@ -85,7 +86,7 @@ function writePeak(o) {
     fs.mkdirSync(dataDir(), { recursive: true });
     const tmp = peakPath() + '.tmp';
     fs.writeFileSync(tmp, JSON.stringify(o));
-    fs.renameSync(tmp, peakPath());
+    filelock.renameAtomic(tmp, peakPath());
   } catch (e) { /* 峰值写不进不影响主流程 */ }
 }
 

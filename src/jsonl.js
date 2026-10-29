@@ -6,6 +6,7 @@
 // 把当前文件归档为 `.old`（保留一代，新的 .old 直接覆盖旧的），再追加。
 // requests.jsonl 自带 32MB 轮转（reqlog.js），不在此列。
 const fs = require('fs');
+const filelock = require('./filelock');
 
 const DEFAULT_MAX_BYTES = 16 * 1024 * 1024;
 
@@ -15,7 +16,7 @@ function rotateIfNeeded(file, maxBytes) {
     if (st.size < maxBytes) return;
     const prev = `${file}.old`;
     try { fs.unlinkSync(prev); } catch (e) { /* 还没有 .old */ }
-    fs.renameSync(file, prev);
+    filelock.renameAtomic(file, prev);
   } catch (e) { /* 文件还不存在 */ }
 }
 

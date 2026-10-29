@@ -8,6 +8,7 @@
 // 所以出错只吞掉。
 const fs = require('fs');
 const path = require('path');
+const filelock = require('./filelock');
 
 const ROOT = path.resolve(__dirname, '..');
 const LOG_DIR = process.env.DUMATE_ADMIN_DATA || path.join(ROOT, 'data');
@@ -34,7 +35,7 @@ function rotateIfNeeded(file) {
     if (st.size < MAX_BYTES) return;
     const prev = `${file}.1`;
     try { fs.unlinkSync(prev); } catch (e) { /* 不存在 */ }
-    fs.renameSync(file, prev);
+    filelock.renameAtomic(file, prev);
   } catch (e) { /* 文件还不存在 */ }
 }
 

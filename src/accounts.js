@@ -43,7 +43,7 @@ function save(data) {
   // 至少把文件收窄到当前用户，不让同机其他账户直接读到
   fs.writeFileSync(tmp, JSON.stringify(data, null, 2), { encoding: 'utf8', mode: 0o600 });
   fileperm.harden(tmp);
-  fs.renameSync(tmp, target);
+  filelock.renameAtomic(tmp, target);
   cache = { mtime: mtimeOf(), data };
   return data;
 }

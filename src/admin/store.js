@@ -3,6 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const fileperm = require('../fileperm');
 const jsonl = require('../jsonl');
+const filelock = require('../filelock');
 
 const ROOT = path.resolve(__dirname, '..', '..');
 const DATA_DIR = process.env.DUMATE_ADMIN_DATA || path.join(ROOT, 'data');
@@ -33,7 +34,7 @@ function writeJSON(name, data) {
   const tmp = `${target}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(data, null, 2), { encoding: 'utf8', mode: 0o600 });
   fileperm.harden(tmp);
-  fs.renameSync(tmp, target);
+  filelock.renameAtomic(tmp, target);
   return data;
 }
 

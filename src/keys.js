@@ -44,7 +44,7 @@ function save(data) {
   // 0600，Windows 收紧目录 ACL（每进程一次）
   fs.writeFileSync(tmp, JSON.stringify(data, null, 2), { encoding: 'utf8', mode: 0o600 });
   fileperm.harden(tmp);
-  fs.renameSync(tmp, target);
+  filelock.renameAtomic(tmp, target);
   cache = { mtime: mtimeOf(), data };
   return data;
 }

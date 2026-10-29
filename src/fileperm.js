@@ -12,10 +12,22 @@
 // 加固顺序必须是「先授予、后断继承」：反过来会把所有人（包括当前用户）
 // 关在门外。grant 用 (OI)(CI) 让 ACE 传到文件与子目录。
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
 
 const hardenedDirs = new Set();
+
+// os.tmpdir() 不做目录收紧：测试的池状态文件落在 Temp，而 Temp 有上万个
+// 文件，icacls 的 (OI)(CI) ACE 传播要数秒——正好卡在「tmp 已写、rename
+// 未做」的窗口里，rename 稳定 EPERM，锁文件孤儿化后整个进程的写盘级联
+// 超时（实测 revive 20s 后仍失败，test/verify-qoder-throttle.js 六连败即此）。
+// Temp 也不是凭证目录，收紧它纯属误伤。
+function isTempDir(dir) {
+  try {
+    return path.resolve(dir).toLowerCase() === path.resolve(os.tmpdir()).toLowerCase();
+  } catch (e) { return false; }
+}
 
 function chmod0600(file) {
   try { fs.chmodSync(file, 0o600); } catch (e) { /* 尽力而为 */ }
@@ -40,8 +52,12 @@ function hardenDirWindows(dir) {
  * Windows 上顺带收紧所在目录（每进程一次）。
  */
 function harden(file) {
-  if (process.platform === 'win32') hardenDirWindows(path.dirname(file));
-  else chmod0600(file);
+  if (process.platform === 'win32') {
+    const dir = path.dirname(file);
+    if (!isTempDir(dir)) hardenDirWindows(dir);
+  } else {
+    chmod0600(file);
+  }
 }
 
 module.exports = { harden };

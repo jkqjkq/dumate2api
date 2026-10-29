@@ -10,6 +10,7 @@
 // 两个进程，所以读盘按 mtime 失效而不是只在启动时读一次——否则管理端改完
 // 必须重启网关才生效，界面无法解释。
 const fs = require('fs');
+const filelock = require('./filelock');
 const path = require('path');
 
 const DATA_DIR = process.env.DUMATE_ADMIN_DATA || path.resolve(__dirname, '..', 'data');
@@ -121,7 +122,7 @@ function save(patch) {
   const target = filePath();
   const tmp = `${target}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(next, null, 2), 'utf8');
-  fs.renameSync(tmp, target);
+  filelock.renameAtomic(tmp, target);
   cache = { at: Date.now(), mtime: mtimeOf(), data: next };
   return next;
 }
